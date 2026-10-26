@@ -47,9 +47,10 @@ describe("Raft manifest", () => {
     expect(RAFT_MANIFEST_PATH).toBe("/.well-known/raft-agent-manifest.json");
     expect(RAFT_CALLBACK_PATH).toBe("/auth/raft/callback");
   });
-  test("lists every catalogue action plus the meta actions", () => {
+  test("lists every catalogue action except the owner-only ones, plus the meta actions", () => {
     const names = m.actions.map((a: any) => a.name).sort();
-    expect(names).toEqual([...ACTION_NAMES, ...AGENT_META_ACTIONS].sort());
+    expect(names).toEqual([...ACTION_NAMES.filter((n) => n !== "remove_account"), ...AGENT_META_ACTIONS].sort());
+    expect(names).not.toContain("remove_account");
   });
   test("each action posts to the agent action prefix", () => {
     for (const a of m.actions) {
@@ -97,8 +98,8 @@ describe("Raft manifest", () => {
 
 describe("isAgentActionName", () => {
   test("catalogue + meta, nothing else", () => {
-    for (const n of [...ACTION_NAMES, "whoami", "approval_status"]) expect(isAgentActionName(n)).toBe(true);
-    for (const n of ["__proto__", "hasOwnProperty", "approve", "decide_approval", ""]) expect(isAgentActionName(n)).toBe(false);
+    for (const n of [...ACTION_NAMES.filter((n) => n !== "remove_account"), "whoami", "approval_status"]) expect(isAgentActionName(n)).toBe(true);
+    for (const n of ["__proto__", "hasOwnProperty", "approve", "decide_approval", "", "remove_account"]) expect(isAgentActionName(n)).toBe(false);
   });
 });
 

@@ -397,5 +397,24 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
     });
   }
 
-  return { status, list_chats, unread_summary, read_chat, search_messages, draft_reply, send_message, react, mark_read, archive };
+  /** Owner-only (the cloud refuses agents). Removes the account's bridge login, like Beeper's "Remove account". */
+  async function remove_account(p: ActionParams<"remove_account">, ctx: RequestContext = {}): Promise<Outcome<ActionResult<"remove_account">>> {
+    return guard(async () => {
+      const enc = encodeURIComponent;
+      const raw = must(await client.get(`/v1/accounts/${enc(p.accountID)}`, callOpts(ctx)));
+      const acc = mapAccount(raw);
+      const bridgeID = isObj(raw) && isObj(raw.bridge) && typeof raw.bridge.id === "string" ? raw.bridge.id : null;
+      const loginID = isObj(raw) && typeof raw.loginID === "string" ? raw.loginID : null;
+      if (!acc?.removable || !bridgeID || !loginID) return err("NOT_ALLOWED", "This account can't be removed from J-Inbox. Use the Beeper app.");
+      const login = must(await client.get(`/v1/bridges/${enc(bridgeID)}/logins/${enc(loginID)}`, callOpts(ctx)));
+      const scopes: unknown[] = isObj(login) && Array.isArray(login.removeScopes) ? login.removeScopes : [];
+      const scope = scopes.includes("all-devices") ? "all-devices" : scopes.includes("current-device") ? "current-device" : null;
+      if (!scope) return err("NOT_ALLOWED", "Beeper does not allow removing this account here. Use the Beeper app.");
+      const out = must(await client.write("POST", `/v1/bridges/${enc(bridgeID)}/logins/${enc(loginID)}/remove`, { scope }, callOpts(ctx)));
+      const affected = isObj(out) && Array.isArray(out.affectedAccountIDs) ? out.affectedAccountIDs.filter((x: unknown): x is string => typeof x === "string" && x.length > 0 && x.length <= 256) : [];
+      return { ok: true, data: { accountID: p.accountID, removed: true as const, scope, affectedAccountIDs: (affected.length ? affected : [p.accountID]).slice(0, 50) } };
+    });
+  }
+
+  return { status, list_chats, unread_summary, read_chat, search_messages, draft_reply, send_message, react, mark_read, archive, remove_account };
 }

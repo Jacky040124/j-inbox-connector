@@ -23,6 +23,7 @@ import {
   type Schema,
 } from "./schema.ts";
 import {
+  MAX_ACCOUNTS,
   MAX_CURSOR_LENGTH,
   MAX_FILTER_IDS,
   MAX_PAGE_LIMIT,
@@ -60,6 +61,8 @@ export interface ActionDef<P extends Shape, R> {
   readonly write: boolean;
   /** Agents must get the owner's approval before this runs. Humans in the web UI do not. */
   readonly needsApprovalForAgents: boolean;
+  /** Only the owner in the web page may run it: never in the agent manifest, refused for agents. */
+  readonly humanOnly?: boolean;
   /** Result is sent as `res` (metadata) followed by `chunk` frames. */
   readonly streamed: boolean;
   readonly timeoutMs: number;
@@ -294,6 +297,21 @@ export const ACTIONS = {
     timeoutMs: REQUEST_TIMEOUT_MS,
     rateLimitPerMinute: 60,
     beeper: "POST /v1/chats/{chatID}/archive",
+  }),
+
+  remove_account: define({
+    description: "Remove a chat account (sign Beeper out of that network). Owner only, from the web page.",
+    params: object({ accountID }),
+    paramDocs: { accountID: "accountID from status.accounts (removable ones only)" },
+    defaults: {},
+    result: object({ accountID, removed: literal(true), scope: enumOf(["current-device", "all-devices"] as const), affectedAccountIDs: array(accountID, { max: MAX_ACCOUNTS }) }),
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    rateLimitPerMinute: 10,
+    beeper: "GET /v1/accounts/{accountID}, GET /v1/bridges/{bridgeID}/logins/{loginID}, POST /v1/bridges/{bridgeID}/logins/{loginID}/remove",
   }),
 
   get_media: define({

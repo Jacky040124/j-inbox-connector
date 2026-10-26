@@ -120,8 +120,11 @@ export const AGENT_META_ACTIONS = Object.keys(AGENT_META) as (keyof typeof AGENT
 export type AgentMetaAction = keyof typeof AGENT_META;
 export type AgentActionName = ActionName | AgentMetaAction;
 
+/** Catalogue actions agents may call: everything except the owner-only ones. */
+export const AGENT_CATALOGUE_ACTIONS = ACTION_NAMES.filter((n) => ACTIONS[n].humanOnly !== true);
+
 export function isAgentActionName(v: unknown): v is AgentActionName {
-  return typeof v === "string" && (Object.prototype.hasOwnProperty.call(ACTIONS, v) || Object.prototype.hasOwnProperty.call(AGENT_META, v));
+  return typeof v === "string" && ((Object.prototype.hasOwnProperty.call(ACTIONS, v) && ACTIONS[v as ActionName].humanOnly !== true) || Object.prototype.hasOwnProperty.call(AGENT_META, v));
 }
 
 /** What /api/raft/actions/get_media returns to agents (the CLI handles JSON, not raw bytes). */
@@ -298,7 +301,7 @@ export function canonicalOrigin(origin: string): string {
 export function buildRaftManifest(opts: { origin: string; service: string; name?: string }) {
   const origin = canonicalOrigin(opts.origin);
   const actions: RaftManifestAction[] = [];
-  for (const name of ACTION_NAMES) {
+  for (const name of AGENT_CATALOGUE_ACTIONS) {
     const def = ACTIONS[name];
     const action: RaftManifestAction = {
       name,

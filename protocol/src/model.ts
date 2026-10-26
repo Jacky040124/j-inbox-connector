@@ -60,6 +60,12 @@ export const account = object({
   accountID,
   network: networkName,
   status: enumOf(ACCOUNT_STATUSES),
+  /** Who the owner is on that network (Beeper's user displayText, full name or username). */
+  name: optional(string({ min: 1, max: MAX_NAME_LENGTH })),
+  /** Beeper's human-readable status, e.g. why a reconnect is needed. */
+  statusText: optional(string({ min: 1, max: 200 })),
+  /** The owner can remove it from the web page (a bridge login; not the Beeper account itself). */
+  removable: optional(boolean()),
 });
 export type Account = Infer<typeof account>;
 

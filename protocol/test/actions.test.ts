@@ -12,13 +12,17 @@ import { MAX_PAGE_LIMIT, MAX_SEND_TEXT_LENGTH } from "../src/limits.ts";
 import { account, chat, chatID, message } from "./fixtures/examples.ts";
 import { parse } from "../src/schema.ts";
 
-const EXPECTED = ["status", "list_chats", "unread_summary", "read_chat", "search_messages", "draft_reply", "send_message", "react", "mark_read", "archive", "get_media"];
+const EXPECTED = ["status", "list_chats", "unread_summary", "read_chat", "search_messages", "draft_reply", "send_message", "react", "mark_read", "archive", "remove_account", "get_media"];
 
 describe("catalogue", () => {
   test("has exactly the agreed actions", () => expect([...ACTION_NAMES].sort() as string[]).toEqual([...EXPECTED].sort()));
   test("write flags", () => {
     const writes = ACTION_NAMES.filter((n) => ACTIONS[n].write).sort();
-    expect(writes).toEqual(["archive", "draft_reply", "mark_read", "react", "send_message"]);
+    expect(writes).toEqual(["archive", "draft_reply", "mark_read", "react", "remove_account", "send_message"]);
+  });
+  test("human-only actions: just remove_account, and never one that agents could get approved", () => {
+    expect(ACTION_NAMES.filter((n) => ACTIONS[n].humanOnly === true)).toEqual(["remove_account"]);
+    for (const n of ACTION_NAMES) if (ACTIONS[n].humanOnly) expect(ACTIONS[n].needsApprovalForAgents).toBe(false);
   });
   test("approval flags: send/react/mark_read/archive need approval for agents, draft_reply does not", () => {
     const approval = ACTION_NAMES.filter((n) => ACTIONS[n].needsApprovalForAgents).sort();
@@ -69,6 +73,7 @@ const VALID: Record<ActionName, unknown[]> = {
   react: [{ chatID, messageID: "m-1", reactionKey: "👍" }],
   mark_read: [{ chatID }, { chatID, messageID: "m-1" }, { chatID, read: false }],
   archive: [{ chatID }, { chatID, archived: false }],
+  remove_account: [{ accountID: "whatsapp" }, { accountID: "local-whatsapp_ba_x" }],
   get_media: [{ url: "mxc://beeper.local/abc" }, { url: "localmxc://local-whatsapp/xyz" }],
 };
 
@@ -83,6 +88,7 @@ const INVALID: Record<ActionName, unknown[]> = {
   react: [{ chatID, messageID: "m-1" }, { chatID, messageID: "m-1", reactionKey: "" }, { chatID, messageID: "m-1", reactionKey: "x".repeat(257) }, { chatID, reactionKey: "👍" }],
   mark_read: [{}, { chatID, read: "false" }, { chatID, messageID: "" }],
   archive: [{}, { chatID, archived: 1 }],
+  remove_account: [{}, { accountID: "" }, { accountID: 5 }, { accountID: "whatsapp", scope: "all-devices" }],
   get_media: [{}, { url: "https://evil.example/a.png" }, { url: "file:///etc/../etc/passwd" }, { url: "javascript:alert(1)" }, { url: "mxc://" + "a".repeat(3000) }],
 };
 
@@ -130,6 +136,7 @@ const RESULTS: Record<ActionName, unknown> = {
   react: { chatID, messageID: "m-1", reactionKey: "👍" },
   mark_read: { chatID, read: true },
   archive: { chatID, archived: true },
+  remove_account: { accountID: "whatsapp", removed: true, scope: "all-devices", affectedAccountIDs: ["whatsapp"] },
   get_media: { mimeType: "image/png", size: 1234, fileName: "a.png" },
 };
 

@@ -34,6 +34,7 @@ const CASES: Record<ActionName, { params: () => Record<string, unknown>; routes:
   react: { params: () => ({ chatID: CHAT_IDS.imessageAlice, messageID: mid(), reactionKey: "👍" }), routes: ["POST /v1/chats/{chatID}/messages/{messageID}/reactions"] },
   mark_read: { params: () => ({ chatID: CHAT_IDS.imessageAlice }), routes: ["POST /v1/chats/{chatID}/read"] },
   archive: { params: () => ({ chatID: CHAT_IDS.imessageAlice }), routes: ["POST /v1/chats/{chatID}/archive"] },
+  remove_account: { params: () => ({ accountID: "instagramgo" }), routes: ["GET /v1/accounts/{accountID}", "GET /v1/bridges/{bridgeID}/logins/{loginID}", "POST /v1/bridges/{bridgeID}/logins/{loginID}/remove"] },
   get_media: { params: () => ({ url: ASSET_URLS.imgSmall }), routes: ["GET /v1/assets/serve"] },
 };
 

@@ -193,9 +193,17 @@ export function mapAccount(raw: unknown): Account | null {
   if (!isObj(raw)) return null;
   const accountID = ok(idSchema, raw.accountID);
   if (!accountID) return null;
-  return {
+  const out: Account = {
     accountID,
     network: line(raw.network, 64) || "Unknown",
     status: (ACCOUNT_STATUSES as readonly string[]).includes(raw.status) ? raw.status : "unknown",
   };
+  const u = isObj(raw.user) ? raw.user : {};
+  const name = [u.displayText, u.fullName, u.username, u.phoneNumber, u.email].map((v) => line(v, MAX_NAME_LENGTH)).find((v) => v);
+  if (name) out.name = name;
+  const statusText = line(raw.statusText, 200);
+  if (statusText) out.statusText = statusText;
+  // The Beeper account itself ("matrix") has no bridge login to remove; bridge logins do.
+  out.removable = typeof raw.loginID === "string" && raw.loginID.length > 0 && accountID !== "matrix" && !(isObj(raw.bridge) && raw.bridge.type === "matrix");
+  return out;
 }

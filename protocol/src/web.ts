@@ -92,8 +92,10 @@ export const WEB_PAGES = {
   pair: "/pair",
   approvals: "/approvals",
   approval: "/approvals/{id}",
+  accounts: "/settings/accounts",
   devices: "/settings/devices",
   activity: "/settings/activity",
+  general: "/settings/general",
 } as const;
 export type WebPage = keyof typeof WEB_PAGES;
 

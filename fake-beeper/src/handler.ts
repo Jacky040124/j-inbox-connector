@@ -200,6 +200,9 @@ function resolveRoute(method: string, segs: string[]): Route | null {
   const n = segs.length;
   if (n === 2 && a === "info") return { route: "/v1/info", params: {} };
   if (n === 2 && a === "accounts") return { route: "/v1/accounts", params: {} };
+  if (n === 3 && a === "accounts") return { route: "/v1/accounts/{accountID}", params: { accountID: b! } };
+  if (n === 5 && a === "bridges" && c === "logins") return { route: "/v1/bridges/{bridgeID}/logins/{loginID}", params: { bridgeID: b!, loginID: d! } };
+  if (n === 6 && a === "bridges" && c === "logins" && e === "remove") return { route: "/v1/bridges/{bridgeID}/logins/{loginID}/remove", params: { bridgeID: b!, loginID: d! } };
   if (n === 2 && a === "chats") return { route: "/v1/chats", params: {} };
   if (n === 3 && a === "chats" && b === "search" && method === "GET") return { route: "/v1/chats/search", params: {} };
   if (n === 3 && a === "messages" && b === "search") return { route: "/v1/messages/search", params: {} };
@@ -320,6 +323,24 @@ async function dispatch(method: string, r: Route, q: URLSearchParams, body: Reco
 
     case "GET /v1/accounts":
       return json(clone(state.accounts));
+
+    case "GET /v1/accounts/{accountID}": {
+      const acc = state.accounts.find((x) => x.accountID === r.params.accountID);
+      if (!acc) throw notFound("Account");
+      return json(clone(acc));
+    }
+
+    case "GET /v1/bridges/{bridgeID}/logins/{loginID}":
+    case "POST /v1/bridges/{bridgeID}/logins/{loginID}/remove": {
+      const accs = state.accounts.filter((x) => x.bridge?.id === r.params.bridgeID && x.loginID === r.params.loginID);
+      // Beeper's own account is not a bridge login (the real API answers 404 for it too).
+      if (!accs.length || r.params.bridgeID === "matrix") throw notFound("Bridge login");
+      const removeScopes = accs[0]!.bridge?.provider === "local" ? ["current-device"] : ["all-devices"];
+      if (method === "GET") return json({ loginID: r.params.loginID, bridgeID: r.params.bridgeID, accountIDs: accs.map((x) => x.accountID), status: "connected", removeScopes });
+      if (typeof body.scope !== "string" || !removeScopes.includes(body.scope)) throw bad(`scope must be one of ${removeScopes.join(", ")}`);
+      state.accounts = state.accounts.filter((x) => !accs.includes(x));
+      return json({ bridgeID: r.params.bridgeID, loginID: r.params.loginID, affectedAccountIDs: accs.map((x) => x.accountID), status: "removed", scope: body.scope });
+    }
 
     case "GET /v1/chats": {
       const limit = qInt(q, "limit", 25, 1, 200);

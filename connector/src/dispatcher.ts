@@ -38,6 +38,7 @@ export function createDispatcher(o: { actions: Actions; client: BeeperClient; as
     react: via("react"),
     mark_read: via("mark_read"),
     archive: via("archive"),
+    remove_account: via("remove_account"),
     get_media: async (p: { url: string }, ctx) => {
       const r = await openMedia(o.client, o.assets, p.url, ctx.signal);
       return r.ok ? { kind: "media", head: r.head, body: r.body, cancel: r.cancel } : { kind: "res", ok: false, error: r.error };
