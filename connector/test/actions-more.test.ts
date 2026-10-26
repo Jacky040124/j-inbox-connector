@@ -103,6 +103,37 @@ describe("react", () => {
     expect((await a.react({ ...p, reactionKey: "😂" })).error?.code).toBe("CONFLICT");
     expect(fb.writes().length).toBe(1);
   });
+  test("remove=true deletes the owner's reaction at the encoded key path; read_chat marks the owner's reactions isSelf", async () => {
+    const { a } = make();
+    const chatID = CHAT_IDS.imessageWeird;
+    const mid = fb.state.messagesOf(chatID)[0]!.id;
+    ok(await a.react({ chatID, messageID: mid, reactionKey: "❤️" }));
+    const page = ok(await a.read_chat({ chatID, limit: 50 }));
+    expect(parseActionResult("read_chat", page).ok).toBe(true);
+    const mine = page.items.find((m: any) => m.id === mid)!.reactions!.filter((r: any) => r.reactionKey === "❤️");
+    expect(mine.length).toBe(1);
+    expect(mine[0]!.isSelf).toBe(true);
+    // Reactions from other people are never marked.
+    for (const m of page.items) for (const r of m.reactions ?? []) if (r !== mine[0]) expect(r.isSelf).toBeUndefined();
+    const r = ok(await a.react({ chatID, messageID: mid, reactionKey: "❤️", remove: true }));
+    expect(r).toEqual({ chatID, messageID: mid, reactionKey: "❤️", removed: true });
+    expect(parseActionResult("react", r).ok).toBe(true);
+    const w = fb.writes().at(-1)!;
+    expect(w.route).toBe("DELETE /v1/chats/{chatID}/messages/{messageID}/reactions/{reactionKey}");
+    expect(w.params).toEqual({ chatID, messageID: mid, reactionKey: "❤️" });
+    const after = ok(await a.read_chat({ chatID, limit: 50 }));
+    expect((after.items.find((m: any) => m.id === mid)!.reactions ?? []).some((x: any) => x.reactionKey === "❤️" && x.isSelf)).toBe(false);
+    // Removing a reaction the owner does not have is Beeper's NOT_FOUND.
+    expect((await a.react({ chatID, messageID: mid, reactionKey: "🎉", remove: true })).error?.code).toBe("NOT_FOUND");
+  });
+  test("add and remove under one idempotencyKey are different requests (CONFLICT), never a cached add", async () => {
+    const { a } = make();
+    const mid = fb.state.messagesOf(CHAT_IDS.imessageAlice)[0]!.id;
+    const p = { chatID: CHAT_IDS.imessageAlice, messageID: mid, reactionKey: "👍", idempotencyKey: "react_key_0002" };
+    ok(await a.react(p));
+    expect((await a.react({ ...p, remove: true })).error?.code).toBe("CONFLICT");
+    expect(fb.writes().length).toBe(1);
+  });
   test("unknown message is NOT_FOUND; Beeper 502 is UNKNOWN_OUTCOME (never retryable)", async () => {
     const { a } = make();
     expect((await a.react({ chatID: CHAT_IDS.imessageAlice, messageID: "nope", reactionKey: "👍" })).error?.code).toBe("NOT_FOUND");

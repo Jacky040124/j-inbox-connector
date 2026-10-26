@@ -39,6 +39,8 @@ type Raw = Record<string, any>;
 export type MapOptions = {
   /** Called with every asset URL put into a result; get_media serves only these. */
   onAsset?: (url: string) => void;
+  /** The owner's own user IDs: reactions from them get isSelf. */
+  selfIDs?: ReadonlySet<string>;
 };
 
 const isObj = (v: unknown): v is Raw => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -102,13 +104,28 @@ function mapAttachment(a: unknown, opts: MapOptions): Attachment | null {
   return out;
 }
 
-function mapReaction(r: unknown): Reaction | null {
+function mapReaction(r: unknown, selfIDs?: ReadonlySet<string>): Reaction | null {
   if (!isObj(r)) return null;
   const reactionKey = line(r.reactionKey, MAX_REACTION_KEY_LENGTH);
   const participantID = ok(idSchema, r.participantID);
   if (!reactionKey || !participantID) return null;
   const out: Reaction = { reactionKey, participantID };
   if (typeof r.emoji === "boolean") out.emoji = r.emoji;
+  if (selfIDs?.has(participantID)) out.isSelf = true;
+  return out;
+}
+
+/**
+ * The owner's own user IDs a raw chat or message shows: participants marked isSelf, the sender of
+ * the owner's messages. Beeper uses the owner's Beeper ID for most networks, so IDs learned in one
+ * chat also mark reactions in big groups whose participant list leaves the owner out.
+ */
+export function selfIDsIn(raw: unknown): string[] {
+  if (!isObj(raw)) return [];
+  const out: string[] = [];
+  if (Array.isArray(raw.participants?.items))
+    for (const u of raw.participants.items) if (isObj(u) && u.isSelf === true && ok(idSchema, u.id)) out.push(u.id);
+  if (raw.isSender === true && ok(idSchema, raw.senderID)) out.push(raw.senderID);
   return out;
 }
 
@@ -151,7 +168,7 @@ export function mapMessage(raw: unknown, opts: MapOptions = {}): MessageItem | n
     if (list.length) out.attachments = list;
   }
   if (Array.isArray(raw.reactions)) {
-    const list = raw.reactions.map(mapReaction).filter((r): r is Reaction => r !== null).slice(0, MAX_REACTIONS_PER_MESSAGE);
+    const list = raw.reactions.map((r: unknown) => mapReaction(r, opts.selfIDs)).filter((r): r is Reaction => r !== null).slice(0, MAX_REACTIONS_PER_MESSAGE);
     if (list.length) out.reactions = list;
   }
   const status = raw.sendStatus?.status;

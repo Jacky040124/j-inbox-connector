@@ -13,7 +13,7 @@ import {
   type MessageItem,
 } from "@j-inbox/protocol";
 import type { BeeperCall, BeeperClient, CallOptions } from "./beeper-client.ts";
-import { mapAccount, mapChat, mapMessage } from "./beeper-map.ts";
+import { mapAccount, mapChat, mapMessage, selfIDsIn, type MapOptions } from "./beeper-map.ts";
 import type { AssetAllowlist } from "./assets.ts";
 import { IdempotencyCache, hashKey, type IdempotencyJournal } from "./idempotency.ts";
 import { CursorExpired, CursorTooLong, RequestAborted, collect, decodePagerCursor, finishPage, fitToFrame, type BeeperPage, type PagerCursor } from "./pager.ts";
@@ -143,15 +143,20 @@ export type ActionsOptions = {
 
 /** A mapped value plus the asset URLs it carries, so only URLs that are actually returned get allowed. */
 type WithAssets<T> = { value: T; urls: string[] };
-function tracked<T>(map: (raw: unknown, o: { onAsset: (u: string) => void }) => T | null, raw: unknown): WithAssets<T> | null {
+function tracked<T>(map: (raw: unknown, o: MapOptions & { onAsset: (u: string) => void }) => T | null, raw: unknown, extra: MapOptions = {}): WithAssets<T> | null {
   const urls: string[] = [];
-  const value = map(raw, { onAsset: (u) => urls.push(u) });
+  const value = map(raw, { ...extra, onAsset: (u) => urls.push(u) });
   return value === null ? null : { value, urls };
 }
 
 export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
   const dedupe = opts.idempotency ?? createWriteDedupe();
   const scan = opts.scan ?? {};
+  // The owner's user IDs seen so far (bounded): marks the owner's reactions in read_chat.
+  const selfIDs = new Set<string>();
+  const learnSelf = (raw: unknown) => {
+    for (const id of selfIDsIn(raw)) if (selfIDs.size < 64 || selfIDs.has(id)) selfIDs.add(id);
+  };
 
   const chatsQuery = (q: Record<string, string | string[] | undefined>) => {
     const u = new URLSearchParams();
@@ -201,6 +206,7 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
       ...scan,
       ...ctx,
     });
+    for (const c of r.items) learnSelf(c);
     const mapped = r.items.map((c) => tracked(mapChat, c)!);
     return { r, mapped, scope };
   }
@@ -254,8 +260,10 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
       const scope = `read_chat\u0000${p.chatID}`;
       const cursor = cursorParam(p.cursor, scope);
       if (cursor === "bad") return err("BAD_PARAMS", "cursor is not from this chat.");
-      const chatT = tracked(mapChat, must(await client.get(client.chatPath(p.chatID), callOpts(ctx))));
+      const rawChat = must(await client.get(client.chatPath(p.chatID), callOpts(ctx)));
+      const chatT = tracked(mapChat, rawChat);
       if (!chatT) return err("BEEPER_DOWN", "Beeper sent an unexpected chat.");
+      learnSelf(rawChat);
       const chat = chatT.value;
       const base = client.chatPath(p.chatID, "messages");
       const r = await collect({
@@ -271,7 +279,8 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
         ...scan,
         ...ctx,
       });
-      const newestFirst = r.items.map((m) => tracked(mapMessage, m)!);
+      for (const m of r.items) learnSelf(m);
+      const newestFirst = r.items.map((m) => tracked(mapMessage, m, { selfIDs })!);
       const build = (n: number) => ({ chat, ...finishPage(r, n, scope), items: newestFirst.slice(0, n).map((x) => x.value).reverse() as MessageItem[] });
       const n = fitToFrame(newestFirst.length, build);
       if (newestFirst.length && n === 0) return err("TOO_LARGE", "A single message is too large to send.");
@@ -389,12 +398,16 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
   async function react(p: ActionParams<"react">, ctx: RequestContext = {}): Promise<Outcome<ActionResult<"react">>> {
     const run = () =>
       guard(async (): Promise<Outcome<ActionResult<"react">>> => {
+        if (p.remove) {
+          must(await client.write("DELETE", client.chatPath(p.chatID, "messages", p.messageID, "reactions", p.reactionKey), undefined, callOpts(ctx)));
+          return { ok: true, data: { chatID: p.chatID, messageID: p.messageID, reactionKey: p.reactionKey, removed: true as const } };
+        }
         must(await client.write("POST", client.chatPath(p.chatID, "messages", p.messageID, "reactions"), { reactionKey: p.reactionKey }, callOpts(ctx)));
         return { ok: true, data: { chatID: p.chatID, messageID: p.messageID, reactionKey: p.reactionKey } };
       });
     if (!p.idempotencyKey) return run();
     const key = `react\u0000${p.chatID}\u0000${p.idempotencyKey}`;
-    return (dedupe.run(key, run, { fingerprint: fingerprint([p.messageID, p.reactionKey]) }) as Promise<Outcome<ActionResult<"react">>>).then((r) => withChatID(p.chatID, r)).catch(() =>
+    return (dedupe.run(key, run, { fingerprint: fingerprint([p.messageID, p.reactionKey, p.remove ? "remove" : "add"]) }) as Promise<Outcome<ActionResult<"react">>>).then((r) => withChatID(p.chatID, r)).catch(() =>
       err("INTERNAL", "The connector could not record this write, so it was not sent."),
     );
   }

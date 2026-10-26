@@ -90,6 +90,8 @@ export const reaction = object({
   reactionKey: string({ min: 1, max: MAX_REACTION_KEY_LENGTH }),
   participantID: userID,
   emoji: optional(boolean()),
+  /** The owner's own reaction (the one react with remove=true can take back). */
+  isSelf: optional(literal(true)),
 });
 export type Reaction = Infer<typeof reaction>;
 

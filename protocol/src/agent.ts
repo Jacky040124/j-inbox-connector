@@ -79,6 +79,8 @@ export const approvalView = object({
     replyToMessageID: optional(messageID),
     messageID: optional(messageID),
     reactionKey: optional(string({ min: 1, max: MAX_REACTION_KEY_LENGTH })),
+    /** react: take the owner's reaction back instead of adding it. */
+    remove: optional(boolean()),
     read: optional(boolean()),
     archived: optional(boolean()),
   }),
@@ -157,7 +159,7 @@ export type OwnerNotice =
 
 const ACTION_PHRASE: Partial<Record<ApprovalActionName, string>> = {
   send_message: "send a message",
-  react: "add a reaction",
+  react: "add or remove a reaction",
   mark_read: "change a chat's read state",
   archive: "archive or unarchive a chat",
   compose_email: "send a new email",

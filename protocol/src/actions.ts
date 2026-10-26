@@ -274,17 +274,17 @@ export const ACTIONS = {
   }),
 
   react: define({
-    description: "Add an emoji reaction to a message (not for Gmail: NOT_SUPPORTED). Agents need the owner's approval.",
-    params: object({ chatID, messageID, reactionKey: string({ min: 1, max: MAX_REACTION_KEY_LENGTH }), idempotencyKey: optional(idempotencyKey) }),
-    paramDocs: { chatID: "Chat ID", messageID: "Message ID", reactionKey: "Emoji, e.g. 👍", idempotencyKey: IDEMPOTENCY_DOC },
+    description: "Add an emoji reaction to a message, or take back the owner's own with remove=true (not for Gmail: NOT_SUPPORTED). Agents need the owner's approval.",
+    params: object({ chatID, messageID, reactionKey: string({ min: 1, max: MAX_REACTION_KEY_LENGTH }), remove: optional(boolean()), idempotencyKey: optional(idempotencyKey) }),
+    paramDocs: { chatID: "Chat ID", messageID: "Message ID", reactionKey: "Emoji, e.g. 👍", remove: "true to remove the owner's own reaction instead (default false)", idempotencyKey: IDEMPOTENCY_DOC },
     defaults: {},
-    result: object({ chatID, messageID, reactionKey: string({ min: 1, max: MAX_REACTION_KEY_LENGTH }) }),
+    result: object({ chatID, messageID, reactionKey: string({ min: 1, max: MAX_REACTION_KEY_LENGTH }), removed: optional(literal(true)) }),
     write: true,
     needsApprovalForAgents: true,
     streamed: false,
     timeoutMs: REQUEST_TIMEOUT_MS,
     rateLimitPerMinute: 30,
-    beeper: "POST /v1/chats/{chatID}/messages/{messageID}/reactions",
+    beeper: "POST /v1/chats/{chatID}/messages/{messageID}/reactions | DELETE .../reactions/{reactionKey}",
   }),
 
   mark_read: define({
