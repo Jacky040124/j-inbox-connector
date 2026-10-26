@@ -20,6 +20,7 @@ import {
   emailHeaders,
   gmailAccountID,
   gmailAssetURL,
+  gmailAvatarURL,
   gmailChatID,
   mimeType as mimeTypeSchema,
   parse,
@@ -141,6 +142,18 @@ function dateOf(m: GMessage): number | null {
 
 export type GmailMapOptions = { onAsset?: (url: string) => void };
 
+/** The sender's picture URL (registered with onAsset), or undefined for the owner or an odd address. */
+function avatarFor(email: string, sender: string, o: GmailMapOptions): string | undefined {
+  if (sender.toLowerCase() === email.toLowerCase()) return undefined;
+  try {
+    const url = gmailAvatarURL(email, sender);
+    o.onAsset?.(url);
+    return url;
+  } catch {
+    return undefined;
+  }
+}
+
 /** One Gmail message as a MessageItem (text from the body when the payload has one, else the snippet). */
 export function mapGmailMessage(raw: unknown, email: string, o: GmailMapOptions = {}): MessageItem | null {
   if (!isObj(raw)) return null;
@@ -161,6 +174,8 @@ export function mapGmailMessage(raw: unknown, email: string, o: GmailMapOptions 
     isSender: has(m, "SENT") || self,
     email: headers,
   };
+  const avatar = out.isSender ? undefined : avatarFor(email, headers.from.address, o);
+  if (avatar) out.senderAvatarURL = avatar;
   const body = messageBody(m.payload);
   const text = body ?? (typeof m.snippet === "string" ? decodeEntities(m.snippet) : "");
   if (text) {
@@ -217,6 +232,14 @@ export function mapGmailThread(raw: unknown, email: string, o: GmailMapOptions =
     hasDraft: all.some(isDraft),
     preview: last ? mapGmailMessage(last, email, o) : null,
   };
+  // The newest sender who is not the owner (a thread the owner started shows who answered).
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const from = parseAddressList(header(msgs[i]!.payload, "From"))[0]?.address;
+    if (!from || from.toLowerCase() === email.toLowerCase() || has(msgs[i]!, "SENT")) continue;
+    const url = avatarFor(email, from, o);
+    if (url) chat.avatarURL = url;
+    break;
+  }
   return chat;
 }
 

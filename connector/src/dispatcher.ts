@@ -1,7 +1,7 @@
 // The connector's whitelist. A request names a catalogue action; params are validated (and
 // defaulted) with parseActionParams; the action calls only its own Beeper endpoints; the result is
 // checked with parseActionResult before it may leave the Mac. Anything else is NOT_ALLOWED.
-import { ACTIONS, isActionName, makeError, parseActionParams, parseActionResult, parseGmailAssetURL, type ActionName, type ErrorBody, type MediaHead } from "@j-inbox/protocol";
+import { ACTIONS, isActionName, makeError, parseActionParams, parseActionResult, parseGmailAssetURL, parseGmailAvatarURL, type ActionName, type ErrorBody, type MediaHead } from "@j-inbox/protocol";
 import type { BeeperClient } from "./beeper-client.ts";
 import type { AssetAllowlist } from "./assets.ts";
 import type { BeeperActions, Outcome, RequestContext } from "./actions.ts";
@@ -9,6 +9,7 @@ import type { IdempotencyCache } from "./idempotency.ts";
 import { openMedia } from "./media.ts";
 import { createRouter } from "./sources.ts";
 import type { GmailService } from "./gmail/service.ts";
+import { createAvatarResolver, type AvatarResolver } from "./gmail/avatar.ts";
 
 export type DispatchResult =
   | { kind: "res"; ok: true; data: unknown; error?: undefined }
@@ -20,8 +21,21 @@ type Handler = (p: any, ctx: RequestContext) => Promise<DispatchResult>;
 const fail = (code: ErrorBody["code"], message: string): DispatchResult => ({ kind: "res", ok: false, error: makeError(code, message) });
 
 /** An email attachment's bytes as a get_media stream (Gmail hands attachments over whole). */
-async function openGmailMedia(gmail: GmailService | null, assets: AssetAllowlist, url: string, ctx: RequestContext): Promise<DispatchResult> {
+async function openGmailMedia(gmail: GmailService | null, assets: AssetAllowlist, avatars: AvatarResolver, url: string, ctx: RequestContext): Promise<DispatchResult> {
   if (!assets.has(url)) return fail("NOT_ALLOWED", "This media URL was not returned by this connector. Reload the chat and use a URL from its result.");
+  const a = parseGmailAvatarURL(url);
+  if (a) {
+    const img = await avatars.resolve(a.sender, ctx.signal);
+    if (!img) return fail("NOT_FOUND", "No picture for this sender.");
+    const bytes = img.bytes;
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(bytes);
+        c.close();
+      },
+    });
+    return { kind: "media", head: { mimeType: img.mimeType, size: bytes.length, fileName: null }, body, cancel: () => void body.cancel().catch(() => {}) };
+  }
   const g = parseGmailAssetURL(url);
   const s = g && gmail ? gmail.source(g.email) : null;
   if (!g || !s) return fail("NOT_FOUND", "This email attachment's account is not on this computer any more.");
@@ -37,7 +51,8 @@ async function openGmailMedia(gmail: GmailService | null, assets: AssetAllowlist
   return { kind: "media", head: { mimeType: r.data.mimeType, size: bytes.length, fileName: r.data.fileName }, body, cancel: () => void body.cancel().catch(() => {}) };
 }
 
-export function createDispatcher(o: { actions: BeeperActions; client: BeeperClient; assets: AssetAllowlist; gmail?: GmailService | null; idempotency?: IdempotencyCache<Outcome<unknown>> }) {
+export function createDispatcher(o: { actions: BeeperActions; client: BeeperClient; assets: AssetAllowlist; gmail?: GmailService | null; idempotency?: IdempotencyCache<Outcome<unknown>>; avatars?: AvatarResolver }) {
+  const avatars = o.avatars ?? createAvatarResolver();
   const router = createRouter({ beeper: o.actions, gmail: o.gmail ?? null, assets: o.assets, idempotency: o.idempotency });
   const via =
     (name: Exclude<ActionName, "get_media">): Handler =>
@@ -63,7 +78,7 @@ export function createDispatcher(o: { actions: BeeperActions; client: BeeperClie
     compose_email: via("compose_email"),
     gmail_connect: via("gmail_connect"),
     get_media: async (p: { url: string }, ctx) => {
-      if (p.url.startsWith("gmail://")) return openGmailMedia(o.gmail ?? null, o.assets, p.url, ctx);
+      if (p.url.startsWith("gmail://")) return openGmailMedia(o.gmail ?? null, o.assets, avatars, p.url, ctx);
       const r = await openMedia(o.client, o.assets, p.url, ctx.signal);
       return r.ok ? { kind: "media", head: r.head, body: r.body, cancel: r.cancel } : { kind: "res", ok: false, error: r.error };
     },
