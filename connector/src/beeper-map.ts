@@ -6,6 +6,7 @@
 // needs are dropped (null), never invented.
 import {
   ACCOUNT_STATUSES,
+  htmlToPlainText,
   ATTACHMENT_TYPES,
   MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_NAME_LENGTH,
@@ -121,7 +122,7 @@ export function mapMessage(raw: unknown, opts: MapOptions = {}): MessageItem | n
   const out: MessageItem = { id, chatID, accountID, senderID, timestamp, sortKey, type: messageTypeOf(raw), isSender: raw.isSender === true };
   if (typeof raw.senderName === "string") out.senderName = sanitizeLine(raw.senderName, MAX_NAME_LENGTH);
   if (typeof raw.text === "string") {
-    const t = truncateText(sanitizeText(raw.text), MAX_RESULT_TEXT_LENGTH);
+    const t = truncateText(sanitizeText(htmlToPlainText(raw.text)), MAX_RESULT_TEXT_LENGTH);
     out.text = t.text;
     if (t.truncated) out.textTruncated = true;
   }
@@ -144,6 +145,13 @@ export function mapMessage(raw: unknown, opts: MapOptions = {}): MessageItem | n
   const status = raw.sendStatus?.status;
   if ((SEND_STATUSES as readonly string[]).includes(status)) out.sendStatus = status;
   return out;
+}
+
+/** Beeper leaves imgURL empty on most 1:1 chats; the other person's picture is on the participant. */
+function otherParticipantImage(raw: Raw): unknown {
+  const items = raw.participants?.items;
+  if (!Array.isArray(items)) return undefined;
+  return items.find((u: unknown) => isObj(u) && u.isSelf !== true && typeof u.imgURL === "string" && u.imgURL.length > 0)?.imgURL;
 }
 
 export function mapChat(raw: unknown, opts: MapOptions = {}): ChatSummary | null {
@@ -173,7 +181,7 @@ export function mapChat(raw: unknown, opts: MapOptions = {}): ChatSummary | null
   if (markedUnread !== undefined) out.isMarkedUnread = markedUnread;
   const total = int(raw.participants?.total, 1_000_000_000);
   if (total !== undefined) out.participantCount = total;
-  const avatar = assetFrom(raw.imgURL, opts);
+  const avatar = assetFrom(raw.imgURL ?? (out.type === "single" ? otherParticipantImage(raw) : undefined), opts);
   if (avatar) out.avatarURL = avatar;
   // Only whether a draft exists: the owner's unsent text never leaves the Mac.
   if (isObj(raw.draft)) out.hasDraft = typeof raw.draft.text === "string" && raw.draft.text.length > 0;

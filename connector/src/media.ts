@@ -37,7 +37,48 @@ export async function openMedia(client: BeeperClient, assets: AssetAllowlist, ur
     cancel();
     return { ok: false, error: makeError("TOO_LARGE", "This file is larger than J-Inbox relays (25 MiB).") };
   }
-  return { ok: true, head: { mimeType: mimeOf(r.res.headers.get("content-type")), size: len }, body, cancel };
+  const mimeType = mimeOf(r.res.headers.get("content-type"));
+  if (mimeType !== "application/octet-stream") return { ok: true, head: { mimeType, size: len }, body, cancel };
+  // Beeper serves avatars (files without an extension) as octet-stream, and the web page only shows
+  // images whose type says so. Look at the first bytes; the body is passed on unchanged.
+  const reader = body.getReader();
+  const first = reader.read();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const peek = await Promise.race([first, new Promise<null>((res) => (timer = setTimeout(() => res(null), SNIFF_WAIT_MS)))]).catch(() => null);
+  clearTimeout(timer);
+  let ended = false;
+  const replay = new ReadableStream<Uint8Array>({
+    async start(c) {
+      const f = await first;
+      if (f.done) {
+        ended = true;
+        c.close();
+      } else c.enqueue(f.value);
+    },
+    async pull(c) {
+      if (ended) return;
+      const f = await reader.read();
+      if (f.done) {
+        ended = true;
+        c.close();
+      } else c.enqueue(f.value);
+    },
+    cancel: (reason) => reader.cancel(reason),
+  });
+  const sniffed = peek && !peek.done ? sniffImageType(peek.value) : null;
+  return { ok: true, head: { mimeType: sniffed ?? mimeType, size: len }, body: replay, cancel: () => void reader.cancel().catch(() => {}) };
+}
+
+const SNIFF_WAIT_MS = 5_000;
+
+/** PNG, JPEG, GIF or WebP by magic bytes, else null. */
+export function sniffImageType(b: Uint8Array): string | null {
+  const at = (i: number, ...v: number[]) => v.every((x, k) => b[i + k] === x);
+  if (at(0, 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return "image/png";
+  if (at(0, 0xff, 0xd8, 0xff)) return "image/jpeg";
+  if (at(0, 0x47, 0x49, 0x46, 0x38)) return "image/gif";
+  if (at(0, 0x52, 0x49, 0x46, 0x46) && at(8, 0x57, 0x45, 0x42, 0x50)) return "image/webp";
+  return null;
 }
 
 export type PumpOptions = {

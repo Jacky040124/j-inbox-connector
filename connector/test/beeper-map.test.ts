@@ -97,6 +97,14 @@ describe("every fixture record maps to a valid protocol value", () => {
   });
 });
 
+describe("HTML message bodies", () => {
+  test("a LinkedIn-style HTML body reaches agents and the web page as plain text", () => {
+    const raw = { id: "m1", chatID: "!c:beeper.local", accountID: "linkedin", senderID: "u", timestamp: "2026-10-21T10:00:00.000Z", sortKey: "1", text: "<p>Hi Jacky</p><br><p>Tom &amp; Jerry</p>" };
+    expect(mapMessage(raw)!.text).toBe("Hi Jacky\n\nTom & Jerry");
+    expect(mapMessage({ ...raw, text: "a <b> c &amp; <p> d" })!.text).toBe("a <b> c &amp; <p> d");
+  });
+});
+
 describe("asset URLs", () => {
   test("chat imgURL (a local path) becomes an encoded file:/// URL; attachments keep mxc://", () => {
     expect(assetURLFromLocalPath("/Users/a b/Library/x#1?.png")).toBe("file:///Users/a%20b/Library/x%231%3F.png");
@@ -105,6 +113,18 @@ describe("asset URLs", () => {
     expect(assetURLFromLocalPath("")).toBeUndefined();
     const media = fb.state.messagesOf(CHAT_IDS.media).map((m) => mapMessage(m as any)!);
     expect(media[0]!.attachments![0]!.url).toBe("mxc://beeper.local/img_small");
+  });
+  test("a 1:1 chat without imgURL uses the other person's picture; groups and self pictures do not", () => {
+    const base = { id: "!c:beeper.local", accountID: "whatsapp", network: "WhatsApp", title: "Ana" };
+    const self = { id: "me", isSelf: true, imgURL: "mxc://beeper.local/me" };
+    const other = { id: "ana", imgURL: "file:///Users/x/Library/Application%20Support/BeeperTexts/media/ana" };
+    const seen: string[] = [];
+    expect(mapChat({ ...base, type: "single", participants: { items: [self, other] } }, { onAsset: (u) => seen.push(u) })!.avatarURL).toBe(other.imgURL);
+    expect(seen).toEqual([other.imgURL]);
+    expect(mapChat({ ...base, type: "single", imgURL: "mxc://beeper.local/chat", participants: { items: [other] } })!.avatarURL).toBe("mxc://beeper.local/chat");
+    expect(mapChat({ ...base, type: "single", participants: { items: [self, { id: "ana" }] } })!.avatarURL).toBeUndefined();
+    expect(mapChat({ ...base, type: "group", participants: { items: [self, other] } })!.avatarURL).toBeUndefined();
+    expect(mapChat({ ...base, type: "single", participants: { items: [{ ...other, imgURL: "http://evil/x" }] } })!.avatarURL).toBeUndefined();
   });
   test("every asset URL the mapper returns is reported so get_media can whitelist it", () => {
     const seen = new Set<string>();

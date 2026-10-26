@@ -4,7 +4,7 @@ import { ASSET_URLS, CHAT_IDS, startFakeBeeper, type FakeBeeper } from "@j-inbox
 import { ChunkAssembler, ChunkWindow, MAX_CHUNK_BYTES, MAX_MEDIA_BYTES, MEDIA_WINDOW_CHUNKS, parseConnectorFrame, type ChunkFrame } from "@j-inbox/protocol";
 import { createBeeperClient } from "../src/beeper-client.ts";
 import { AssetAllowlist } from "../src/assets.ts";
-import { openMedia, pumpChunks } from "../src/media.ts";
+import { openMedia, pumpChunks, sniffImageType } from "../src/media.ts";
 
 let fb: FakeBeeper;
 beforeAll(async () => {
@@ -60,6 +60,31 @@ describe("openMedia", () => {
     r.cancel();
     const call = fb.state.calls.find((c) => c.route === "GET /v1/assets/serve")!;
     expect(call.query.url).toEqual([ASSET_URLS.avatar1]);
+  });
+  test("octet-stream from Beeper (avatars): image type from the first bytes, body passed on unchanged", async () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+    const tail = new Uint8Array([4, 5, 6]);
+    const octet = (parts: Uint8Array[]) => (async () => new Response(streamOf(parts), { status: 200, headers: { "content-type": "application/octet-stream" } })) as unknown as typeof fetch;
+    const read = async (b: ReadableStream<Uint8Array>) => new Uint8Array(await new Response(b).arrayBuffer());
+    const r = await openMedia(client(octet([png, tail])), allowed(ASSET_URLS.avatar1), ASSET_URLS.avatar1);
+    if (!r.ok) throw new Error(r.error.code);
+    expect(r.head.mimeType).toBe("image/png");
+    expect([...(await read(r.body))]).toEqual([...png, ...tail]);
+    const other = await openMedia(client(octet([new Uint8Array([0x25, 0x50, 0x44, 0x46]), tail])), allowed(ASSET_URLS.avatar1), ASSET_URLS.avatar1);
+    if (!other.ok) throw new Error(other.error.code);
+    expect(other.head.mimeType).toBe("application/octet-stream");
+    expect([...(await read(other.body))]).toEqual([0x25, 0x50, 0x44, 0x46, 4, 5, 6]);
+    const empty = await openMedia(client(octet([])), allowed(ASSET_URLS.avatar1), ASSET_URLS.avatar1);
+    if (!empty.ok) throw new Error(empty.error.code);
+    expect(empty.head.mimeType).toBe("application/octet-stream");
+    expect((await read(empty.body)).length).toBe(0);
+  });
+  test("sniffImageType knows PNG, JPEG, GIF, WebP and nothing else", () => {
+    expect(sniffImageType(new Uint8Array([0xff, 0xd8, 0xff, 0xe0]))).toBe("image/jpeg");
+    expect(sniffImageType(new TextEncoder().encode("GIF89a"))).toBe("image/gif");
+    expect(sniffImageType(new TextEncoder().encode("RIFF\0\0\0\0WEBPVP8 "))).toBe("image/webp");
+    expect(sniffImageType(new TextEncoder().encode("<svg xmlns"))).toBeNull();
+    expect(sniffImageType(new Uint8Array([]))).toBeNull();
   });
   test("over MAX_MEDIA_BYTES by Content-Length is TOO_LARGE before any chunk", async () => {
     const r = await openMedia(client(), allowed(ASSET_URLS.fileHuge), ASSET_URLS.fileHuge);
