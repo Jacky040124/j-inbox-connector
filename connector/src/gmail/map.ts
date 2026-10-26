@@ -15,7 +15,7 @@ import {
   GMAIL_NETWORK,
   MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_NAME_LENGTH,
-  MAX_RESULT_TEXT_LENGTH,
+  MAX_EMAIL_TEXT_LENGTH,
   MAX_TITLE_LENGTH,
   emailHeaders,
   gmailAccountID,
@@ -31,7 +31,7 @@ import {
   type EmailHeaders,
   type MessageItem,
 } from "@j-inbox/protocol";
-import { b64urlToBytes, charsetOf, decodeCharset, decodeEntities, emailHtmlToText, headerText, parseAddressList } from "./mime.ts";
+import { b64urlToBytes, charsetOf, decodeCharset, decodeEntities, emailHtmlToText, headerText, parseAddressList, reflowPlain, splitQuoted } from "./mime.ts";
 
 export type GPart = { partId?: string; mimeType?: string; filename?: string; headers?: { name?: string; value?: string }[]; body?: { size?: number; data?: string; attachmentId?: string }; parts?: GPart[] };
 export type GMessage = { id?: string; threadId?: string; labelIds?: string[]; snippet?: string; internalDate?: string; payload?: GPart };
@@ -69,7 +69,7 @@ function partText(p: GPart): string | null {
   return bytes ? decodeCharset(bytes, charsetOf(header(p, "Content-Type"))) : null;
 }
 
-/** The plain-text body: the first text/plain part, else the first text/html part as text. null for metadata-only messages. */
+/** The plain-text body (hard wrapping undone): the first text/plain part, else the first text/html part as text. null for metadata-only messages. */
 export function messageBody(payload: GPart | undefined): string | null {
   let plain: string | null = null;
   let html: string | null = null;
@@ -80,7 +80,7 @@ export function messageBody(payload: GPart | undefined): string | null {
     else if (html === null && t === "text/html") html = partText(p);
     if (plain !== null) return true;
   });
-  if (plain !== null) return plain;
+  if (plain !== null) return reflowPlain((plain as string).replace(/\r\n?/g, "\n"));
   if (html !== null) return emailHtmlToText(html);
   return null;
 }
@@ -164,9 +164,12 @@ export function mapGmailMessage(raw: unknown, email: string, o: GmailMapOptions 
   const body = messageBody(m.payload);
   const text = body ?? (typeof m.snippet === "string" ? decodeEntities(m.snippet) : "");
   if (text) {
-    const t = truncateText(sanitizeText(text).replace(/\s+$/, ""), MAX_RESULT_TEXT_LENGTH);
+    // The new part as text; the quoted history apart (shown folded, like Gmail's "•••").
+    const { main, quoted } = body !== null ? splitQuoted(sanitizeText(text)) : { main: sanitizeText(text), quoted: "" };
+    const t = truncateText(main.replace(/\s+$/, ""), MAX_EMAIL_TEXT_LENGTH);
     out.text = t.text;
     if (t.truncated) out.textTruncated = true;
+    if (quoted) out.quotedText = truncateText(quoted, MAX_EMAIL_TEXT_LENGTH).text;
   }
   out.isUnread = has(m, "UNREAD");
   const atts = attachmentsOf(email, m.id, m.payload, o.onAsset);

@@ -8,6 +8,8 @@ import {
   emailHtmlToText,
   encodeHeaderValue,
   parseAddressList,
+  reflowPlain,
+  splitQuoted,
   rawForGmail,
   replyAllRecipients,
   replyReferences,
@@ -115,5 +117,55 @@ describe("building messages", () => {
     const v = encodeHeaderValue("ü".repeat(200));
     for (const w of v.split("\r\n ")) expect(w.length).toBeLessThanOrEqual(75);
     expect(decodeHeader(v.replace(/\r\n /g, " "))).toBe("ü".repeat(200));
+  });
+});
+
+describe("reading replies like Gmail: quoted history apart, hard wrapping undone", () => {
+  const LYFT = [
+    "Hi Jacky,",
+    "",
+    "Thanks for the details, this is really helpful. I will share it with the",
+    "hiring manager and get back to you by Friday.",
+    "",
+    "Best,",
+    "Priya",
+    "",
+    "On Thu, Oct 23, 2026 at 3:55 PM Jacky Zhong <jacky@example.com> wrote:",
+    "",
+    "> Hi Priya, here is what I did:",
+    ">> *Workus AI*",
+    ">>    - designed & implemented multilayer caching (redis cache aside +",
+    ">>    localStorage) for a slow dashboard",
+  ].join("\n");
+
+  test("a reply splits at the attribution line; the quote keeps every line", () => {
+    const r = splitQuoted(LYFT);
+    expect(r.main).toBe(LYFT.split("\nOn Thu")[0]!.trimEnd());
+    expect(r.quoted.startsWith("On Thu, Oct 23, 2026 at 3:55 PM Jacky Zhong <jacky@example.com> wrote:")).toBe(true);
+    expect(r.quoted).toContain(">>    localStorage) for a slow dashboard");
+  });
+  test("other attribution forms: two lines, Chinese, Original Message, a trailing > block with a signature", () => {
+    expect(splitQuoted("ok\n\nOn Mon, Oct 26, 2026 at 9:00 AM Very Long Name\n<x@example.com> wrote:\n> hi").main).toBe("ok");
+    expect(splitQuoted("好的\n\n在 2026年10月26日 周一 09:00，张三 <z@example.com> 写道：\n> 你好").main).toBe("好的");
+    expect(splitQuoted("Sure.\n\n-----Original Message-----\nFrom: a").main).toBe("Sure.");
+    expect(splitQuoted("Sounds good\n\n> earlier text\n> more\n\n-- \nsig").main).toBe("Sounds good");
+  });
+  test("no quote, a quote in the middle, a forward, or nothing above the quote: all of it stays the text", () => {
+    for (const t of ["just text\nwith lines", "see:\n> one quoted line\nand my answer below it\nmore answer\nstill more\nand more", "FYI\n\n---------- Forwarded message ---------\nFrom: a@example.com\n\nhello", "> only a quote\n> nothing else"]) {
+      expect(splitQuoted(t)).toEqual({ main: t, quoted: "" });
+    }
+  });
+  test("reflow joins wrapped prose, keeps short lines, lists, quotes, blank lines and colon lines", () => {
+    const wrapped = "Thanks for the details, this is really helpful. I will share it with the\nhiring manager and get back to you by Friday.\n\nBest,\nPriya";
+    expect(reflowPlain(wrapped)).toBe("Thanks for the details, this is really helpful. I will share it with the hiring manager and get back to you by Friday.\n\nBest,\nPriya");
+    const list = "Steps we need to do every single time a package comes back from them:\n- go to their platform and update the task status on our dashboard\n- download the package\n1) one\n2) two";
+    expect(reflowPlain(list)).toBe(list);
+    const bullet = "   - designed & implemented multilayer caching (redis cache aside +\n   localStorage) for a slow dashboard";
+    expect(reflowPlain(bullet)).toBe("   - designed & implemented multilayer caching (redis cache aside + localStorage) for a slow dashboard");
+    const quoted = "> a quoted line that is long enough to look like it was wrapped by a\n> mail client";
+    expect(reflowPlain(quoted)).toBe(quoted);
+    expect(reflowPlain("short line\nnext line")).toBe("short line\nnext line");
+    const code = "Here is the snippet I mentioned in the meeting this morning, below.\n    const x = 1;";
+    expect(reflowPlain(code)).toBe(code);
   });
 });

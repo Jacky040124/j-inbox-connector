@@ -44,6 +44,8 @@ export const MAX_QUERY_LENGTH = 200;
 export const MAX_SEND_TEXT_LENGTH = 10_000;
 /** Message text inside results is truncated to this many UTF-16 units (textTruncated: true). */
 export const MAX_RESULT_TEXT_LENGTH = 4_000;
+/** Email bodies (and a reply's quoted history) are longer than chat messages: their own cap. */
+export const MAX_EMAIL_TEXT_LENGTH = 20_000;
 export const MAX_TITLE_LENGTH = 500;
 export const MAX_NAME_LENGTH = 200;
 export const MAX_REACTION_KEY_LENGTH = 256;

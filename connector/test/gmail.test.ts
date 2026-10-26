@@ -159,7 +159,7 @@ describe("reading Gmail", () => {
     expect((await t.ok("read_chat", { chatID: chat("cjk") })).chat.title).toBe("周五一起吃饭吗？🍜");
     const hostile = await t.ok("read_chat", { chatID: chat("hostile") });
     expect(hostile.items[0].textTruncated).toBe(true);
-    expect(hostile.items[0].text.length).toBeLessThanOrEqual(4000);
+    expect(hostile.items[0].text.length).toBeLessThanOrEqual(20_000);
     expect(hostile.chat.title).not.toMatch(/[\r\n]/);
   });
 

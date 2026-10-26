@@ -187,6 +187,76 @@ export function emailHtmlToText(html: string): string {
     .trim();
 }
 
+/**
+ * A reply's quoted history, like Gmail's "•••": the body splits at the first attribution line
+ * ("On <date>, <name> wrote:", also split over two lines, and the Chinese 写道 form), an
+ * "Original Message" separator, or a block of ">" lines that runs to the end (blank lines and a
+ * short signature between are allowed). Forwarded messages are content, not history: kept.
+ * When nothing would be left above the quote, the whole body is `main`.
+ */
+export function splitQuoted(text: string): { main: string; quoted: string } {
+  const lines = text.split("\n");
+  const attribution = (i: number): boolean => {
+    const a = lines[i]!.trim();
+    if (/^-{2,}\s*Original Message\s*-{2,}$/i.test(a)) return true;
+    if (/^(?:On|Le|Am|El)\s.{3,300}(?:wrote|a écrit|schrieb|escribió)\s*:$/i.test(a)) return true;
+    if (/^在.{2,200}写道[:：]$/.test(a) || /^.{2,200}于.{2,100}写道[:：]$/.test(a)) return true;
+    // Attribution wrapped over two lines.
+    const b = (lines[i + 1] ?? "").trim();
+    return /^On\s/i.test(a) && a.length < 200 && /(?:wrote|写道)\s*[:：]$/i.test(b) && !/[:：]$/.test(a);
+  };
+  const quoteRunsToEnd = (i: number): boolean => {
+    let nonQuote = 0;
+    for (let j = i; j < lines.length; j++) {
+      const l = lines[j]!.trim();
+      if (!l || l.startsWith(">")) continue;
+      if (++nonQuote > 3) return false;
+    }
+    return true;
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i]!.trim();
+    if (attribution(i) || (l.startsWith(">") && quoteRunsToEnd(i))) {
+      const main = lines.slice(0, i).join("\n").replace(/\s+$/, "");
+      if (!main.trim()) return { main: text, quoted: "" };
+      return { main, quoted: lines.slice(i).join("\n").trim() };
+    }
+  }
+  return { main: text, quoted: "" };
+}
+
+/**
+ * Undo hard wrapping in plain-text mail (most clients wrap at 72-78 columns): a line of 55-80
+ * characters is joined with the next when the next goes on with the same paragraph. Quoted (">"),
+ * list, indented and short lines keep their breaks, so tables, lists and signatures stay as written.
+ */
+export function reflowPlain(text: string): string {
+  const LIST = /^\s*(?:[-*•+]|\d{1,3}[.)])\s/;
+  const indent = (l: string) => /^[ \t]*/.exec(l)![0].length;
+  const canJoin = (prev: string, next: string): boolean => {
+    const p = prev.replace(/\s+$/, "");
+    const len = [...p.trim()].length;
+    if (len < 55 || len > 80 || /^\s*>/.test(p) || /[:：]$/.test(p)) return false;
+    if (!next.trim() || /^\s*>/.test(next) || LIST.test(next)) return false;
+    // An indented line goes on only a list item or an indented line (a wrapped bullet), never plain prose.
+    if (indent(next) >= 2) return LIST.test(p) || indent(p) >= 2;
+    return true;
+  };
+  const out: string[] = [];
+  let para: string | null = null;
+  let prev = "";
+  for (const line of text.split("\n")) {
+    if (para !== null && canJoin(prev, line)) para = para.replace(/\s+$/, "") + " " + line.trim();
+    else {
+      if (para !== null) out.push(para);
+      para = line;
+    }
+    prev = line;
+  }
+  if (para !== null) out.push(para);
+  return out.join("\n");
+}
+
 // ---- writing ----
 
 /** RFC 2047 B-encoded words for non-ASCII text, split so each word stays under 75 characters. */

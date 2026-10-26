@@ -26,6 +26,7 @@ import {
   MAX_NAME_LENGTH,
   MAX_REACTIONS_PER_MESSAGE,
   MAX_REACTION_KEY_LENGTH,
+  MAX_EMAIL_TEXT_LENGTH,
   MAX_RESULT_TEXT_LENGTH,
   MAX_SEND_TEXT_LENGTH,
   MAX_TITLE_LENGTH,
@@ -140,8 +141,8 @@ export const messageItem = object({
   /** Beeper sortKey: order messages by it (numeric-string compare), not by timestamp. */
   sortKey: string({ min: 1, max: 128 }),
   type: enumOf(MESSAGE_TYPES),
-  /** Truncated to MAX_RESULT_TEXT_LENGTH; textTruncated is then true. */
-  text: optional(text({ max: MAX_RESULT_TEXT_LENGTH })),
+  /** Truncated to MAX_RESULT_TEXT_LENGTH (chat) or MAX_EMAIL_TEXT_LENGTH (email); textTruncated is then true. */
+  text: optional(text({ max: MAX_EMAIL_TEXT_LENGTH })),
   textTruncated: optional(literal(true)),
   isSender: boolean(),
   isUnread: optional(boolean()),
@@ -155,6 +156,8 @@ export const messageItem = object({
   sharedPost: optional(sharedPost),
   /** Email headers (Gmail chats only). `text` is the plain-text body. */
   email: optional(emailHeaders),
+  /** Email only: the quoted history of a reply (attribution line and ">" lines), apart from `text`. Truncated. */
+  quotedText: optional(text({ max: MAX_EMAIL_TEXT_LENGTH })),
 });
 export type MessageItem = Infer<typeof messageItem>;
 

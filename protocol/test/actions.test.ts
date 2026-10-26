@@ -172,8 +172,8 @@ describe("parseActionResult", () => {
       expect(parseActionResult(name, { ...(RESULTS[name] as object), injected: "x" }).ok).toBe(false);
     });
   }
-  test("message text above the result limit is rejected", () => {
-    const big = { ...message, text: "x".repeat(4001) };
+  test("message text above the email limit (the larger cap) is rejected", () => {
+    const big = { ...message, text: "x".repeat(20_001) };
     expect(parseActionResult("read_chat", { chat, items: [big], hasMore: false, nextCursor: null }).ok).toBe(false);
   });
   test("textTruncated may only be true", () => {
