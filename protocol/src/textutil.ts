@@ -26,9 +26,11 @@ export function sanitizeLine(s: string, max: number): string {
   return truncateText(line, max).text.trimEnd();
 }
 
-// Only bodies that are HTML documents: they start with a <p> or <div> block and close one. Ordinary
-// chat text that contains tags ("<b>hi</b>", a code snippet) is shown exactly as sent.
-const HTML_HINT = /^\s*<(?:p|div)(?:\s[^<>]*)?>[\s\S]*<\/(?:p|div)>/i;
+// Only bodies that are HTML: they start with a block or inline formatting tag and close one (or
+// break a line). Ordinary chat text that merely contains tags ("hi <b>x</b>", a code snippet) is
+// shown exactly as sent.
+const HTML_TAGS = "p|div|span|b|i|u|strong|em|a|ul|ol|li|blockquote|h[1-6]";
+const HTML_HINT = new RegExp(`^\\s*<(?:${HTML_TAGS}|br)(?:\\s[^<>]*)?\\/?>[\\s\\S]*(?:<\\/(?:${HTML_TAGS})>|<br\\s*\\/?>)`, "i");
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", "#39": "'" };
 
 /**
@@ -40,9 +42,18 @@ export function htmlToPlainText(s: string): string {
   if (!HTML_HINT.test(s)) return s;
   const text = s
     .replace(/\r\n?/g, "\n")
+    // Links keep their address so the page can still link them: "text (url)", or just the url.
+    .replace(/<a\s[^<>]*?href\s*=\s*"([^"]*)"[^<>]*>([\s\S]*?)<\/a>/gi, (_m, href: string, inner: string) => {
+      const label = inner.replace(/<[^<>]*>/g, "").trim();
+      return !label || label === href || href.includes(label.replace(/…$/, "")) ? href : `${label} (${href})`;
+    })
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<li(?:\s[^<>]*)?>/gi, "• ")
+    // A block starts on a new line: marked here, merged with a line break the previous block already ended with.
+    .replace(/<(?:p|div|ul|ol|blockquote|h[1-6])(?:\s[^<>]*)?>/gi, "\u0001")
     .replace(/<\/(?:p|div|li|ul|ol|blockquote|h[1-6])>/gi, "\n")
+    .replace(/\n\u0001/g, "\n")
+    .replace(/\u0001/g, "\n")
     .replace(/<\/?[a-z][a-z0-9]*(?:\s[^<>]*)?\/?>/gi, "")
     .replace(/&(#x[0-9a-f]{1,6}|#[0-9]{1,7}|[a-z]+[0-9]*);/gi, (m, e: string) => {
       const k = e.toLowerCase();
