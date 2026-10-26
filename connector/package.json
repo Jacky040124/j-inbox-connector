@@ -1,0 +1,20 @@
+{
+  "name": "@j-inbox/connector",
+  "version": "0.1.0",
+  "description": "J-Inbox connector: links a local Beeper Client API to your J-Inbox cloud room. Only whitelisted actions run.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "j-inbox": "src/cli.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "build": "mkdir -p dist && cd dist && bun build --compile --target=bun-darwin-arm64 ../src/cli.ts --outfile j-inbox && rm -f .*.bun-build"
+  },
+  "dependencies": {
+    "@j-inbox/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@j-inbox/fake-beeper": "workspace:*"
+  }
+}

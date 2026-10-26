@@ -1,0 +1,19 @@
+{
+  "name": "j-inbox-connector",
+  "private": true,
+  "license": "MIT",
+  "workspaces": [
+    "protocol",
+    "fake-beeper",
+    "connector"
+  ],
+  "scripts": {
+    "test": "cd protocol && bun test && cd ../fake-beeper && bun test && cd ../connector && bun test",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "cd connector && bun run build"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.13",
+    "typescript": "5.9.3"
+  }
+}
