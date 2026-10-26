@@ -83,35 +83,6 @@ export function parseGmailAssetURL(url: unknown): { email: string; messageId: st
   return { email, messageId, attachmentId };
 }
 
-/**
- * A sender's picture: gmail://<urlencoded account>/avatar/<base64url of the sender address>. The
- * connector looks it up (connector/src/gmail/avatar.ts); the web shows initials when there is none.
- */
-export function gmailAvatarURL(email: string, sender: string): string {
-  const s = sender.trim().toLowerCase();
-  if (!/^[^\s@<>]{1,64}@[^\s@<>]{1,253}$/.test(s)) throw new Error("invalid sender address");
-  const b64 = btoa(String.fromCharCode(...new TextEncoder().encode(s))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  return `${ASSET_PREFIX}${encodeURIComponent(must(email))}/avatar/${b64}`;
-}
-
-export function parseGmailAvatarURL(url: unknown): { email: string; sender: string } | null {
-  if (typeof url !== "string" || !url.startsWith(ASSET_PREFIX) || url.length > 2048) return null;
-  const parts = url.slice(ASSET_PREFIX.length).split("/");
-  if (parts.length !== 3 || parts[1] !== "avatar" || !/^[A-Za-z0-9_-]{4,400}$/.test(parts[2]!)) return null;
-  let email: string;
-  let sender: string;
-  try {
-    email = decodeURIComponent(parts[0]!);
-    const bin = atob(parts[2]!.replace(/-/g, "+").replace(/_/g, "/"));
-    sender = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
-  } catch {
-    return null;
-  }
-  if (normalizeGmailAddress(email) !== email || encodeURIComponent(email) !== parts[0]) return null;
-  if (!/^[^\s@<>]{1,64}@[^\s@<>]{1,253}$/.test(sender) || sender !== sender.toLowerCase()) return null;
-  return { email, sender };
-}
-
 // ---- Sign in with Google (cloud) and the token proxy (connector -> cloud) ----
 
 /** Exactly these: gmail.modify covers read, labels, drafts and send. */

@@ -4,7 +4,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { FAKE_GOOGLE_CLIENT, OTHER_EMAIL, OWNER_EMAIL, PDF_BYTES, PNG_BYTES, THREADS, decodeHeader, startFakeGoogle, type RunningFakeGoogle } from "@j-inbox/fake-google";
 import { startFakeBeeper, type FakeBeeper } from "@j-inbox/fake-beeper";
-import { gmailAvatarURL, parseActionResult, parseGmailAvatarURL, type ActionName, type ChatSummary, type EventFrame, type MessageItem } from "@j-inbox/protocol";
+import { parseActionResult, type ActionName, type ChatSummary, type EventFrame, type MessageItem } from "@j-inbox/protocol";
 import { createActions, createWriteDedupe } from "../src/actions.ts";
 import { AssetAllowlist } from "../src/assets.ts";
 import { createBeeperClient } from "../src/beeper-client.ts";
@@ -37,12 +37,6 @@ beforeEach(() => {
   fg.google.reset();
 });
 
-// Sender pictures in tests never touch the network: a stub that knows one address.
-const avatarLookups: string[] = [];
-const stubAvatars = {
-  resolve: async (sender: string) => (avatarLookups.push(sender), sender === "alice@example.com" ? { mimeType: "image/png", bytes: PNG_BYTES } : null),
-};
-
 async function make(o: { accounts?: string[]; scan?: { maxPages?: number; budgetMs?: number } } = {}) {
   const secrets = new MemorySecretStore();
   const life: string[] = [];
@@ -52,7 +46,7 @@ async function make(o: { accounts?: string[]; scan?: { maxPages?: number; budget
   const client = createBeeperClient({ baseURL: fb.url, token: fb.token, timeoutMs: 5000 });
   const assets = new AssetAllowlist();
   const idempotency = createWriteDedupe();
-  const d = createDispatcher({ actions: createActions(client, { assets, idempotency, connectorVersion: "0.1.0" }), client, assets, gmail, idempotency, avatars: stubAvatars });
+  const d = createDispatcher({ actions: createActions(client, { assets, idempotency, connectorVersion: "0.1.0" }), client, assets, gmail, idempotency });
   async function call<A extends ActionName>(action: A, params: unknown): Promise<any> {
     const r = await d.dispatch(action, params);
     if (r.kind !== "res") throw new Error("media");
@@ -115,30 +109,6 @@ describe("reading Gmail", () => {
     expect(low.every((c: ChatSummary) => c.isLowPriority === true)).toBe(true);
     const summary = await t.ok("unread_summary", {});
     expect(summary.items.map((c: ChatSummary) => c.id)).toContain(chat("newsletter"));
-  });
-
-  test("sender pictures: each email from someone else has senderAvatarURL, the chat the newest other sender's; get_media serves it or answers NOT_FOUND", async () => {
-    const t = await make();
-    const page = await t.ok("read_chat", { chatID: chat("lunch") });
-    const mine = page.items.filter((m: any) => m.isSender);
-    const theirs = page.items.filter((m: any) => !m.isSender);
-    expect(mine.length).toBeGreaterThan(0);
-    for (const m of mine) expect(m.senderAvatarURL).toBeUndefined();
-    for (const m of theirs) expect(parseGmailAvatarURL(m.senderAvatarURL)).toEqual({ email: OWNER_EMAIL, sender: m.email.from.address.toLowerCase() });
-    expect(parseGmailAvatarURL(page.chat.avatarURL)?.sender).toBe("alice@example.com");
-    const media = await t.d.dispatch("get_media", { url: page.chat.avatarURL });
-    expect(media.kind).toBe("media");
-    if (media.kind === "media") expect(media.head.mimeType).toBe("image/png");
-    // A sender without a picture: NOT_FOUND (the web shows initials).
-    const other = gmailAvatarURL(OWNER_EMAIL, "nobody@example.org");
-    t.assets.add(other);
-    const none = await t.d.dispatch("get_media", { url: other });
-    expect(none.kind === "res" && !none.ok && none.error.code).toBe("NOT_FOUND");
-    // Only URLs this connector handed out.
-    const forged = gmailAvatarURL(OWNER_EMAIL, "victim@example.net");
-    const refused = await t.d.dispatch("get_media", { url: forged });
-    expect(refused.kind === "res" && !refused.ok && refused.error.code).toBe("NOT_ALLOWED");
-    expect(avatarLookups).not.toContain("victim@example.net");
   });
 
   test("the other inboxes and filters", async () => {

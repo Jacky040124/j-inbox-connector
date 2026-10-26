@@ -156,8 +156,6 @@ export const messageItem = object({
   sharedPost: optional(sharedPost),
   /** Email headers (Gmail chats only). `text` is the plain-text body. */
   email: optional(emailHeaders),
-  /** Email only: the sender's picture as a get_media URL (gmail://…/avatar/…); NOT_FOUND when there is none. */
-  senderAvatarURL: optional(assetUrl()),
   /** Email only: the quoted history of a reply (attribution line and ">" lines), apart from `text`. Truncated. */
   quotedText: optional(text({ max: MAX_EMAIL_TEXT_LENGTH })),
 });
