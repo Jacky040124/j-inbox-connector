@@ -8,9 +8,9 @@ cloud room, and only ever runs the actions in the protocol catalogue.
 
 **Build:** `cd connector && bun run build` -> `dist/j-inbox`, a single darwin-arm64 binary (`bun build --compile`; no Node or Bun needed on the target Mac). `test/binary.test.ts` builds it and runs `--help`, `--version`, `status` and `run` against the fakes.
 
-Status: v0.1, early. Implemented and tested against fakes (CLI, service, launchd, cloud link, all
-11 actions) and read-only against a real Beeper Desktop. Not yet used day to day with Beeper Server;
-see "Assumptions" below.
+Status: implemented (CLI, service, launchd, cloud link, all 11 actions). Not yet tested against a
+real cloud (the cloud is built in parallel) or a real Beeper Server (never installed during
+development, by rule); see "Assumptions" below.
 
 ## Using it
 

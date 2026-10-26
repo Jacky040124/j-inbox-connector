@@ -63,6 +63,7 @@ describe("install / uninstall", () => {
     expect(f.calls).toEqual([
       ["/bin/launchctl", "bootout", `gui/501/${LAUNCHD_LABEL}`],
       ["/bin/launchctl", "bootstrap", "gui/501", path],
+      ["/bin/launchctl", "kickstart", `gui/501/${LAUNCHD_LABEL}`],
     ]);
     expect(await isAgentInstalled(dir)).toBe(true);
   });

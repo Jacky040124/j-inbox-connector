@@ -71,6 +71,9 @@ export async function installAgent(o: { launchAgentsDir: string; plist: string; 
   await o.run([LAUNCHCTL, "bootout", `gui/${o.uid}/${LAUNCHD_LABEL}`], { timeoutMs: 30_000 });
   const r = await o.run([LAUNCHCTL, "bootstrap", `gui/${o.uid}`, path], { timeoutMs: 30_000 });
   if (r.code !== 0) throw new Error(`launchctl bootstrap failed (exit ${r.code}). Run \`j-inbox doctor\`.`);
+  // RunAtLoad alone is not enough: right after a bootout, launchd can load the job and never start it
+  // (seen on the first real install: "runs = 0"). Start it explicitly; no -k, so a running copy stays.
+  await o.run([LAUNCHCTL, "kickstart", `gui/${o.uid}/${LAUNCHD_LABEL}`], { timeoutMs: 30_000 });
   return { path };
 }
 
