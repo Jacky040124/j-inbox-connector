@@ -93,6 +93,16 @@ describe("collect", () => {
     expect(p.hasMore).toBe(true);
     expect(decodePagerCursor(p.nextCursor!, SCOPE)).toEqual({ b: "14", k: null });
   });
+  test("a scan cut short reports its horizon (the last item it looked at) only when timeOf is given", async () => {
+    const src = source(ALL);
+    const r = await collect({ cursor: null, limit: 5, fetchPage: src.fetchPage, keep: (i) => i.n > 90, keyOf: (i) => i.id, maxPages: 2, timeOf: (i) => 1000 - i.n });
+    expect(r.hasMore).toBe(true);
+    expect(r.horizon).toBe(1000 - 13);
+    const plain = await collect({ cursor: null, limit: 5, fetchPage: source(ALL).fetchPage, keep: (i) => i.n > 90, keyOf: (i) => i.id, maxPages: 2 });
+    expect(plain.horizon).toBeUndefined();
+    // Finished walks and walks stopped by the limit have no horizon.
+    expect((await collect({ cursor: null, limit: 3, fetchPage: source(ALL).fetchPage, keep: () => true, keyOf: (i) => i.id, timeOf: (i) => 1000 - i.n })).horizon).toBeUndefined();
+  });
   test("a time budget is honoured too", async () => {
     let t = 0;
     const src = source(ALL);

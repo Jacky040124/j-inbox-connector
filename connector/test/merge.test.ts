@@ -24,7 +24,7 @@ type Item = { id: string; t: number };
  * items than asked (short pages), and now and then none at all with hasMore (a scan budget ran out
  * on items it skipped), like Beeper and Gmail do.
  */
-function listSource(id: string, rank: number, items: Item[], r: () => number, o: { emptyPages?: boolean; failEvery?: number } = {}): MergeSource<Item> & { calls: number } {
+function listSource(id: string, rank: number, items: Item[], r: () => number, o: { emptyPages?: boolean; failEvery?: number; horizon?: boolean } = {}): MergeSource<Item> & { calls: number } {
   const src = {
     id,
     rank,
@@ -37,9 +37,12 @@ function listSource(id: string, rank: number, items: Item[], r: () => number, o:
       if (o.emptyPages && r() < 0.15 && start < items.length) {
         // Scanned a stretch without a match: no items, but the position moved on by up to 3.
         const skip = Math.min(items.length - start, 1 + Math.floor(r() * 3));
+        // How far back it looked (Beeper's scan cut short by time): the last skipped item's time.
+        const lookedTo = items[start + skip - 1]!.t;
         // Skipped items are not matches of this list: they are removed for good.
         items.splice(start, skip);
-        return { items: [], hasMore: start < items.length, cursorAfter: () => (start < items.length ? `o${start}` : null) };
+        const more = start < items.length;
+        return { items: [], hasMore: more, cursorAfter: () => (more ? `o${start}` : null), ...(o.horizon && more ? { horizon: lookedTo } : {}) };
       }
       const n = Math.max(0, Math.min(limit, Math.floor(r() * (limit + 1)) || limit));
       const page = items.slice(start, start + n);
@@ -113,6 +116,44 @@ describe("k-way merge over random sources", () => {
       expect(new Set(ids).size).toBe(ids.length);
       expect([...ids].sort()).toEqual(copies.flat().map((x) => x.id).sort());
     }
+  });
+
+  test("empty scan pages with a horizon: the others go on with newer items; still every item once, newest first", async () => {
+    for (let seed = 2000; seed < 2200; seed++) {
+      const { r, lists } = randomSources(seed);
+      const copies = lists.map((l) => [...l]);
+      const sources = copies.map((l, i) => listSource(`s${i}`, i, l, r, { emptyPages: true, horizon: true }));
+      const { out } = await walk(sources, 1 + Math.floor(r() * 8));
+      const ids = out.map((x) => x.id);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect([...ids].sort()).toEqual(copies.flat().map((x) => x.id).sort());
+      for (let i = 1; i < out.length; i++) if (out[i]!.t > out[i - 1]!.t) throw new Error(`seed ${seed}: order broken at ${i}`);
+    }
+  });
+
+  test("a source that scanned without a match (hasMore, horizon) does not hold back newer items of the others", async () => {
+    // Beeper: no unread chat in the pages it had time for (looked back to t=500). Gmail: unread mail at 900..600 and 400.
+    const beeper: MergeSource<Item> = {
+      id: "b",
+      rank: 0,
+      failure: { source: "beeper" },
+      fetch: async (cursor) =>
+        cursor === null ? { items: [], hasMore: true, horizon: 500, cursorAfter: () => "later" } : { items: [{ value: { id: "b0", t: 450 }, time: 450, key: "b0" }], hasMore: false, cursorAfter: () => null },
+    };
+    const gm = listSource("g", 1, [900, 800, 700, 600, 400].map((t) => ({ id: `g${t}`, t })), () => 0.99);
+    const first = await mergeCollect([beeper, gm], null, 10, "s");
+    if (first === "bad") throw new Error("bad");
+    expect(first.taken.map((t) => t.item.value.id)).toEqual(["g900", "g800", "g700", "g600"]);
+    const f = first.finish(first.taken.length);
+    expect(f.hasMore).toBe(true);
+    const second = await mergeCollect([beeper, gm], f.nextCursor, 10, "s");
+    if (second === "bad") throw new Error("bad");
+    expect(second.taken.map((t) => t.item.value.id)).toEqual(["b0", "g400"]);
+    // Without a horizon it must still wait (its next item could be the newest).
+    const blind: MergeSource<Item> = { ...beeper, fetch: async () => ({ items: [], hasMore: true, cursorAfter: () => "later" }) };
+    const m = await mergeCollect([blind, gm], null, 10, "s");
+    if (m === "bad") throw new Error("bad");
+    expect(m.taken).toHaveLength(0);
   });
 
   test("a source whose order is not by time stays consistent (effective time never rises within it)", async () => {

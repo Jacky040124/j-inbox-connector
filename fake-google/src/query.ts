@@ -124,7 +124,10 @@ function termMatches(t: Extract<Node, { kind: "term" }>, m: MessageView, self: s
     case "label":
       return has(SYSTEM[v] ?? v.toUpperCase());
     case "category":
-      return has(`CATEGORY_${v === "primary" ? "PERSONAL" : v.toUpperCase()}`);
+      // Like a real account with the Promotions and Social tabs on: Gmail's Primary tab also shows
+      // Updates (and unlabelled) mail, so "primary" is "not promotions, social or forums".
+      if (v === "primary") return !has("CATEGORY_PROMOTIONS") && !has("CATEGORY_SOCIAL") && !has("CATEGORY_FORUMS");
+      return has(`CATEGORY_${v.toUpperCase()}`);
     case "has":
       return v === "attachment" ? m.hasAttachment : false;
     case "after": {

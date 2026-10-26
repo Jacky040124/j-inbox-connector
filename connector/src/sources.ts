@@ -129,7 +129,12 @@ export function createRouter(o: RouterOptions) {
           fetch: (cursor, n) =>
             wrapBeeper(async () => {
               const { r, mapped, scope } = await b.internals.listChatsCollect({ ...beeperParams, ...(cursor ? { cursor } : {}), limit: n }, ctx);
-              return { items: mapped.map((x) => ({ value: x.value, time: activityMs(x.value), key: x.value.id, urls: x.urls })), hasMore: r.hasMore, cursorAfter: (k) => b.internals.finishPage(r, k, scope).nextCursor };
+              return {
+                items: mapped.map((x) => ({ value: x.value, time: activityMs(x.value), key: x.value.id, urls: x.urls })),
+                hasMore: r.hasMore,
+                cursorAfter: (k) => b.internals.finishPage(r, k, scope).nextCursor,
+                ...(r.horizon !== undefined ? { horizon: r.horizon } : {}),
+              };
             })(),
         });
       sel.gmail.forEach((s, i) =>

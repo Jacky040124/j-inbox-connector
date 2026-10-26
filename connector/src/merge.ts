@@ -24,6 +24,12 @@ export type SourcePage<T> = {
   hasMore: boolean;
   /** The source's own cursor that resumes right after its first n items; null when nothing is left after them. */
   cursorAfter(n: number): string | null;
+  /**
+   * With hasMore: everything this source has not returned yet is at or before this time (it looked
+   * that far back). Lets the merge go on with newer items from the other sources instead of
+   * stopping at a source whose scan ran out of time before finding anything.
+   */
+  horizon?: number;
 };
 export type FailedSource = { source: "beeper" | "gmail"; accountID?: string; error: ErrorBody };
 
@@ -140,7 +146,11 @@ export async function mergeCollect<T>(sources: MergeSource<T>[], cursor: string 
   const taken: { item: MergeItem<T>; source: string; lane: Lane<T>; at: Boundary }[] = [];
   const live = lanes.filter((l) => l.page);
   while (taken.length < limit) {
-    if (live.some((l) => l.idx >= l.page!.items.length && l.page!.hasMore)) break;
+    // A source that has more but no fetched items left blocks everything at or before its horizon
+    // (everything, without one): its next item could be that new.
+    let blockAt = Number.NEGATIVE_INFINITY;
+    for (const l of live) if (l.idx >= l.page!.items.length && l.page!.hasMore) blockAt = Math.max(blockAt, l.page!.horizon ?? Number.POSITIVE_INFINITY);
+    if (blockAt === Number.POSITIVE_INFINITY) break;
     let best: Lane<T> | null = null;
     let bestAt: Boundary | null = null;
     for (const l of live) {
@@ -149,6 +159,7 @@ export async function mergeCollect<T>(sources: MergeSource<T>[], cursor: string 
       if (!bestAt || cmp(at, bestAt) < 0) (best = l), (bestAt = at);
     }
     if (!best || !bestAt) break;
+    if (bestAt[0] <= blockAt) break;
     taken.push({ item: best.page!.items[best.idx]!, source: best.src.id, lane: best, at: bestAt });
     best.idx++;
   }
@@ -177,7 +188,9 @@ export async function mergeCollect<T>(sources: MergeSource<T>[], cursor: string 
         const next = l.page.cursorAfter(consumed);
         const done = next === null;
         const recent = [...old[3], ...l.page.items.slice(l.skip, consumed).map((it) => sourceKeyHash(it.key))].slice(-RECENT);
-        p[l.src.id] = [next, done ? 1 : 0, consumed > 0 ? l.eff[consumed - 1]! : old[2], recent];
+        // A source that gave nothing but looked back to its horizon: its later items sort no higher.
+        const floor = consumed > 0 ? l.eff[consumed - 1]! : l.page.horizon !== undefined ? Math.min(l.page.horizon, old[2] ?? Number.POSITIVE_INFINITY) : old[2];
+        p[l.src.id] = [next, done ? 1 : 0, floor, recent];
         if (!done) open = true;
       }
       const b = k > 0 ? taken[k - 1]!.at : st.b;

@@ -203,6 +203,8 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
         (!unreadOnly || Number(c.unreadCount) > 0 || c.isMarkedUnread === true) &&
         mapChat(c) !== null,
       keyOf: (c) => String(c.id),
+      // Beeper lists chats newest activity first: a scan cut short knows how far back it looked.
+      timeOf: (c) => (typeof c.lastActivity === "string" ? Date.parse(c.lastActivity) : Number.NaN),
       ...scan,
       ...ctx,
     });

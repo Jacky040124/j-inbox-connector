@@ -95,6 +95,22 @@ describe("reading Gmail", () => {
     expect(page.items.find((c: ChatSummary) => c.id === chat("draft"))!.hasDraft).toBe(true);
   });
 
+  test("Primary is Gmail's own category:primary: Updates mail Gmail shows in Primary is in the primary inbox, unread list and summary", async () => {
+    const t = await make();
+    const primary = (await t.ok("list_chats", { network: "Gmail", inbox: "primary" })).items;
+    const nl = primary.find((c: ChatSummary) => c.id === chat("newsletter"));
+    expect(nl).toBeDefined();
+    expect(nl.isLowPriority).toBe(false);
+    const unread = (await t.ok("list_chats", { network: "Gmail", inbox: "primary", unreadOnly: true })).items.map((c: ChatSummary) => c.id);
+    expect(unread).toContain(chat("newsletter"));
+    expect(unread).not.toContain(chat("promo"));
+    const low = (await t.ok("list_chats", { network: "Gmail", inbox: "low-priority" })).items;
+    expect(low.map((c: ChatSummary) => c.id)).not.toContain(chat("newsletter"));
+    expect(low.every((c: ChatSummary) => c.isLowPriority === true)).toBe(true);
+    const summary = await t.ok("unread_summary", {});
+    expect(summary.items.map((c: ChatSummary) => c.id)).toContain(chat("newsletter"));
+  });
+
   test("the other inboxes and filters", async () => {
     const t = await make();
     const low = (await t.ok("list_chats", { network: "Gmail", inbox: "low-priority" })).items.map((c: ChatSummary) => c.id);
@@ -377,9 +393,9 @@ describe("mixed lists", () => {
     })();
     const s = await t.ok("unread_summary", {});
     const gmailUnread = s.items.filter((c: ChatSummary) => c.network === "Gmail");
-    expect(gmailUnread.map((c: ChatSummary) => c.id).sort()).toEqual([chat("lunch"), chat("kickoff"), chat("encoded"), chat("hostile"), chat("cjk")].sort());
-    expect(s.totalUnreadChats).toBe(beeperOnly.totalUnreadChats + 5);
-    expect(s.totalUnreadMessages).toBe(beeperOnly.totalUnreadMessages + 1 + 2 + 1 + 1 + 1);
+    expect(gmailUnread.map((c: ChatSummary) => c.id).sort()).toEqual([chat("lunch"), chat("kickoff"), chat("encoded"), chat("hostile"), chat("cjk"), chat("newsletter")].sort());
+    expect(s.totalUnreadChats).toBe(beeperOnly.totalUnreadChats + 6);
+    expect(s.totalUnreadMessages).toBe(beeperOnly.totalUnreadMessages + 1 + 2 + 1 + 1 + 1 + 1);
   });
 
   test("search_messages: Gmail query syntax, merged with Beeper, chats included, filters honoured", async () => {

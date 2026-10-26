@@ -77,6 +77,8 @@ export type CollectOptions<T> = {
   signal?: AbortSignal;
   /** Epoch ms (same clock as `now`) by which the request must be answered; scanning stops before it. */
   deadline?: number;
+  /** An item's time (epoch ms) in the walk order; with it, a scan cut short reports `horizon`. */
+  timeOf?: (item: T) => number;
 };
 
 /** The request was cancelled or its deadline passed: answer TIMEOUT. */
@@ -94,6 +96,11 @@ export type Collected<T> = {
   hasMore: boolean;
   /** Where the next call should start when every collected item is returned. */
   resume: PagerCursor | null;
+  /**
+   * Set when the scan stopped for time or pages (with `timeOf`): the time of the last item looked
+   * at. Items not scanned yet are on older pages, so (newest first) at or before it.
+   */
+  horizon?: number;
 };
 
 export async function collect<T>(o: CollectOptions<T>): Promise<Collected<T>> {
@@ -111,6 +118,7 @@ export async function collect<T>(o: CollectOptions<T>): Promise<Collected<T>> {
   const seekFromHead = skipTo !== null && b === null;
   const items: T[] = [];
   const after: PagerCursor[] = [];
+  let lastTime: number | undefined;
   for (let pages = 1; ; pages++) {
     if (o.signal?.aborted) throw new RequestAborted();
     const page = await o.fetchPage(b);
@@ -128,6 +136,10 @@ export async function collect<T>(o: CollectOptions<T>): Promise<Collected<T>> {
     }
     for (let i = start; i < page.items.length; i++) {
       const item = page.items[i]!;
+      if (o.timeOf) {
+        const t = o.timeOf(item);
+        if (Number.isFinite(t)) lastTime = t;
+      }
       const here: PagerCursor = { b, k: keyHash(o.keyOf(item)) };
       if (o.keep(item)) {
         items.push(item);
@@ -142,7 +154,7 @@ export async function collect<T>(o: CollectOptions<T>): Promise<Collected<T>> {
     // An empty page ends the walk even if Beeper said hasMore (real iMessage history does this).
     if (!pageHasMore) return { items, after, hasMore: false, resume: null };
     b = page.oldestCursor;
-    if (pages >= maxPages || outOfTime()) return { items, after, hasMore: true, resume: { b, k: null } };
+    if (pages >= maxPages || outOfTime()) return { items, after, hasMore: true, resume: { b, k: null }, ...(lastTime !== undefined ? { horizon: lastTime } : {}) };
   }
 }
 

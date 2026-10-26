@@ -5,8 +5,9 @@
 //
 // Decisions (design/gmail-plan.md "Model mapping"): title = subject of the thread's first message
 // or "(no subject)"; isArchived = no message has INBOX; isLowPriority = a message carries
-// CATEGORY_PROMOTIONS / SOCIAL / UPDATES / FORUMS (so those stay out of the primary list and
-// unread_summary, like Gmail's tabs); isPinned = STARRED; type = group when more than one other
+// CATEGORY_PROMOTIONS / SOCIAL / FORUMS. That is only a hint for a single thread: the lists and
+// unread_summary ask Gmail (`category:primary`) and set it from the query, because Gmail shows
+// most CATEGORY_UPDATES mail in Primary; isPinned = STARRED; type = group when more than one other
 // person is on the thread; lastActivity = the newest message that is not a draft.
 import {
   GMAIL_ATTACHMENT_ID_RE,
@@ -36,7 +37,7 @@ export type GPart = { partId?: string; mimeType?: string; filename?: string; hea
 export type GMessage = { id?: string; threadId?: string; labelIds?: string[]; snippet?: string; internalDate?: string; payload?: GPart };
 export type GThread = { id?: string; messages?: GMessage[] };
 
-export const LOW_PRIORITY_LABELS = ["CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_UPDATES", "CATEGORY_FORUMS"] as const;
+export const LOW_PRIORITY_LABELS = ["CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_FORUMS"] as const;
 export const NO_SUBJECT = "(no subject)";
 const MAX_PART_DEPTH = 12;
 const MAX_BODY_BYTES = 4 * 1024 * 1024;

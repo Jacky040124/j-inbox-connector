@@ -24,9 +24,13 @@ import { sniffImageType } from "../media.ts";
 
 const META_HEADERS = ["From", "To", "Cc", "Subject", "Date", "Message-ID"];
 const REPLY_HEADERS = ["From", "To", "Cc", "Reply-To", "Subject", "Message-ID", "References", "In-Reply-To"];
-/** Primary inbox: Gmail's Primary tab (the other tabs are low priority). */
-export const Q_PRIMARY = "in:inbox -category:promotions -category:social -category:updates -category:forums";
-export const Q_LOW_PRIORITY = "in:inbox {category:promotions category:social category:updates category:forums}";
+/**
+ * Primary inbox: Gmail's own Primary tab (`category:primary`), which Gmail works out per account:
+ * which tabs are on, and which Updates it shows in Primary. Never rebuild it from the category
+ * labels: on an account with the Updates tab Gmail still puts most Updates mail in Primary.
+ */
+export const Q_PRIMARY = "in:inbox category:primary";
+export const Q_LOW_PRIORITY = "in:inbox -category:primary";
 const CONCURRENCY = 8;
 const MAX_SCAN_PAGES = 5;
 
@@ -76,14 +80,17 @@ function decodePos(s: string | null): Pos | null {
 export type ListFilter = {
   q: string;
   keep: (c: ChatSummary) => boolean;
+  /** Set isLowPriority from the query (Gmail knows the tab; the labels only hint at it). */
+  lowPriority?: boolean;
 };
 
 /** Gmail query and post-filter for list_chats params (network/accountIDs are routed before). */
 export function listFilterFor(p: Partial<ActionParams<"list_chats">>): ListFilter {
   const q: string[] = [];
   const keeps: ((c: ChatSummary) => boolean)[] = [];
-  if (p.inbox === "primary") q.push(Q_PRIMARY), keeps.push((c) => !c.isArchived && !c.isLowPriority);
-  else if (p.inbox === "low-priority") q.push(Q_LOW_PRIORITY), keeps.push((c) => !c.isArchived && c.isLowPriority === true);
+  let lowPriority: boolean | undefined;
+  if (p.inbox === "primary") q.push(Q_PRIMARY), keeps.push((c) => !c.isArchived), (lowPriority = false);
+  else if (p.inbox === "low-priority") q.push(Q_LOW_PRIORITY), keeps.push((c) => !c.isArchived), (lowPriority = true);
   else if (p.inbox === "archive") q.push("-in:inbox"), keeps.push((c) => c.isArchived);
   if (p.unreadOnly) q.push("is:unread"), keeps.push((c) => c.unreadCount > 0);
   if (p.pinnedOnly) q.push("is:starred"), keeps.push((c) => c.isPinned);
@@ -94,7 +101,7 @@ export function listFilterFor(p: Partial<ActionParams<"list_chats">>): ListFilte
     for (const w of words) q.push(`subject:"${w}"`);
     keeps.push((c) => words.every((w) => c.title.toLowerCase().includes(w.toLowerCase())));
   }
-  return { q: q.join(" "), keep: (c) => keeps.every((k) => k(c)) };
+  return { q: q.join(" "), keep: (c) => keeps.every((k) => k(c)), ...(lowPriority === undefined ? {} : { lowPriority }) };
 }
 
 export type GmailSource = ReturnType<typeof createGmailSource>;
@@ -166,6 +173,7 @@ export function createGmailSource(o: { email: string; client: GmailClient; scan?
           const after: Pos = idx + 1 < ids.length ? { t: pos.t, o: idx + 1 } : next ? { t: next, o: 0 } : { t: pos.t, o: ids.length };
           const urls: string[] = [];
           const chat = threads[j] ? mapGmailThread(threads[j], email, { onAsset: (u) => urls.push(u) }) : null;
+          if (chat && filter.lowPriority !== undefined) chat.isLowPriority = filter.lowPriority;
           if (chat && filter.keep(chat)) kept.push({ item: { value: chat, time: activityMs(chat), key: chat.id, urls }, after });
           if (kept.length >= limit) {
             const moreHere = idx + 1 < ids.length;
@@ -202,7 +210,7 @@ export function createGmailSource(o: { email: string; client: GmailClient; scan?
 
   /** Unread chats in the primary inbox, newest first (unread_summary). */
   async function unread(limit: number, ctx: RequestContext): Promise<{ items: MergeItem<ChatSummary>[]; truncated: boolean }> {
-    const page = await listThreads({ q: `is:unread ${Q_PRIMARY}`, keep: (c) => c.unreadCount > 0 && !c.isArchived && !c.isLowPriority }, null, limit, ctx);
+    const page = await listThreads({ q: `is:unread ${Q_PRIMARY}`, keep: (c) => c.unreadCount > 0 && !c.isArchived, lowPriority: false }, null, limit, ctx);
     return { items: page.items, truncated: page.hasMore };
   }
 
