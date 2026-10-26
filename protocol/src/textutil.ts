@@ -65,3 +65,41 @@ export function htmlToPlainText(s: string): string {
     .replace(/\n{3,}/g, "\n\n");
   return text.trim();
 }
+
+const POST_NETWORKS: [RegExp, string][] = [
+  [/(^|\.)instagram\.com$/i, "Instagram"],
+  [/(^|\.)facebook\.com$|(^|\.)fb\.watch$/i, "Facebook"],
+  [/(^|\.)tiktok\.com$/i, "TikTok"],
+  [/(^|\.)(x|twitter)\.com$/i, "X"],
+  [/(^|\.)threads\.(net|com)$/i, "Threads"],
+  [/(^|\.)youtube\.com$|(^|\.)youtu\.be$/i, "YouTube"],
+];
+
+/**
+ * A shared post in a message body, as Beeper's Instagram bridge sends it:
+ * `<strong>{author} {caption…}</strong><p><a href="https://www.instagram.com/p/…">…</a></p>`.
+ * Returns null for anything else. All parts are plain text; the url is https only.
+ */
+export function parseSharedPost(body: string): { network: string; url: string; author?: string; caption?: string } | null {
+  if (typeof body !== "string" || body.length > 20_000) return null;
+  const m = /^\s*<strong>([\s\S]*?)<\/strong>\s*(?:<p>\s*)?<a\s[^<>]*?href\s*=\s*"(https:\/\/[^"\s<>]+)"[^<>]*>[\s\S]*?<\/a>\s*(?:<\/p>)?\s*$/i.exec(body);
+  if (!m) return null;
+  const url = m[2]!.replace(/&amp;/g, "&");
+  let host: string;
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    return null;
+  }
+  const network = POST_NETWORKS.find(([re]) => re.test(host))?.[1];
+  if (!network) return null;
+  const head = htmlToPlainText(`<p>${m[1]}</p>`).trim();
+  const out: { network: string; url: string; author?: string; caption?: string } = { network, url };
+  // Instagram puts the poster's username first.
+  const first = /^([A-Za-z0-9._]{1,30})(?:\s+|$)([\s\S]*)$/.exec(head);
+  if (network === "Instagram" && first) {
+    out.author = first[1]!;
+    if (first[2]!.trim()) out.caption = first[2]!.trim();
+  } else if (head) out.caption = head;
+  return out;
+}

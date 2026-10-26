@@ -31,3 +31,31 @@ describe("htmlToPlainText: shared posts and links (Instagram)", () => {
     expect(htmlToPlainText('look: <a href="https://x.y">x</a>')).toBe('look: <a href="https://x.y">x</a>');
   });
 });
+
+import { parseSharedPost } from "../src/textutil.ts";
+import { parse } from "../src/schema.ts";
+import { sharedPost } from "../src/model.ts";
+
+describe("parseSharedPost", () => {
+  const ig = '<strong>gdgutsg LARPING MEETS HACKATHON!!\n\nAre you a seasoned LARPer …</strong><p><a href="https://www.instagram.com/p/DewgZgURy_3/?is_sponsored=false&amp;x=1" rel="noopener noreferrer" target="_blank">https://www.instagram.com/p/DewgZgURy_3/</a></p>';
+  test("an Instagram share: author, caption and link, valid per the protocol", () => {
+    const p = parseSharedPost(ig)!;
+    expect(p).toEqual({ network: "Instagram", author: "gdgutsg", caption: "LARPING MEETS HACKATHON!!\n\nAre you a seasoned LARPer …", url: "https://www.instagram.com/p/DewgZgURy_3/?is_sponsored=false&x=1" });
+    expect(parse(sharedPost, p).ok).toBe(true);
+  });
+  test("not a share: plain text, other hosts, http links, javascript links, extra text after the link", () => {
+    for (const s of [
+      "hello",
+      '<strong>a b</strong><p><a href="https://evil.example/p/1">x</a></p>',
+      '<strong>a b</strong><p><a href="http://www.instagram.com/p/1">x</a></p>',
+      '<strong>a b</strong><p><a href="javascript:alert(1)">x</a></p>',
+      '<strong>a b</strong><p><a href="https://www.instagram.com/p/1">x</a></p> and more',
+      '<strong>a b</strong><p><a href="https://www.instagram.com.evil.com/p/1">x</a></p>',
+    ])
+      expect(parseSharedPost(s)).toBeNull();
+  });
+  test("markup inside the caption stays text", () => {
+    const p = parseSharedPost('<strong>bob &lt;script&gt;alert(1)&lt;/script&gt;</strong><a href="https://www.instagram.com/reel/X/">x</a>')!;
+    expect(p.caption).toBe("<script>alert(1)</script>");
+  });
+});

@@ -105,6 +105,19 @@ describe("HTML message bodies", () => {
   });
 });
 
+describe("shared posts", () => {
+  test("an Instagram share carries sharedPost next to the plain text and the image", () => {
+    const raw = { id: "m2", chatID: "!c:beeper.local", accountID: "instagramgo", senderID: "u", timestamp: "2026-10-23T05:46:55.418Z", sortKey: "2", type: "IMAGE",
+      text: '<strong>gdgutsg LARPING MEETS HACKATHON!!</strong><p><a href="https://www.instagram.com/p/DewgZgURy_3/">https://www.instagram.com/p/DewgZgURy_3/</a></p>',
+      attachments: [{ id: "mxc://local.beeper.com/abc", type: "img", mimeType: "image/jpeg", size: { width: 720, height: 864 } }] };
+    const m = mapMessage(raw)!;
+    expect(m.sharedPost).toEqual({ network: "Instagram", author: "gdgutsg", caption: "LARPING MEETS HACKATHON!!", url: "https://www.instagram.com/p/DewgZgURy_3/" });
+    expect(m.text).toBe("gdgutsg LARPING MEETS HACKATHON!!\nhttps://www.instagram.com/p/DewgZgURy_3/");
+    expect(m.attachments?.length).toBe(1);
+    expect(mapMessage({ ...raw, text: "just text" })!.sharedPost).toBeUndefined();
+  });
+});
+
 describe("asset URLs", () => {
   test("chat imgURL (a local path) becomes an encoded file:/// URL; attachments keep mxc://", () => {
     expect(assetURLFromLocalPath("/Users/a b/Library/x#1?.png")).toBe("file:///Users/a%20b/Library/x%231%3F.png");

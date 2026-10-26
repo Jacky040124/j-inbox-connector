@@ -97,6 +97,18 @@ export type Reaction = Infer<typeof reaction>;
 export const MESSAGE_TYPES = ["TEXT", "NOTICE", "IMAGE", "VIDEO", "VOICE", "AUDIO", "FILE", "STICKER", "LOCATION", "REACTION", "UNKNOWN"] as const;
 export const SEND_STATUSES = ["SUCCESS", "PENDING", "FAIL_RETRIABLE", "FAIL_PERMANENT"] as const;
 
+/**
+ * A post someone shared into the chat (Instagram shares and similar): who posted it, its text and
+ * its link. The image stays in the message's attachments; `text` keeps the plain-text version.
+ */
+export const sharedPost = object({
+  network: networkName,
+  url: string({ min: 9, max: 2048, pattern: /^https:\/\/[^\s<>"'`]+$/, format: "https-url" }),
+  author: optional(string({ min: 1, max: 64 })),
+  caption: optional(text({ max: 4000 })),
+});
+export type SharedPost = Infer<typeof sharedPost>;
+
 export const messageItem = object({
   id: messageID,
   chatID,
@@ -119,6 +131,7 @@ export const messageItem = object({
   attachments: optional(array(attachment, { max: MAX_ATTACHMENTS_PER_MESSAGE })),
   reactions: optional(array(reaction, { max: MAX_REACTIONS_PER_MESSAGE })),
   sendStatus: optional(enumOf(SEND_STATUSES)),
+  sharedPost: optional(sharedPost),
 });
 export type MessageItem = Infer<typeof messageItem>;
 

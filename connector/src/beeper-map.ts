@@ -7,6 +7,8 @@
 import {
   ACCOUNT_STATUSES,
   htmlToPlainText,
+  parseSharedPost,
+  sharedPost as sharedPostSchema,
   ATTACHMENT_TYPES,
   MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_NAME_LENGTH,
@@ -125,6 +127,16 @@ export function mapMessage(raw: unknown, opts: MapOptions = {}): MessageItem | n
     const t = truncateText(sanitizeText(htmlToPlainText(raw.text)), MAX_RESULT_TEXT_LENGTH);
     out.text = t.text;
     if (t.truncated) out.textTruncated = true;
+    const post = parseSharedPost(raw.text);
+    if (post) {
+      const sp = ok(sharedPostSchema, {
+        network: post.network,
+        url: post.url,
+        ...(post.author ? { author: sanitizeLine(post.author, 64) } : {}),
+        ...(post.caption ? { caption: truncateText(sanitizeText(post.caption), 4000).text } : {}),
+      });
+      if (sp) out.sharedPost = sp;
+    }
   }
   const isUnread = bool(raw.isUnread);
   if (isUnread !== undefined) out.isUnread = isUnread;
