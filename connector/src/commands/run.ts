@@ -26,6 +26,8 @@ export async function runCommand(ctx: Ctx): Promise<number> {
       paths: ctx.paths,
       secrets: ctx.secrets,
       version: CONNECTOR_VERSION,
+      env: deps.env,
+      fetchImpl: deps.fetchImpl,
       log: (line) => deps.err(`${new Date().toISOString()} ${line}`),
     });
     let signal: string | null = null;

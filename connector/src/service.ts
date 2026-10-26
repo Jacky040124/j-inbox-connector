@@ -8,11 +8,13 @@ import { AssetAllowlist } from "./assets.ts";
 import { AuditLog } from "./audit.ts";
 import { createBeeperClient } from "./beeper-client.ts";
 import { CloudLink, type LinkState, type SocketFactory } from "./cloud-link.ts";
-import { loadConfig, writeAtomic, type Paths } from "./config.ts";
+import { gmailPollOverride, googleEndpoints, loadConfig, writeAtomic, type Paths } from "./config.ts";
 import { createDispatcher } from "./dispatcher.ts";
 import { BeeperEventStream, HealthMonitor, Reconciler } from "./events.ts";
 import { FileIdempotencyJournal } from "./idempotency.ts";
 import type { SecretStore } from "./secrets.ts";
+import { cloudTokenRefresher } from "./gmail/client.ts";
+import { createGmailService } from "./gmail/service.ts";
 
 export type ServiceOptions = {
   paths: Paths;
@@ -22,6 +24,10 @@ export type ServiceOptions = {
   healthIntervalMs?: number;
   backoff?: (attempt: number) => number;
   log?: (line: string) => void;
+  /** Environment for the Google endpoint overrides (tests only; see googleEndpoints). */
+  env?: Record<string, string | undefined>;
+  fetchImpl?: typeof fetch;
+  gmailPollIntervalMs?: number;
 };
 
 export type ExitReason = "not_paired" | "no_beeper_token" | "config_error" | "shutdown" | "revoked" | "unauthenticated" | "replaced" | "version";
@@ -83,8 +89,12 @@ export async function startService(o: ServiceOptions): Promise<Service> {
   };
 
   let config;
+  let google: { gmailURL: string; oauthURL: string };
+  let pollMs: number | undefined;
   try {
     config = loadConfig(o.paths);
+    google = googleEndpoints(o.env ?? {}, o.paths);
+    pollMs = o.gmailPollIntervalMs ?? gmailPollOverride(o.env ?? {}, o.paths);
   } catch (e) {
     return exitNow("config_error", (e as Error).message);
   }
@@ -97,8 +107,22 @@ export async function startService(o: ServiceOptions): Promise<Service> {
   const startedAt = new Date().toISOString();
   const client = createBeeperClient({ baseURL: config.beeperURL, token: beeperToken });
   const assets = new AssetAllowlist({ path: o.paths.assetsFile });
-  const actions = createActions(client, { connectorVersion: o.version, assets, idempotency: createWriteDedupe({ journal: new FileIdempotencyJournal(o.paths.idempotencyFile) }) });
-  const dispatcher = createDispatcher({ actions, client, assets });
+  const idempotency = createWriteDedupe({ journal: new FileIdempotencyJournal(o.paths.idempotencyFile) });
+  const actions = createActions(client, { connectorVersion: o.version, assets, idempotency });
+  // Gmail: tokens in the Keychain, access tokens refreshed through the cloud (the client secret
+  // cannot ship in this open-source connector), Gmail itself reached directly from this Mac.
+  const gmail = createGmailService({
+    secrets: o.secrets,
+    path: o.paths.gmailFile,
+    refresh: cloudTokenRefresher({ cloudURL: config.cloudURL, deviceToken, fetchImpl: o.fetchImpl }),
+    gmailURL: google.gmailURL,
+    oauthURL: google.oauthURL,
+    fetchImpl: o.fetchImpl,
+    pollIntervalMs: pollMs,
+    log: (m) => log(m),
+    onLifecycle: (e) => audit.lifecycle(e),
+  });
+  const dispatcher = createDispatcher({ actions, client, assets, gmail, idempotency });
 
   let link: CloudLink;
   const send = (f: EventFrame) => link.sendEvent(f);
@@ -163,13 +187,15 @@ export async function startService(o: ServiceOptions): Promise<Service> {
     backoff: o.backoff,
     hello: async () => {
       const h = await health.check();
-      if (!h.reachable || h.tokenValid === false) return { beeperVersion: h.version, networks: [] };
+      const gmailNetworks = gmail.emails().length ? ["Gmail"] : [];
+      if (!h.reachable || h.tokenValid === false) return { beeperVersion: h.version, networks: gmailNetworks };
       const st = await actions.status({});
-      return { beeperVersion: h.version, networks: st.ok ? (st.data.networks ?? []) : [] };
+      return { beeperVersion: h.version, networks: [...new Set([...(st.ok ? (st.data.networks ?? []) : []), ...gmailNetworks])].sort() };
     },
     onWelcome: () => {
       send(health.statusFrame());
       void reconciler.run();
+      void gmail.pollNow();
     },
     onRequest: (r) => audit.request(r),
     onState: (s) => {
@@ -192,6 +218,7 @@ export async function startService(o: ServiceOptions): Promise<Service> {
     (stopping ??= (async () => {
       events.stop();
       health.stop();
+      gmail.stopPolling();
       clearInterval(flushTimer);
       await link.stop(graceMs);
       try {
@@ -205,6 +232,7 @@ export async function startService(o: ServiceOptions): Promise<Service> {
   log(`j-inbox ${o.version}: starting (device ${config.deviceID})`);
   health.start();
   events.start();
+  gmail.startPolling(send);
   link.start();
   writeState();
 

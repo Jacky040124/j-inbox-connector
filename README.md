@@ -1,7 +1,7 @@
 # J-Inbox connector
 
 The open-source half of [J-Inbox](https://inbox.jackyzhonghq.com): one inbox for WhatsApp,
-Instagram, LinkedIn, X, iMessage and more, for people (a small web page) and for AI agents
+Instagram, LinkedIn, X, iMessage, Gmail and more, for people (a small web page) and for AI agents
 (a [Raft](https://raft.build) App).
 
 The chats themselves never leave your Mac except to answer a request. J-Inbox uses the
@@ -16,7 +16,7 @@ Beeper on your Mac  <-- localhost -->  j-inbox connector  <-- outbound WSS -->  
 - **Whitelist.** The cloud can only ask for the actions in the protocol catalogue
   (`protocol/src/actions.ts`): list, read and search chats, get media, draft, send, react, mark
   read, archive. An agent's send waits for a person to approve it in J-Inbox. Anything else is refused here, on your Mac.
-- **Your keys stay here.** The Beeper token lives in the macOS Keychain. The cloud never sees it.
+- **Your keys stay here.** The Beeper token and your Gmail access live in the macOS Keychain. The cloud never stores them.
 - **No chat content in logs.** The local audit log records the action name, time and result only.
 - **Pass-through cloud.** The J-Inbox cloud relays requests and stores no messages. (The cloud is
   closed source; this repo is the part that runs on your machine, so you can check what it does.)
@@ -44,6 +44,7 @@ for every command and file location.
 | [`connector/`](connector/README.md) | The `j-inbox` CLI and background service. |
 | [`protocol/`](protocol/README.md) | Every contract between connector, cloud, web page and agents, with runtime validators. No dependencies. |
 | [`fake-beeper/`](fake-beeper/README.md) | A fake Beeper Client API with real-API quirks and fault injection, used by the tests. |
+| [`fake-google/`](fake-google/README.md) | A fake Google OAuth + Gmail REST subset, used by the tests. |
 | `scripts/` | Helpers for the import-boundary tests. |
 
 ## Tests

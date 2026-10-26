@@ -40,12 +40,15 @@ import {
   beeperHealth,
   chatID,
   chatSummary,
+  emailRecipient,
   mediaHead,
   messageID,
   messageItem,
   networkName,
   versionString,
 } from "./model.ts";
+import { errorBody } from "./error-schema.ts";
+import { oauthToken } from "./gmail.ts";
 
 
 type Shape = Record<string, Schema<any>>;
@@ -63,6 +66,8 @@ export interface ActionDef<P extends Shape, R> {
   readonly needsApprovalForAgents: boolean;
   /** Only the owner in the web page may run it: never in the agent manifest, refused for agents. */
   readonly humanOnly?: boolean;
+  /** Only the cloud itself sends it to the connector (never from the web API or agents). Implies humanOnly. */
+  readonly cloudOnly?: boolean;
   /** Result is sent as `res` (metadata) followed by `chunk` frames. */
   readonly streamed: boolean;
   readonly timeoutMs: number;
@@ -96,6 +101,15 @@ export async function scopeIdempotencyKey(caller: { type: "human" | "agent"; sub
   for (const b of digest) bin += String.fromCharCode(b);
   return "s_" + btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
+/**
+ * A source (Beeper, or one Gmail account) that failed while the others answered: list_chats,
+ * unread_summary and search_messages over several sources return what they have and name the
+ * failed ones here (e.g. a Gmail account that needs reconnecting), instead of failing as a whole.
+ */
+export const failedSource = object({ source: enumOf(["beeper", "gmail"] as const), accountID: optional(accountID), error: errorBody });
+const failedSources = optional(array(failedSource, { max: MAX_ACCOUNTS + 1 }));
+const recipients = (min: number) => array(emailRecipient, { min, max: 50 });
+
 const IDEMPOTENCY_DOC = "Optional key (8-64 of A-Z a-z 0-9 _ -). Send the same key when you retry after TIMEOUT or UNKNOWN_OUTCOME so it is not done twice";
 const ARRAY_DOC = " (JSON array: pass it with --data-json, raft --param is text-only)";
 
@@ -126,7 +140,8 @@ export const ACTIONS = {
   }),
 
   list_chats: define({
-    description: "List chats across all networks, most recent first. Filter by network, unread, pinned, inbox or a search query. Page with cursor.",
+    description:
+      "List chats across all networks (Gmail threads too, network Gmail), most recent first. Filter by network, unread, pinned, inbox or a search query. Page with cursor. If one source fails (e.g. a Gmail account needs reconnecting) the others still answer and failedSources names it.",
     params: object({
       network: optional(networkName),
       accountIDs: optional(idList(accountID)),
@@ -139,18 +154,18 @@ export const ACTIONS = {
       cursor: optional(pageCursor),
     }),
     paramDocs: {
-      network: "Chat network name as shown on chats, e.g. WhatsApp, Instagram, LinkedIn, Twitter/X, iMessage (case-insensitive)",
-      accountIDs: "Only these Beeper account IDs (from a chat's accountID)" + ARRAY_DOC,
+      network: "Chat network name as shown on chats, e.g. WhatsApp, Instagram, LinkedIn, Twitter/X, iMessage, Gmail (case-insensitive)",
+      accountIDs: "Only these account IDs (from a chat's accountID; Gmail accounts are gmail:<address>)" + ARRAY_DOC,
       unreadOnly: "Only chats with unread messages (all inboxes, including archived and low priority, unless inbox is set)",
       pinnedOnly: "Only pinned chats",
       inbox: "primary, low-priority or archive (default: all)",
       type: "single, group or any",
-      query: "Words that must appear in the chat title or network",
+      query: "Words that must appear in the chat title or network (email: in the subject)",
       limit: `Chats per page, 1-${MAX_PAGE_LIMIT} (default 25)`,
       cursor: "nextCursor from the previous page",
     },
     defaults: { limit: 25 },
-    result: object(page(chatSummary, MAX_PAGE_LIMIT)),
+    result: object({ ...page(chatSummary, MAX_PAGE_LIMIT), failedSources }),
     write: false,
     needsApprovalForAgents: false,
     streamed: false,
@@ -170,6 +185,7 @@ export const ACTIONS = {
       totalUnreadMessages: integer({ min: 0, max: 1_000_000_000 }),
       items: array(chatSummary, { max: MAX_PAGE_LIMIT }),
       truncated: boolean(),
+      failedSources,
     }),
     write: false,
     needsApprovalForAgents: false,
@@ -197,7 +213,7 @@ export const ACTIONS = {
   }),
 
   search_messages: define({
-    description: "Search messages across all networks by literal words.",
+    description: "Search messages across all networks by literal words. For Gmail the query uses Gmail search syntax (from:, subject:, has:attachment ...).",
     params: object({
       query,
       chatIDs: optional(idList(chatID)),
@@ -221,7 +237,7 @@ export const ACTIONS = {
       cursor: "nextCursor from the previous page",
     },
     defaults: { limit: MAX_SEARCH_LIMIT },
-    result: object({ ...page(messageItem, MAX_SEARCH_LIMIT), chats: record(chatID, chatSummary, { max: MAX_SEARCH_LIMIT }) }),
+    result: object({ ...page(messageItem, MAX_SEARCH_LIMIT), chats: record(chatID, chatSummary, { max: MAX_SEARCH_LIMIT }), failedSources }),
     write: false,
     needsApprovalForAgents: false,
     streamed: false,
@@ -231,7 +247,7 @@ export const ACTIONS = {
 
   draft_reply: define({
     description:
-      "Put a draft into a chat's input box without sending it. The owner decides whether to send. Never replaces an existing draft (the owner may be typing): fails with CONFLICT if the chat already has one.",
+      "Put a draft into a chat's input box without sending it (Gmail: a reply-all draft in the thread). The owner decides whether to send. Never replaces an existing draft (the owner may be typing): fails with CONFLICT if the chat already has one.",
     params: object({ chatID, text: sendText }),
     paramDocs: { chatID: "Chat ID", text: "Draft text (plain text or Markdown)" },
     defaults: {},
@@ -244,7 +260,7 @@ export const ACTIONS = {
   }),
 
   send_message: define({
-    description: "Send a text message, optionally as a reply. Agents need the owner's approval.",
+    description: "Send a text message, optionally as a reply. In a Gmail chat this is a plain-text reply-all in the thread. Agents need the owner's approval.",
     params: object({ chatID, text: sendText, replyToMessageID: optional(messageID), idempotencyKey: optional(idempotencyKey) }),
     paramDocs: { chatID: "Chat ID", text: "Message text (plain text or Markdown)", replyToMessageID: "Message ID to reply to", idempotencyKey: IDEMPOTENCY_DOC },
     defaults: {},
@@ -258,7 +274,7 @@ export const ACTIONS = {
   }),
 
   react: define({
-    description: "Add an emoji reaction to a message. Agents need the owner's approval.",
+    description: "Add an emoji reaction to a message (not for Gmail: NOT_SUPPORTED). Agents need the owner's approval.",
     params: object({ chatID, messageID, reactionKey: string({ min: 1, max: MAX_REACTION_KEY_LENGTH }), idempotencyKey: optional(idempotencyKey) }),
     paramDocs: { chatID: "Chat ID", messageID: "Message ID", reactionKey: "Emoji, e.g. 👍", idempotencyKey: IDEMPOTENCY_DOC },
     defaults: {},
@@ -300,7 +316,7 @@ export const ACTIONS = {
   }),
 
   remove_account: define({
-    description: "Remove a chat account (sign Beeper out of that network). Owner only, from the web page.",
+    description: "Remove a chat account (sign Beeper out of that network; for Gmail: revoke J-Inbox's access at Google and forget the account). Owner only, from the web page.",
     params: object({ accountID }),
     paramDocs: { accountID: "accountID from status.accounts (removable ones only)" },
     defaults: {},
@@ -314,8 +330,52 @@ export const ACTIONS = {
     beeper: "GET /v1/accounts/{accountID}, GET /v1/bridges/{bridgeID}/logins/{loginID}, POST /v1/bridges/{bridgeID}/logins/{loginID}/remove",
   }),
 
+  compose_email: define({
+    description: "Write a new email (a new thread) from one of the owner's Gmail accounts, plain text. Agents need the owner's approval.",
+    params: object({
+      accountID,
+      to: recipients(1),
+      cc: optional(recipients(0)),
+      subject: string({ min: 0, max: 500 }),
+      text: sendText,
+      idempotencyKey: optional(idempotencyKey),
+    }),
+    paramDocs: {
+      accountID: "The Gmail account to send from: gmail:<address> (from status.accounts)",
+      to: "Recipient addresses, 1-50" + ARRAY_DOC,
+      cc: "Cc addresses, up to 50" + ARRAY_DOC,
+      subject: "Subject line (may be empty)",
+      text: "Body, plain text",
+      idempotencyKey: IDEMPOTENCY_DOC,
+    },
+    defaults: {},
+    result: object({ accountID, chatID, pendingMessageID: messageID }),
+    write: true,
+    needsApprovalForAgents: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    rateLimitPerMinute: 10,
+    beeper: "none (Gmail users.messages.send)",
+  }),
+
+  gmail_connect: define({
+    description: "Internal: the cloud hands a newly added Gmail account to the owner's connector once, right after Sign in with Google. Never from the web API or agents.",
+    params: object({ email: emailRecipient, refreshToken: oauthToken }),
+    paramDocs: { email: "The Google account address from the id_token", refreshToken: "The refresh token (the connector keeps it in the Keychain)" },
+    defaults: {},
+    result: object({ accountID, connected: literal(true) }),
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    cloudOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    rateLimitPerMinute: 10,
+    beeper: "none (Gmail users.getProfile to verify, then the Keychain)",
+  }),
+
   get_media: define({
-    description: "Download an image or file from a message (attachment url or chat avatarURL).",
+    description: "Download an image or file from a message (attachment url or chat avatarURL; email attachments too).",
     params: object({ url: assetUrl() }),
     paramDocs: { url: "An attachment url or avatarURL returned by another action" },
     defaults: {},

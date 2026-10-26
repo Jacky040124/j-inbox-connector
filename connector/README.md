@@ -1,8 +1,8 @@
 # J-Inbox connector (open source, MIT)
 
 `j-inbox` CLI and background service that runs on the user's Mac. It links the local
-Beeper Client API (Beeper Server or Beeper Desktop, `127.0.0.1:23373`) to the user's J-Inbox
-cloud room, and only ever runs the actions in the protocol catalogue.
+Beeper Client API (Beeper Server or Beeper Desktop, `127.0.0.1:23373`) and the owner's Gmail
+accounts to the user's J-Inbox cloud room, and only ever runs the actions in the protocol catalogue.
 
 **Test:** `cd connector && bun test` (one command; about 30 s; fakes only, nothing outside 127.0.0.1)
 
@@ -42,7 +42,8 @@ j-inbox run          # the service in the foreground (what launchd runs)
 | What | Where |
 |---|---|
 | Config (no secrets: cloud URL, Beeper URL, engine, device id and name) | `~/.config/j-inbox/config.json` (0600) |
-| Beeper token, device token | login Keychain, service `build.jsuite.j-inbox`, accounts `beeper-token` / `device-token`, written with `security -i` on stdin (never in argv) |
+| Beeper token, device token, Gmail refresh tokens | login Keychain, service `build.jsuite.j-inbox`, accounts `beeper-token` / `device-token` / `gmail:<address>`, written with `security -i` on stdin (never in argv) |
+| Gmail accounts (addresses and connected / reconnect_required; never tokens or mail) | `~/Library/Application Support/j-inbox/gmail.json` (0600) |
 | Idempotency journal (key hashes, parameter digests, result ids; never text or chat ids), asset allowlist (URL hashes) | `~/Library/Application Support/j-inbox/` |
 | Audit log `audit.jsonl` (rotated at 5 MiB, 3 files), service log `service.log` | `~/Library/Logs/j-inbox/` |
 | Service state for `status` (pid, cloud link state, Beeper health) | `~/.config/j-inbox/state.json` |
@@ -50,7 +51,10 @@ j-inbox run          # the service in the foreground (what launchd runs)
 
 `J_INBOX_CONFIG_DIR=/abs/dir` (or `--config-dir`) moves all of it, including the LaunchAgents
 directory, under one directory. `J_INBOX_SECRETS=file` swaps the Keychain for a 0600 JSON file,
-and is refused unless `J_INBOX_CONFIG_DIR` is set (tests and local development only).
+and is refused unless `J_INBOX_CONFIG_DIR` is set (tests and local development only). The same holds
+for `J_INBOX_GMAIL_API_URL` / `J_INBOX_GOOGLE_OAUTH_URL` (a loopback fake instead of
+`gmail.googleapis.com` / `oauth2.googleapis.com`) and `J_INBOX_GMAIL_POLL_MS` (a shorter history
+poll): refused without `J_INBOX_CONFIG_DIR`.
 
 ## How it works
 
@@ -60,8 +64,13 @@ and is refused unless `J_INBOX_CONFIG_DIR` is set (tests and local development o
 | `src/service.ts` | `j-inbox run`: composes everything below; exits 0 only when it must stay down (unpaired, no token, revoked 4403, replaced by another computer 4409, a 4401 that repeats 4 times in a row, version 4426); a stop by a signal exits 128 + signal (SIGTERM 143, SIGINT 130), so launchd (KeepAlive SuccessfulExit=false) restarts it after `kill` or Activity Monitor's Quit, while `launchctl bootout` (uninstall) removes the job |
 | `src/instance-lock.ts`, `src/commands/run.ts` | one `j-inbox run` per config dir: an atomic pid file `run.lock` with its `startedAt` (taken over when the holder is dead, or when its pid now belongs to a process that started after the lock was written: a pid reused after a reboot or kill -9, checked with `ps -o etime=`; `status` and `doctor` apply the same check to `state.json`); a second `run` exits 3 with "already running (pid N)" and touches nothing |
 | `src/cloud-link.ts` | `wss://<app>/connect` with `Authorization: Bearer <deviceToken>` (https only; http only for loopback dev); `hello` -> `welcome`; requests; heartbeat; reconnect |
-| `src/dispatcher.ts` | the whitelist: catalogue action -> `parseActionParams` -> its own Beeper endpoints -> `parseActionResult`; anything else `NOT_ALLOWED` |
-| `src/actions.ts` | all 10 JSON actions (`status`, `list_chats`, `unread_summary`, `read_chat`, `search_messages`, `draft_reply`, `send_message`, `react`, `mark_read`, `archive`) |
+| `src/dispatcher.ts` | the whitelist: catalogue action -> `parseActionParams` -> the router -> `parseActionResult`; anything else `NOT_ALLOWED`. `get_media` on a `gmail://` URL streams an email attachment (allowlist first) |
+| `src/actions.ts` | the Beeper actions (`status`, `list_chats`, `unread_summary`, `read_chat`, `search_messages`, `draft_reply`, `send_message`, `react`, `mark_read`, `archive`, `remove_account`), plus the collecting building blocks the merged lists use |
+| `src/sources.ts` | the router: `gmail:` ids go to Gmail, the rest to Beeper; `list_chats`, `unread_summary` and `search_messages` over both, merged; `compose_email`, `gmail_connect`; `react` on email is `NOT_SUPPORTED`; `status` adds the Gmail accounts and the Gmail network |
+| `src/merge.ts` | k-way merge of newest-first sources with the `jm.` cursor (each source's own position, the boundary already returned, the last keys per source); failed sources reported, the others answer |
+| `src/gmail/client.ts` | Gmail REST client per account: access tokens from the cloud's `/google/token` proxy (`cloudTokenRefresher`, memory only), one refresh and retry on 401, capped bodies, no redirects, error mapping (`gmailErrorCode`: reads `UPSTREAM_DOWN`, lost writes `UNKNOWN_OUTCOME`, `invalid_grant` `REAUTH_REQUIRED`); `revokeAtGoogle` |
+| `src/gmail/source.ts`, `src/gmail/map.ts`, `src/gmail/mime.ts` | one account as a source (lists, threads, search, writes, attachments); Gmail JSON -> protocol shapes (drafts never leave the Mac); decoding (charsets, RFC 2047, address lists, email HTML -> text) and writing (reply-all recipients, `Re:`, `In-Reply-To`/`References`, UTF-8 base64 body, RFC 2047 headers, no header injection) |
+| `src/gmail/accounts.ts`, `src/gmail/service.ts`, `src/gmail/poller.ts` | `gmail.json` + Keychain; `gmail_connect` (one `users.getProfile`: the address must match, else nothing is stored) and removal (revoke at Google, forget); history polling every 30 s -> metadata-only events, re-sync on a history reset |
 | `src/media.ts`, `src/assets.ts` | `get_media`: only URLs a returned result carried (`AssetAllowlist`, hashes, bounded, persisted); head, then 256 KiB chunks under `ChunkWindow`, capped at 25 MiB or the declared size |
 | `src/events.ts`, `src/beeper-ws.ts` | Beeper `/v1/ws` subscription per the spec: wait for `ready`, send `subscriptions.set` with a `requestID`, connected only when `subscriptions.updated` echoes `["*"]`; an `INVALID_PAYLOAD`/`INVALID_COMMAND` error is retried once without the `app` key; no confirmed subscription within 20 s of opening the socket (or a socket that never opens): close and retry with backoff. Resubscribe after drops, 30 s health checks (status events; `reachable:false` = Beeper down, `tokenValid:false`), re-sync after reconnects |
 | `src/beeper-client.ts`, `src/beeper-map.ts`, `src/pager.ts`, `src/idempotency.ts` | Beeper HTTP client (encoded ids, no redirects, timeouts, capped bodies), mapping and sanitizing, `j2.` cursors, write dedupe that survives restarts |
@@ -108,6 +117,13 @@ Request handling (`CloudLink`):
   have been approved and to run `j-inbox pair` again, instead of "the code expired".
 - Graceful stop (SIGTERM/SIGINT): new requests `OFFLINE`, running ones get up to 5 s, then close 1001.
 
+Gmail: the service reads `gmail.json`, refreshes access through the cloud (`POST <cloud>/google/token`
+with the device token; the web client secret never ships in this open-source connector) and talks to
+Gmail directly from the Mac. `hello` carries `"gmail.v1"` and adds `"Gmail"` to the networks when an
+account exists; every `welcome` triggers a history poll. `j-inbox uninstall` revokes every Gmail
+account's access at Google before deleting the tokens. The idempotency journal never stores the
+account address (compose results are rebuilt from the request).
+
 Privacy: events, audit log, state file and service log carry metadata only (action names, error
 codes, close codes, counts, durations). The audit log validates every field against a closed
 vocabulary, so content cannot be written there by mistake. Tokens never appear in config files,
@@ -130,9 +146,14 @@ logs, argv or the launchd plist (`generatePlist` refuses them).
 
 ## Tests
 
-Everything runs against `@j-inbox/fake-beeper` and `test/helpers/fake-cloud.ts` (a protocol-only
-fake of `/connect` and `/pair/*`; `testkit` is closed source, so the connector cannot use its
-fakes). Programs (`security`, `launchctl`, `beeper`, `pmset`) are fakes; paths are temp dirs.
+Everything runs against `@j-inbox/fake-beeper`, `@j-inbox/fake-google` (MIT: Google OAuth + Gmail
+REST subset) and `test/helpers/fake-cloud.ts` (a protocol-only fake of `/connect`, `/pair/*` and
+`/google/token`; `testkit` is closed source, so the connector cannot use its fakes). Gmail tests:
+`test/gmail.test.ts` (every action on Gmail chats, mixed paging across both fakes, reauth, accounts,
+history events), `test/merge.test.ts` (property style: hundreds of random interleavings, short and
+empty pages, failures, frame-fitted pages; every item once, newest first), `test/gmail-mime.test.ts`
+(decoding, reply-all, threading headers, encoding, header injection), `test/gmail-service.test.ts`
+(the real service: `gmail_connect` over the cloud link, events, disk scan, removal). Programs (`security`, `launchctl`, `beeper`, `pmset`) are fakes; paths are temp dirs.
 `test/chaos.test.ts` covers garbled/truncated/binary/oversized/prototype-polluting frames, 100
 concurrent requests, 1000 unknown actions, repeated socket drops mid-traffic, reconnect storms,
 slow Beeper, Beeper 500s, oversized and malformed Beeper answers, media cancel storms, and checks
@@ -140,7 +161,7 @@ after each that nothing is left in flight.
 
 `test/policy.test.ts` enforces the open-source boundary and is self-contained (no import from the
 repo's root `scripts/`): src and tests may import only builtins, files in `connector/` and MIT
-workspace packages (`@j-inbox/protocol`; in tests `@j-inbox/fake-beeper`). So `connector/`,
+workspace packages (`@j-inbox/protocol`; in tests `@j-inbox/fake-beeper` and `@j-inbox/fake-google`). So `connector/`,
 `protocol/` and `fake-beeper/` can be published together without any closed code.
 
 ## Rules specific to the connector

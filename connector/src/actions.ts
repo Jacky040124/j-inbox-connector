@@ -98,8 +98,9 @@ export function createWriteDedupe(o: { journal?: IdempotencyJournal; now?: () =>
     conflict: () => err("CONFLICT", "This idempotencyKey was already used with different parameters. Use a new key for a different message."),
     interrupted: () => err("UNKNOWN_OUTCOME", "The connector restarted while this write was running. It may or may not have happened; check before trying again."),
     // Only ids and error codes go to disk; send/react results carry no message text, and the chat
-    // id (often a phone number) is left out too: withChatID() restores it from the request.
-    encode: (r) => (r.ok ? { ok: true, data: isObj(r.data) ? Object.fromEntries(Object.entries(r.data).filter(([k]) => k !== "chatID")) : r.data } : { ok: false, error: r.error }),
+    // id (often a phone number) and account id (an email address) are left out too: the caller
+    // restores them from the request (withChatID, sources.ts compose_email).
+    encode: (r) => (r.ok ? { ok: true, data: isObj(r.data) ? Object.fromEntries(Object.entries(r.data).filter(([k]) => k !== "chatID" && k !== "accountID")) : r.data } : { ok: false, error: r.error }),
     decode: (v) => (isObj(v) && v.ok === true && isObj(v.data) ? { ok: true, data: v.data } : isObj(v) && v.ok === false && isErrorBody(v.error) ? { ok: false, error: makeError(v.error.code as ErrorCode, v.error.message) } : undefined),
   });
 }
@@ -164,43 +165,49 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
     for (const it of items.slice(0, n)) for (const u of it.urls) opts.assets.add(u);
   };
 
+  /** The Beeper part of list_chats: collected (not yet frame-fitted) chats with their asset URLs. Throws BeeperFailure and pager errors. */
+  async function listChatsCollect(p: Partial<ActionParams<"list_chats">>, ctx: RequestContext = {}) {
+    // GET /v1/chats returns ChatWithPreview; /v1/chats/search returns Chat without `preview`. The
+    // primary inbox (with or without unreadOnly) is read from /v1/chats and filtered here, so the
+    // default lists show the last message. Text queries, chat types and the other inboxes need search.
+    const primary = p.inbox === "primary" && p.query === undefined && (p.type === undefined || p.type === "any");
+    // The endpoint is part of the scope: a cursor from the other endpoint is not resumable here.
+    const scope = `list_chats\u0000${JSON.stringify([p.network?.toLowerCase() ?? null, p.accountIDs ?? null, p.unreadOnly ?? null, p.pinnedOnly ?? null, p.inbox ?? null, p.type ?? null, p.query ?? null])}${primary ? "\u0000chats" : ""}`;
+    const cursor = cursorParam(p.cursor, scope);
+    if (cursor === "bad") throw new BeeperFailure(makeError("BAD_PARAMS", "cursor is not from this list (other filters or another action)."));
+    const limit = p.limit ?? 25;
+    const search = !primary && (p.query !== undefined || p.inbox !== undefined || (p.type !== undefined && p.type !== "any") || p.unreadOnly === true);
+    const unreadOnly = primary && p.unreadOnly === true;
+    const network = p.network?.toLowerCase();
+    const r = await collect({
+      cursor,
+      limit,
+      fetchPage: async (b) => {
+        const q = chatsQuery({
+          limit: "50",
+          accountIDs: p.accountIDs,
+          ...(search ? { query: p.query, inbox: p.inbox, type: p.type, unreadOnly: p.unreadOnly ? "true" : undefined } : {}),
+          ...(b ? { cursor: b, direction: "before" } : {}),
+        });
+        return beeperPage(must(await client.get(`/v1/chats${search ? "/search" : ""}?${q}`, callOpts(ctx))));
+      },
+      keep: (c) =>
+        (!network || String(c.network ?? "").toLowerCase() === network) &&
+        (!p.pinnedOnly || c.isPinned === true) &&
+        (!primary || (c.isArchived !== true && c.isLowPriority !== true)) &&
+        (!unreadOnly || Number(c.unreadCount) > 0 || c.isMarkedUnread === true) &&
+        mapChat(c) !== null,
+      keyOf: (c) => String(c.id),
+      ...scan,
+      ...ctx,
+    });
+    const mapped = r.items.map((c) => tracked(mapChat, c)!);
+    return { r, mapped, scope };
+  }
+
   async function list_chats(p: Partial<ActionParams<"list_chats">>, ctx: RequestContext = {}): Promise<Outcome<ActionResult<"list_chats">>> {
     return guard(async () => {
-      // GET /v1/chats returns ChatWithPreview; /v1/chats/search returns Chat without `preview`. The
-      // primary inbox (with or without unreadOnly) is read from /v1/chats and filtered here, so the
-      // default lists show the last message. Text queries, chat types and the other inboxes need search.
-      const primary = p.inbox === "primary" && p.query === undefined && (p.type === undefined || p.type === "any");
-      // The endpoint is part of the scope: a cursor from the other endpoint is not resumable here.
-      const scope = `list_chats\u0000${JSON.stringify([p.network?.toLowerCase() ?? null, p.accountIDs ?? null, p.unreadOnly ?? null, p.pinnedOnly ?? null, p.inbox ?? null, p.type ?? null, p.query ?? null])}${primary ? "\u0000chats" : ""}`;
-      const cursor = cursorParam(p.cursor, scope);
-      if (cursor === "bad") return err("BAD_PARAMS", "cursor is not from this list (other filters or another action).");
-      const limit = p.limit ?? 25;
-      const search = !primary && (p.query !== undefined || p.inbox !== undefined || (p.type !== undefined && p.type !== "any") || p.unreadOnly === true);
-      const unreadOnly = primary && p.unreadOnly === true;
-      const network = p.network?.toLowerCase();
-      const r = await collect({
-        cursor,
-        limit,
-        fetchPage: async (b) => {
-          const q = chatsQuery({
-            limit: "50",
-            accountIDs: p.accountIDs,
-            ...(search ? { query: p.query, inbox: p.inbox, type: p.type, unreadOnly: p.unreadOnly ? "true" : undefined } : {}),
-            ...(b ? { cursor: b, direction: "before" } : {}),
-          });
-          return beeperPage(must(await client.get(`/v1/chats${search ? "/search" : ""}?${q}`, callOpts(ctx))));
-        },
-        keep: (c) =>
-          (!network || String(c.network ?? "").toLowerCase() === network) &&
-          (!p.pinnedOnly || c.isPinned === true) &&
-          (!primary || (c.isArchived !== true && c.isLowPriority !== true)) &&
-          (!unreadOnly || Number(c.unreadCount) > 0 || c.isMarkedUnread === true) &&
-          mapChat(c) !== null,
-        keyOf: (c) => String(c.id),
-        ...scan,
-        ...ctx,
-      });
-      const mapped = r.items.map((c) => tracked(mapChat, c)!);
+      const { r, mapped, scope } = await listChatsCollect(p, ctx);
       const build = (n: number) => ({ ...finishPage(r, n, scope), items: mapped.slice(0, n).map((x) => x.value) as ChatSummary[] });
       const n = fitToFrame(mapped.length, build);
       if (mapped.length && n === 0) return err("TOO_LARGE", "A single chat is too large to send.");
@@ -209,27 +216,32 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
     });
   }
 
+  /** The Beeper part of unread_summary: every unread chat of the main inbox found within the scan budget. */
+  async function unreadCollect(ctx: RequestContext = {}) {
+    // /v1/chats carries `preview` (the latest message); /v1/chats/search does not.
+    const r = await collect({
+      cursor: null,
+      limit: Number.MAX_SAFE_INTEGER,
+      fetchPage: async (b) => beeperPage(must(await client.get(`/v1/chats?${chatsQuery({ limit: "50", ...(b ? { cursor: b, direction: "before" } : {}) })}`, callOpts(ctx)))),
+      // Beeper's inbox view: archived and low-priority chats are not "unread" for the owner.
+      keep: (c) => (Number(c.unreadCount) > 0 || c.isMarkedUnread === true) && c.isArchived !== true && c.isLowPriority !== true && mapChat(c) !== null,
+      keyOf: (c) => String(c.id),
+      ...scan,
+      ...ctx,
+    });
+    return { all: r.items.map((c) => tracked(mapChat, c)!), hasMore: r.hasMore };
+  }
+
   async function unread_summary(p: Partial<ActionParams<"unread_summary">>, ctx: RequestContext = {}): Promise<Outcome<ActionResult<"unread_summary">>> {
     return guard(async () => {
       const limit = p.limit ?? 50;
-      // /v1/chats carries `preview` (the latest message); /v1/chats/search does not.
-      const r = await collect({
-        cursor: null,
-        limit: Number.MAX_SAFE_INTEGER,
-        fetchPage: async (b) => beeperPage(must(await client.get(`/v1/chats?${chatsQuery({ limit: "50", ...(b ? { cursor: b, direction: "before" } : {}) })}`, callOpts(ctx)))),
-        // Beeper's inbox view: archived and low-priority chats are not "unread" for the owner.
-        keep: (c) => (Number(c.unreadCount) > 0 || c.isMarkedUnread === true) && c.isArchived !== true && c.isLowPriority !== true && mapChat(c) !== null,
-        keyOf: (c) => String(c.id),
-        ...scan,
-        ...ctx,
-      });
-      const all = r.items.map((c) => tracked(mapChat, c)!);
+      const { all, hasMore } = await unreadCollect(ctx);
       const totalUnreadMessages = all.reduce((sum, c) => sum + c.value.unreadCount, 0);
       const build = (n: number) => ({
         totalUnreadChats: all.length,
         totalUnreadMessages: Math.min(totalUnreadMessages, 1_000_000_000),
         items: all.slice(0, n).map((x) => x.value) as ChatSummary[],
-        truncated: n < all.length || r.hasMore,
+        truncated: n < all.length || hasMore,
       });
       const n = fitToFrame(Math.min(limit, all.length), build);
       allow(all, n);
@@ -315,45 +327,51 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
     });
   }
 
+  /** The Beeper part of search_messages: collected messages with their raw chats. Throws BeeperFailure and pager errors. */
+  async function searchCollect(p: ActionParams<"search_messages">, ctx: RequestContext = {}) {
+    const network = p.network?.toLowerCase();
+    const scope = `search_messages\u0000${JSON.stringify([p.query, p.chatIDs ?? null, p.accountIDs ?? null, network ?? null, p.sender ?? null, p.dateAfter ?? null, p.dateBefore ?? null])}`;
+    const cursor = cursorParam(p.cursor, scope);
+    if (cursor === "bad") throw new BeeperFailure(makeError("BAD_PARAMS", "cursor is not from this search."));
+    const rawChats = new Map<string, unknown>();
+    const r = await collect({
+      cursor,
+      limit: p.limit ?? 20,
+      fetchPage: async (b) => {
+        const q = chatsQuery({
+          query: p.query,
+          chatIDs: p.chatIDs,
+          accountIDs: p.accountIDs,
+          sender: p.sender,
+          dateAfter: p.dateAfter,
+          dateBefore: p.dateBefore,
+          limit: "20",
+          ...(b ? { cursor: b, direction: "before" } : {}),
+        });
+        const body = must(await client.get(`/v1/messages/search?${q}`, callOpts(ctx)));
+        const page = beeperPage(body);
+        if (isObj(body) && isObj(body.chats)) for (const [id, c] of Object.entries(body.chats)) if (rawChats.size < 5000) rawChats.set(id, c);
+        return page;
+      },
+      keep: (m) => {
+        if (mapMessage(m) === null) return false;
+        const c = rawChats.get(String(m.chatID));
+        if (!c || mapChat(c) === null) return false;
+        return !network || String((c as any).network ?? "").toLowerCase() === network;
+      },
+      keyOf: (m) => `${String(m.chatID)}\u0000${String(m.id)}`,
+      ...scan,
+      ...ctx,
+    });
+    const items = r.items.map((m) => tracked(mapMessage, m)!);
+    const chatsOf = new Map<string, WithAssets<ChatSummary>>();
+    for (const m of items) if (!chatsOf.has(m.value.chatID)) chatsOf.set(m.value.chatID, tracked(mapChat, rawChats.get(m.value.chatID))!);
+    return { r, items, chatsOf, scope };
+  }
+
   async function search_messages(p: ActionParams<"search_messages">, ctx: RequestContext = {}): Promise<Outcome<ActionResult<"search_messages">>> {
     return guard(async () => {
-      const network = p.network?.toLowerCase();
-      const scope = `search_messages\u0000${JSON.stringify([p.query, p.chatIDs ?? null, p.accountIDs ?? null, network ?? null, p.sender ?? null, p.dateAfter ?? null, p.dateBefore ?? null])}`;
-      const cursor = cursorParam(p.cursor, scope);
-      if (cursor === "bad") return err("BAD_PARAMS", "cursor is not from this search.");
-      const rawChats = new Map<string, unknown>();
-      const r = await collect({
-        cursor,
-        limit: p.limit ?? 20,
-        fetchPage: async (b) => {
-          const q = chatsQuery({
-            query: p.query,
-            chatIDs: p.chatIDs,
-            accountIDs: p.accountIDs,
-            sender: p.sender,
-            dateAfter: p.dateAfter,
-            dateBefore: p.dateBefore,
-            limit: "20",
-            ...(b ? { cursor: b, direction: "before" } : {}),
-          });
-          const body = must(await client.get(`/v1/messages/search?${q}`, callOpts(ctx)));
-          const page = beeperPage(body);
-          if (isObj(body) && isObj(body.chats)) for (const [id, c] of Object.entries(body.chats)) if (rawChats.size < 5000) rawChats.set(id, c);
-          return page;
-        },
-        keep: (m) => {
-          if (mapMessage(m) === null) return false;
-          const c = rawChats.get(String(m.chatID));
-          if (!c || mapChat(c) === null) return false;
-          return !network || String((c as any).network ?? "").toLowerCase() === network;
-        },
-        keyOf: (m) => `${String(m.chatID)}\u0000${String(m.id)}`,
-        ...scan,
-        ...ctx,
-      });
-      const items = r.items.map((m) => tracked(mapMessage, m)!);
-      const chatsOf = new Map<string, WithAssets<ChatSummary>>();
-      for (const m of items) if (!chatsOf.has(m.value.chatID)) chatsOf.set(m.value.chatID, tracked(mapChat, rawChats.get(m.value.chatID))!);
+      const { r, items, chatsOf, scope } = await searchCollect(p, ctx);
       const firstChats = (n: number) => {
         const out: Record<string, ChatSummary> = {};
         for (const m of items.slice(0, n)) out[m.value.chatID] = chatsOf.get(m.value.chatID)!.value;
@@ -416,5 +434,29 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
     });
   }
 
-  return { status, list_chats, unread_summary, read_chat, search_messages, draft_reply, send_message, react, mark_read, archive, remove_account };
+  return {
+    status,
+    list_chats,
+    unread_summary,
+    read_chat,
+    search_messages,
+    draft_reply,
+    send_message,
+    react,
+    mark_read,
+    archive,
+    remove_account,
+    /** Building blocks for lists merged with other sources (sources.ts). They throw instead of answering. */
+    internals: { listChatsCollect, unreadCollect, searchCollect, finishPage, toFailure },
+  };
 }
+
+/** A thrown Beeper or pager failure as the error body a merged list reports for this source. */
+export function toFailure(e: unknown): ErrorBody | null {
+  if (e instanceof BeeperFailure) return e.body;
+  if (e instanceof CursorTooLong) return makeError("TOO_LARGE", "Beeper's page cursor is too long to continue paging. Start again without a cursor or use a narrower filter.");
+  if (e instanceof CursorExpired) return makeError("BAD_PARAMS", "The cursor expired because the list changed. Reload from the first page.");
+  return null;
+}
+
+export type BeeperActions = ReturnType<typeof createActions>;

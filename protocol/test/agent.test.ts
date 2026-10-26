@@ -49,8 +49,10 @@ describe("Raft manifest", () => {
   });
   test("lists every catalogue action except the owner-only ones, plus the meta actions", () => {
     const names = m.actions.map((a: any) => a.name).sort();
-    expect(names).toEqual([...ACTION_NAMES.filter((n) => n !== "remove_account"), ...AGENT_META_ACTIONS].sort());
+    expect(names).toEqual([...ACTION_NAMES.filter((n) => n !== "remove_account" && n !== "gmail_connect"), ...AGENT_META_ACTIONS].sort());
     expect(names).not.toContain("remove_account");
+    expect(names).not.toContain("gmail_connect");
+    expect(names).toContain("compose_email");
   });
   test("each action posts to the agent action prefix", () => {
     for (const a of m.actions) {
@@ -98,8 +100,8 @@ describe("Raft manifest", () => {
 
 describe("isAgentActionName", () => {
   test("catalogue + meta, nothing else", () => {
-    for (const n of [...ACTION_NAMES.filter((n) => n !== "remove_account"), "whoami", "approval_status"]) expect(isAgentActionName(n)).toBe(true);
-    for (const n of ["__proto__", "hasOwnProperty", "approve", "decide_approval", "", "remove_account"]) expect(isAgentActionName(n)).toBe(false);
+    for (const n of [...ACTION_NAMES.filter((n) => n !== "remove_account" && n !== "gmail_connect"), "whoami", "approval_status"]) expect(isAgentActionName(n)).toBe(true);
+    for (const n of ["__proto__", "hasOwnProperty", "approve", "decide_approval", "", "remove_account", "gmail_connect"]) expect(isAgentActionName(n)).toBe(false);
   });
 });
 

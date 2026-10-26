@@ -23,7 +23,8 @@ function make() {
 const routes = () => [...new Set(fb.state.calls.map((c) => c.route))].sort();
 
 const mid = () => fb.state.messagesOf(CHAT_IDS.imessageAlice)[0]!.id;
-const CASES: Record<ActionName, { params: () => Record<string, unknown>; routes: string[] }> = {
+// Gmail-only actions never reach Beeper; without a Gmail account they answer an error (gmail.test.ts runs them for real).
+const CASES: Record<ActionName, { params: () => Record<string, unknown>; routes: string[]; error?: string }> = {
   status: { params: () => ({}), routes: ["GET /v1/accounts", "GET /v1/chats", "GET /v1/info"] },
   list_chats: { params: () => ({ limit: 5 }), routes: ["GET /v1/chats"] },
   unread_summary: { params: () => ({}), routes: ["GET /v1/chats"] },
@@ -36,6 +37,8 @@ const CASES: Record<ActionName, { params: () => Record<string, unknown>; routes:
   archive: { params: () => ({ chatID: CHAT_IDS.imessageAlice }), routes: ["POST /v1/chats/{chatID}/archive"] },
   remove_account: { params: () => ({ accountID: "instagramgo" }), routes: ["GET /v1/accounts/{accountID}", "GET /v1/bridges/{bridgeID}/logins/{loginID}", "POST /v1/bridges/{bridgeID}/logins/{loginID}/remove"] },
   get_media: { params: () => ({ url: ASSET_URLS.imgSmall }), routes: ["GET /v1/assets/serve"] },
+  compose_email: { params: () => ({ accountID: "gmail:owner@example.com", to: ["a@example.com"], subject: "s", text: "t" }), routes: [], error: "NOT_FOUND" },
+  gmail_connect: { params: () => ({ email: "owner@example.com", refreshToken: "1//0fake-token" }), routes: [], error: "NOT_ALLOWED" },
 };
 
 describe("dispatcher whitelist", () => {
@@ -50,6 +53,8 @@ describe("dispatcher whitelist", () => {
       if (r.kind === "media") {
         expect(r.head.mimeType).toBe("image/png");
         r.cancel();
+      } else if (CASES[name].error) {
+        expect(!r.ok && r.error.code).toBe(CASES[name].error as any);
       } else {
         if (!r.ok) throw new Error(`${name}: ${r.error.code}`);
         expect(parseActionResult(name, r.data).ok).toBe(true);

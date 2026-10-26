@@ -15,6 +15,7 @@
     "@j-inbox/protocol": "workspace:*"
   },
   "devDependencies": {
-    "@j-inbox/fake-beeper": "workspace:*"
+    "@j-inbox/fake-beeper": "workspace:*",
+    "@j-inbox/fake-google": "workspace:*"
   }
 }

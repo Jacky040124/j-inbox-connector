@@ -13,6 +13,8 @@ export type FakeCloudOptions = {
   autoWelcome?: boolean;
   /** Ack each chunk as it arrives (default true). */
   autoAck?: boolean;
+  /** Serve POST /google/token like the real cloud: refresh at this fake Google with its client secret. */
+  google?: { url: string; clientId: string; clientSecret: string };
 };
 
 export async function startFakeCloud(o: FakeCloudOptions = {}) {
@@ -26,6 +28,7 @@ export async function startFakeCloud(o: FakeCloudOptions = {}) {
   let reqSeq = 0;
   const closeCodes: number[] = [];
   const upgrades: { auth: string | null; origin: string | null }[] = [];
+  const googleRefreshes = { count: 0 };
   const state = { autoWelcome: o.autoWelcome !== false, autoAck: o.autoAck !== false, rejectUpgrades: 0, welcome: o.welcome ?? {}, silent: false, closeOnOpen: null as number | null };
 
   // pairing
@@ -111,6 +114,24 @@ export async function startFakeCloud(o: FakeCloudOptions = {}) {
         for (const s of [...sockets]) if (s.data.auth === m[1]) s.close(4403, "revoked");
         return json(200, { revoked: true });
       }
+      if (url.pathname === "/google/token" && req.method === "POST") {
+        const m = /^Bearer (\S+)$/.exec(req.headers.get("authorization") ?? "");
+        if (!m || !tokens.has(m[1]!)) return json(401, { ok: false, error: { code: "UNAUTHENTICATED", message: "Unknown device token." } });
+        googleRefreshes.count++;
+        if (!o.google) return json(502, { ok: false, error: { code: "UPSTREAM_DOWN", message: "no google" } });
+        const body = (await req.json().catch(() => null)) as { refreshToken?: unknown } | null;
+        if (typeof body?.refreshToken !== "string") return json(400, { ok: false, error: { code: "BAD_PARAMS", message: "refreshToken" } });
+        const g = await fetch(`${o.google.url}/token`, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: body.refreshToken, client_id: o.google.clientId, client_secret: o.google.clientSecret }).toString(),
+        }).catch(() => null);
+        if (!g) return json(502, { ok: false, error: { code: "UPSTREAM_DOWN", message: "google down" } });
+        const t = (await g.json().catch(() => null)) as any;
+        if (g.status === 400 && t?.error === "invalid_grant") return json(400, { ok: false, error: { code: "REAUTH_REQUIRED", message: "Reconnect." } });
+        if (!g.ok) return json(502, { ok: false, error: { code: "UPSTREAM_DOWN", message: "google failed" } });
+        return json(200, { accessToken: t.access_token, expiresIn: t.expires_in });
+      }
       if (url.pathname === "/.well-known/raft-agent-manifest.json") return json(200, { schemaVersion: "raft-agent-manifest.v0", actions: [] });
       return new Response("not found", { status: 404 });
     },
@@ -154,6 +175,7 @@ export async function startFakeCloud(o: FakeCloudOptions = {}) {
     bad,
     upgrades,
     closeCodes,
+    googleRefreshes,
     get connections() {
       return conn;
     },

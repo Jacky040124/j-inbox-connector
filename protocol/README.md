@@ -15,9 +15,10 @@ Changes must be **additive** and recorded in the root README changelog (see "Rul
 |---|---|
 | `schema.ts` | Tiny validator library: `string` (single line), `text` (multi-line), `id`, `cursor`, `isoDateTime`, `base64`, `assetUrl`, `httpUrl`, `integer`, `number`, `boolean`, `literal`, `enumOf`, `array`, `object` (strict), `optional`, `nullable`, `record`, `discriminated`, `refine`, `jsonObject`/`jsonValue`. `parse(schema, value)` returns `{ok, value}` or `{ok:false, issues}`; issues never echo input values, record keys (reported as `<entry i>`) or unknown keys that do not look like field names (reported at the parent path). Output objects are fresh copies containing only declared keys. |
 | `limits.ts` | `PROTOCOL_VERSION` and every numeric limit (frame size, chunk size, timeouts, string lengths, page sizes). |
-| `errors.ts` | `ERROR_CODES`, `httpStatusForError`, `isRetryable(code, action)`, `errorAfterDispatch`, `errorBody`, `makeError` (clamps and sanitizes). |
+| `errors.ts` | `ERROR_CODES`, `httpStatusForError`, `isRetryable(code, action)`, `errorAfterDispatch`, `errorBody`, `makeError` (clamps and sanitizes). The codes and `errorBody` live in `error-schema.ts` (re-exported) so `actions.ts` can use them without an import cycle. |
+| `gmail.ts` | Gmail as a source: `GMAIL_NETWORK`, ids (`gmailAccountID`, `gmailChatID`, `parseGmailAccountID`, `parseGmailChatID`, `isGmailID`, `normalizeGmailAddress`), attachment URLs (`gmailAssetURL`, `parseGmailAssetURL`), `GOOGLE_SCOPES`, `GOOGLE_PATHS`, `googleTokenRequest`/`googleTokenResponse`, `GMAIL_CONNECT_ERRORS`, `GMAIL_POLL_INTERVAL_MS`, `GOOGLE_TOKEN_REFRESHES_PER_MINUTE`. |
 | `textutil.ts` | `truncateText`, `sanitizeText`, `sanitizeLine`: turn hostile upstream text into values the validators accept. |
-| `model.ts` | Normalized data shapes: `chatSummary`, `messageItem`, `attachment`, `reaction`, `account`, `beeperHealth`, `mediaHead`. |
+| `model.ts` | Normalized data shapes: `chatSummary`, `messageItem` (optional `email` headers), `attachment`, `reaction`, `account`, `beeperHealth`, `mediaHead`, `emailHeaders`/`emailPerson`, `emailRecipient`. |
 | `actions.ts` | The action catalogue `ACTIONS`, `parseActionParams` (fills defaults), `parseActionResult`, `coerceAgentParams`. |
 | `frames.ts` | Connector<->cloud frames, `parseConnectorFrame`, `parseCloudFrame`, `encodeFrame`, media chunking and flow control (`makeChunkFrames`, `ChunkAssembler`, `ChunkWindow`, `mediaDeadlineMs`), `CLOSE_CODES`, `shouldReconnect`, `backoffDelay`. |
 | `agent.ts` | Raft App surface: `buildRaftManifest`, agent action response, approvals (`approvalTicket`, `approvalView`), `agentMediaResult`, owner notices (`ownerNoticeText`, `offlineAlertDue`), room binding (`canBindRoom`, `authorizeRoomAccess`), meta actions `whoami` and `approval_status`. |
@@ -32,7 +33,7 @@ Changes must be **additive** and recorded in the root README changelog (see "Rul
 - Single-line strings reject all C0/C1 control characters; `text` allows `\t \n \r` only. Both reject lone surrogates. Use `sanitizeLine` / `sanitizeText` / `truncateText` when mapping upstream data.
 - `id` (Beeper ids) rejects whitespace and invisible formatting characters but allows `#`, `/`, `?`, `!`, `:`. Always `encodeURIComponent` ids in URL paths.
 - `ownId` (ids J-Inbox mints: devices, approvals) is `[A-Za-z0-9_-]{1,64}`.
-- `assetUrl` accepts only `mxc://`, `localmxc://` and `file:///` without `..` traversal (after percent-decoding).
+- `assetUrl` accepts only `mxc://`, `localmxc://`, `file:///` without `..` traversal (after percent-decoding), and `gmail://<urlencoded address>/<messageId>/<attachmentId>` (exactly three segments, id alphabets only).
 - Frames are size-checked in UTF-8 bytes before `JSON.parse` (`MAX_FRAME_BYTES` = 1,000,000).
 
 ## Error codes
@@ -52,6 +53,9 @@ Changes must be **additive** and recorded in the root README changelog (see "Rul
 | `UNAUTHENTICATED` | 401 | no | Missing or expired session / device credential |
 | `UNKNOWN_OUTCOME` | 502 | **no** | A write was dispatched and its answer was lost (timeout, socket drop, crash). It may have happened: read back (e.g. `read_chat`) before trying again, or retry with the same `idempotencyKey` |
 | `CONFLICT` | 409 | no | The target's state forbids it, e.g. `draft_reply` when the chat already has a draft; a second owner trying to bind a server |
+| `NOT_SUPPORTED` | 422 | no | The chat's network cannot do this (e.g. `react` on an email thread) |
+| `REAUTH_REQUIRED` | 502 | **no** | Google refused the Gmail account's refresh token (`invalid_grant`, revoked access, or Gmail scope missing). The owner reconnects the account in Settings > Accounts; `status.accounts` shows it `reconnect_required`. Not 401 (the web UI signs out on 401) |
+| `UPSTREAM_DOWN` | 502 | yes | Connector up, Gmail (Google) unreachable or failing: the request never reached Gmail, or a read failed there. A Gmail 5xx or lost answer on a write is `UNKNOWN_OUTCOME`, like Beeper's |
 
 Error messages are for humans and agents; never put message text, tokens or chat names in them.
 
@@ -90,7 +94,9 @@ camelCase (like Beeper). Agent writes marked "approval" go through the approval 
 | `react` | `chatID messageID reactionKey idempotencyKey?` | `{chatID, messageID, reactionKey}` | yes | **yes** (30/min) | `POST .../messages/{mid}/reactions` |
 | `mark_read` | `chatID messageID? read?(true)` (`read:false` marks unread) | `{chatID, read}` | yes | **yes** | `POST /v1/chats/{id}/read` or `/unread` |
 | `archive` | `chatID archived?(true)` | `{chatID, archived}` | yes | **yes** | `POST /v1/chats/{id}/archive` |
-| `get_media` | `url` (an attachment `url` or chat `avatarURL` from another result) | `res` = `{mimeType, size (null if unknown), fileName?}` then `chunk` frames | | | `GET /v1/assets/serve?url=` |
+| `compose_email` | `accountID (gmail:<address>) to[1-50] cc?[0-50] subject(0-500, single line) text(1-10000) idempotencyKey?` (bare addresses, `emailRecipient`) | `{accountID, chatID, pendingMessageID}` (a new thread) | yes | **yes** (10/min) | Gmail `users.messages.send` |
+| `gmail_connect` | `email refreshToken` | `{accountID, connected: true}` | yes (cloud-only, `humanOnly`) | n/a | Gmail `users.getProfile` (the address must match), then the Keychain |
+| `get_media` | `url` (an attachment `url` or chat `avatarURL` from another result) | `res` = `{mimeType, size (null if unknown), fileName?}` then `chunk` frames | | | `GET /v1/assets/serve?url=`; `gmail://` URLs: Gmail `messages.attachments.get` |
 
 Notes for implementers:
 
@@ -115,6 +121,53 @@ Notes for implementers:
   `MAX_FRAME_BYTES` (long CJK texts, many attachments and reactions). The connector then returns
   fewer items (newest kept), `hasMore: true` and a cursor that continues exactly after the last item
   it returned. One maximal message always fits.
+
+### Gmail (`gmail.ts`, design/gmail-plan.md)
+
+The connector runs Gmail accounts next to Beeper. Rules every peer relies on:
+
+- **Ids.** `accountID = "gmail:" + address` (lower case), `chatID = "gmail:" + address + ":" + threadId`
+  (one Gmail thread = one chat), message ids are Gmail message ids, `network` is `"Gmail"`. Anything
+  starting with `gmail:` is never sent to Beeper.
+- **Mapping** (connector `src/gmail/map.ts`): title = subject of the thread's first message or
+  `"(no subject)"`; `unreadCount` = messages with UNREAD; `isArchived` = no message has INBOX;
+  `isLowPriority` = a message carries `CATEGORY_PROMOTIONS`/`SOCIAL`/`UPDATES`/`FORUMS` (so Gmail's
+  other tabs stay out of the primary inbox and `unread_summary`); `isPinned` = STARRED; `type` = group
+  when more than one other person is on the thread; drafts never leave the Mac (`hasDraft` only).
+  Message `text` = the text/plain part, else the HTML part as plain text; `email = {subject, from,
+  to[], cc[]}`; `senderName` = the From display name.
+- **Actions on Gmail chats.** `read_chat` (cursor `jg.`), `mark_read` (UNREAD on the thread, or up to
+  `messageID`), `archive` (INBOX), `draft_reply` (a reply-all draft; `CONFLICT` when the thread has a
+  draft), `send_message` (a plain-text UTF-8 reply-all in the thread: To = the sender (Reply-To when
+  set) + the original To, Cc = the original Cc, the owner removed; `Re:` subject; `In-Reply-To` and
+  `References`; idempotent like Beeper sends), `react` -> `NOT_SUPPORTED`, `compose_email` (a new
+  thread), `remove_account` on `gmail:` ids (revoke at Google, forget the account), `get_media` on
+  `gmail://` URLs (only URLs a result carried).
+- **Mixed lists.** `list_chats`, `unread_summary` and `search_messages` with no network or account
+  filter merge Beeper and every Gmail account newest-first. `network: "Gmail"` or only Gmail
+  `accountIDs`/`chatIDs` asks only Gmail; another network or only Beeper ids asks only Beeper (with
+  exactly the Beeper-only behaviour and `j2.` cursors). The merged cursor is `jm.` (each source's own
+  position, the boundary already returned, and the last few keys per source), so pages have no
+  duplicates and no gaps; a `j2.` cursor on a merged list (or the reverse) is `BAD_PARAMS`. A source
+  that fails is named in `failedSources[] {source, accountID?, error}` and the others still answer;
+  when every source failed, the first failure is the answer. For Gmail, `search_messages.query` is
+  Gmail search syntax; `sender`, `dateAfter`, `dateBefore` and `chatIDs` are honoured.
+- **Events.** The connector polls Gmail history every `GMAIL_POLL_INTERVAL_MS` (30 s) per account
+  and sends the same metadata-only `message`/`chat` events as for Beeper (re-sync on a history
+  reset).
+- **Sign in with Google** (cloud, `GOOGLE_PATHS`): `GET /auth/google/start` (signed-in owner, computer
+  online with `"gmail.v1"`) -> Google with exactly `GOOGLE_SCOPES`, `access_type=offline`,
+  `prompt=consent`, PKCE S256 and `state`, sealed with the human session into a 10-minute cookie ->
+  `GET /auth/google/callback` (same session, state once only) -> `gmail_connect {email,
+  refreshToken}` to the connector once -> `/settings/accounts?added=gmail`, or
+  `?gmail_error=<GMAIL_CONNECT_ERRORS>` with the token revoked at Google.
+- **Token proxy** (`POST /google/token`, connector surface): `Authorization: Bearer <deviceToken>`,
+  body `googleTokenRequest {refreshToken}` -> bare `googleTokenResponse {accessToken, expiresIn}` or
+  `{ok:false, error}` (`REAUTH_REQUIRED` for `invalid_grant`, `UPSTREAM_DOWN`, `RATE_LIMITED` past
+  `GOOGLE_TOKEN_REFRESHES_PER_MINUTE` per device). Nothing is stored or logged.
+- **Approvals.** `compose_email` needs the owner's approval like `send_message`; its
+  `approvalView.target.chatID` is the sending accountID (`chatTitle` "New email", network "Gmail")
+  and `preview.email` = `{to, cc, subject}` next to `preview.text`.
 
 ### Filtered paging (list_chats `network`/`pinnedOnly`, unread_summary)
 
@@ -163,7 +216,8 @@ both                 ping {t} / pong {t}                    every 25 s; 60 s sil
   and the Raft display name (`sanitizeLine`d, 1-200 chars, omitted when empty). Never a sub, chat
   or message value.
 - `hello.capabilities` values are in `CAPABILITIES`: `"media.v1"` = `get_media` streams chunks
-  under `ack` flow control. The cloud may gate new behaviour on them.
+  under `ack` flow control; `"gmail.v1"` = the connector runs Gmail accounts (`gmail_connect`,
+  `compose_email`, Gmail chats). The cloud gates Sign in with Google on `"gmail.v1"`.
 - Connector behaviour the cloud may rely on: a duplicate in-flight `req` id is ignored; a `req`
   that arrives while the connector shuts down gets `OFFLINE` and is not dispatched; a queued `req`
   whose deadline has (nearly) passed gets `TIMEOUT` without being dispatched; a `get_media` stream
@@ -246,6 +300,9 @@ query): URLs are written to Worker logs, browser history and proxies.
 | GET | `/api/settings` | | `settingsResponse {agentAccess}` |
 | POST | `/api/settings` | `settingsRequest {agentAccess}` | `settingsResponse`; the owner's switch for agent access (on by default after pairing) |
 | POST | `/auth/logout` | | `{ok:true}`; expires the cookie (`expiredSessionCookie`), drops the server session, sends `LOGOUT_RESPONSE_HEADERS` (`Clear-Site-Data: "cache", "storage"`) |
+| GET | `/auth/google/start` | | a top-level navigation (no CSRF header): 302 to Google, or to `/settings/accounts?gmail_error=<code>` (see "Gmail") |
+
+Cloud-only actions (`gmail_connect`) are `NOT_FOUND` on `POST /api/actions/{action}`.
 
 Media responses (`mediaResponseHeaders`): always `X-Content-Type-Options: nosniff`,
 `Content-Security-Policy: sandbox; default-src 'none'`, `Cache-Control: no-store`,

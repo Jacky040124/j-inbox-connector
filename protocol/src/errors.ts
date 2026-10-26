@@ -1,24 +1,10 @@
-import { enumOf, object, string, type Infer } from "./schema.ts";
+import { type Infer } from "./schema.ts";
 import { MAX_ERROR_MESSAGE_LENGTH } from "./limits.ts";
 import { sanitizeLine, truncateText } from "./textutil.ts";
 import { ACTIONS, isActionName } from "./actions.ts";
+import { ERROR_CODES, errorBody, errorCode, type ErrorCode } from "./error-schema.ts";
 
-export const ERROR_CODES = [
-  "OFFLINE", // connector not connected
-  "BEEPER_DOWN", // connector up, Beeper API unreachable or failing
-  "NOT_ALLOWED", // action not in the whitelist, or caller lacks permission
-  "TIMEOUT",
-  "BAD_PARAMS",
-  "TOO_LARGE",
-  "RATE_LIMITED",
-  "INTERNAL",
-  "NOT_FOUND", // chat/message/asset/approval does not exist (Beeper 404)
-  "UNAUTHENTICATED", // no or expired session / device credential
-  "UNKNOWN_OUTCOME", // a write was dispatched but its answer was lost: it may or may not have happened
-  "CONFLICT", // the target's current state forbids this (e.g. draft_reply when a draft already exists)
-  "BEEPER_UNAUTHORIZED", // Beeper rejected the connector's token (revoked or expired): the owner must re-authorize, retrying will not help
-] as const;
-export type ErrorCode = (typeof ERROR_CODES)[number];
+export { ERROR_CODES, errorBody, errorCode, type ErrorCode };
 
 const STATUS: Record<ErrorCode, number> = {
   OFFLINE: 503,
@@ -34,16 +20,18 @@ const STATUS: Record<ErrorCode, number> = {
   UNKNOWN_OUTCOME: 502,
   CONFLICT: 409,
   BEEPER_UNAUTHORIZED: 502,
+  NOT_SUPPORTED: 422,
+  REAUTH_REQUIRED: 502,
+  UPSTREAM_DOWN: 502,
 };
 
-// OFFLINE means the request was never dispatched; BEEPER_DOWN means it never reached Beeper.
-const ALWAYS_RETRYABLE = new Set<ErrorCode>(["OFFLINE", "BEEPER_DOWN", "RATE_LIMITED"]);
+// OFFLINE means the request was never dispatched; BEEPER_DOWN / UPSTREAM_DOWN mean it never reached
+// Beeper / Gmail (or a read failed there).
+const ALWAYS_RETRYABLE = new Set<ErrorCode>(["OFFLINE", "BEEPER_DOWN", "UPSTREAM_DOWN", "RATE_LIMITED"]);
 // Safe to retry only for reads: for a write the effect may already have happened.
 const RETRYABLE_FOR_READS = new Set<ErrorCode>(["TIMEOUT", "INTERNAL"]);
 const LOST_ANSWER = new Set<ErrorCode>(["TIMEOUT", "OFFLINE", "INTERNAL"]);
 
-export const errorCode = enumOf(ERROR_CODES);
-export const errorBody = object({ code: errorCode, message: string({ min: 1, max: MAX_ERROR_MESSAGE_LENGTH }) });
 export type ErrorBody = Infer<typeof errorBody>;
 
 export function isErrorCode(v: unknown): v is ErrorCode {

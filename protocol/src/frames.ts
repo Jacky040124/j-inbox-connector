@@ -48,8 +48,11 @@ const JSON_LIMITS = { maxDepth: 32, maxKeys: 50_000 };
 
 // ---- connector -> cloud ----
 
-/** Values for hello.capabilities. "media.v1": get_media streams chunks under ack flow control (ChunkWindow). */
-export const CAPABILITIES = { media: "media.v1" } as const;
+/**
+ * Values for hello.capabilities. "media.v1": get_media streams chunks under ack flow control
+ * (ChunkWindow). "gmail.v1": the connector runs Gmail accounts (gmail_connect, compose_email, Gmail chats).
+ */
+export const CAPABILITIES = { media: "media.v1", gmail: "gmail.v1" } as const;
 
 export const helloFrame = object({
   type: literal("hello"),

@@ -12,21 +12,23 @@ import { MAX_PAGE_LIMIT, MAX_SEND_TEXT_LENGTH } from "../src/limits.ts";
 import { account, chat, chatID, message } from "./fixtures/examples.ts";
 import { parse } from "../src/schema.ts";
 
-const EXPECTED = ["status", "list_chats", "unread_summary", "read_chat", "search_messages", "draft_reply", "send_message", "react", "mark_read", "archive", "remove_account", "get_media"];
+const EXPECTED = ["status", "list_chats", "unread_summary", "read_chat", "search_messages", "draft_reply", "send_message", "react", "mark_read", "archive", "remove_account", "compose_email", "gmail_connect", "get_media"];
 
 describe("catalogue", () => {
   test("has exactly the agreed actions", () => expect([...ACTION_NAMES].sort() as string[]).toEqual([...EXPECTED].sort()));
   test("write flags", () => {
     const writes = ACTION_NAMES.filter((n) => ACTIONS[n].write).sort();
-    expect(writes).toEqual(["archive", "draft_reply", "mark_read", "react", "remove_account", "send_message"]);
+    expect(writes).toEqual(["archive", "compose_email", "draft_reply", "gmail_connect", "mark_read", "react", "remove_account", "send_message"]);
   });
-  test("human-only actions: just remove_account, and never one that agents could get approved", () => {
-    expect(ACTION_NAMES.filter((n) => ACTIONS[n].humanOnly === true)).toEqual(["remove_account"]);
+  test("human-only actions: remove_account and the cloud-only gmail_connect, and never one that agents could get approved", () => {
+    expect(ACTION_NAMES.filter((n) => ACTIONS[n].humanOnly === true)).toEqual(["remove_account", "gmail_connect"]);
+    expect(ACTION_NAMES.filter((n) => (ACTIONS[n] as { cloudOnly?: boolean }).cloudOnly === true)).toEqual(["gmail_connect"]);
     for (const n of ACTION_NAMES) if (ACTIONS[n].humanOnly) expect(ACTIONS[n].needsApprovalForAgents).toBe(false);
+    for (const n of ACTION_NAMES) if ((ACTIONS[n] as { cloudOnly?: boolean }).cloudOnly) expect(ACTIONS[n].humanOnly).toBe(true);
   });
-  test("approval flags: send/react/mark_read/archive need approval for agents, draft_reply does not", () => {
+  test("approval flags: send/react/mark_read/archive/compose_email need approval for agents, draft_reply does not", () => {
     const approval = ACTION_NAMES.filter((n) => ACTIONS[n].needsApprovalForAgents).sort();
-    expect(approval).toEqual(["archive", "mark_read", "react", "send_message"]);
+    expect(approval).toEqual(["archive", "compose_email", "mark_read", "react", "send_message"]);
     expect(ACTIONS.draft_reply.needsApprovalForAgents).toBe(false);
   });
   test("every approval action is a write action", () => {
@@ -73,8 +75,13 @@ const VALID: Record<ActionName, unknown[]> = {
   react: [{ chatID, messageID: "m-1", reactionKey: "👍" }],
   mark_read: [{ chatID }, { chatID, messageID: "m-1" }, { chatID, read: false }],
   archive: [{ chatID }, { chatID, archived: false }],
-  remove_account: [{ accountID: "whatsapp" }, { accountID: "local-whatsapp_ba_x" }],
-  get_media: [{ url: "mxc://beeper.local/abc" }, { url: "localmxc://local-whatsapp/xyz" }],
+  remove_account: [{ accountID: "whatsapp" }, { accountID: "local-whatsapp_ba_x" }, { accountID: "gmail:jacky@example.com" }],
+  compose_email: [
+    { accountID: "gmail:jacky@example.com", to: ["a@example.com"], subject: "", text: "hi" },
+    { accountID: "gmail:jacky@example.com", to: ["a@example.com", "b.c+d@sub.example.org"], cc: [], subject: "Lunch? 🍜", text: "hello\nthere", idempotencyKey: "idem-key-0001" },
+  ],
+  gmail_connect: [{ email: "jacky@example.com", refreshToken: "1//0gFAKE-refresh_token.xyz" }],
+  get_media: [{ url: "mxc://beeper.local/abc" }, { url: "localmxc://local-whatsapp/xyz" }, { url: "gmail://jacky%40example.com/18c2f0a1b2c3d4e5/ANGjdJ8-abc_DEF" }],
 };
 
 const INVALID: Record<ActionName, unknown[]> = {
@@ -89,7 +96,20 @@ const INVALID: Record<ActionName, unknown[]> = {
   mark_read: [{}, { chatID, read: "false" }, { chatID, messageID: "" }],
   archive: [{}, { chatID, archived: 1 }],
   remove_account: [{}, { accountID: "" }, { accountID: 5 }, { accountID: "whatsapp", scope: "all-devices" }],
-  get_media: [{}, { url: "https://evil.example/a.png" }, { url: "file:///etc/../etc/passwd" }, { url: "javascript:alert(1)" }, { url: "mxc://" + "a".repeat(3000) }],
+  compose_email: [
+    {},
+    { accountID: "gmail:jacky@example.com", to: [], subject: "x", text: "hi" },
+    { accountID: "gmail:jacky@example.com", to: ["not-an-address"], subject: "x", text: "hi" },
+    { accountID: "gmail:jacky@example.com", to: ["Alice <a@example.com>"], subject: "x", text: "hi" },
+    { accountID: "gmail:jacky@example.com", to: ["a@example.com,b@example.com"], subject: "x", text: "hi" },
+    { accountID: "gmail:jacky@example.com", to: ["a@example.com"], subject: "line\nbreak", text: "hi" },
+    { accountID: "gmail:jacky@example.com", to: ["a@example.com"], subject: "x", text: "" },
+    { accountID: "gmail:jacky@example.com", to: ["a@example.com"], text: "hi" },
+    { accountID: "gmail:jacky@example.com", to: Array.from({ length: 51 }, (_, i) => `a${i}@example.com`), subject: "x", text: "hi" },
+    { accountID: "gmail:jacky@example.com", to: ["a@example.com"], subject: "x", text: "hi", bcc: ["b@example.com"] },
+  ],
+  gmail_connect: [{}, { email: "jacky@example.com" }, { email: "jacky@example.com", refreshToken: "has space in it" }, { email: "nope", refreshToken: "1//0gFAKE-refresh" }],
+  get_media: [{ url: "gmail://jacky%40example.com/../ANG" }, { url: "gmail://jacky%40example.com/18c2/a/b" }, {}, { url: "https://evil.example/a.png" }, { url: "file:///etc/../etc/passwd" }, { url: "javascript:alert(1)" }, { url: "mxc://" + "a".repeat(3000) }],
 };
 
 describe("parseActionParams", () => {
@@ -137,6 +157,8 @@ const RESULTS: Record<ActionName, unknown> = {
   mark_read: { chatID, read: true },
   archive: { chatID, archived: true },
   remove_account: { accountID: "whatsapp", removed: true, scope: "all-devices", affectedAccountIDs: ["whatsapp"] },
+  compose_email: { accountID: "gmail:jacky@example.com", chatID: "gmail:jacky@example.com:18c2f0a1b2c3d4e5", pendingMessageID: "18c2f0a1b2c3d4e6" },
+  gmail_connect: { accountID: "gmail:jacky@example.com", connected: true },
   get_media: { mimeType: "image/png", size: 1234, fileName: "a.png" },
 };
 

@@ -20,10 +20,15 @@
       },
       "devDependencies": {
         "@j-inbox/fake-beeper": "workspace:*",
+        "@j-inbox/fake-google": "workspace:*",
       },
     },
     "fake-beeper": {
       "name": "@j-inbox/fake-beeper",
+      "version": "0.1.0",
+    },
+    "fake-google": {
+      "name": "@j-inbox/fake-google",
       "version": "0.1.0",
     },
     "protocol": {
@@ -35,6 +40,8 @@
     "@j-inbox/connector": ["@j-inbox/connector@workspace:connector"],
 
     "@j-inbox/fake-beeper": ["@j-inbox/fake-beeper@workspace:fake-beeper"],
+
+    "@j-inbox/fake-google": ["@j-inbox/fake-google@workspace:fake-google"],
 
     "@j-inbox/protocol": ["@j-inbox/protocol@workspace:protocol"],
 

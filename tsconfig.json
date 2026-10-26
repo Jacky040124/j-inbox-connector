@@ -16,6 +16,6 @@
     "verbatimModuleSyntax": true,
     "resolveJsonModule": true
   },
-  "include": ["protocol", "fake-beeper", "scripts", "connector"],
+  "include": ["protocol", "fake-beeper", "fake-google", "scripts", "connector"],
   "exclude": ["node_modules", "**/node_modules", "**/dist"]
 }

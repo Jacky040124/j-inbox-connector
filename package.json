@@ -5,10 +5,11 @@
   "workspaces": [
     "protocol",
     "fake-beeper",
+    "fake-google",
     "connector"
   ],
   "scripts": {
-    "test": "cd protocol && bun test && cd ../fake-beeper && bun test && cd ../connector && bun test",
+    "test": "cd protocol && bun test && cd ../fake-beeper && bun test && cd ../fake-google && bun test && cd ../connector && bun test",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "cd connector && bun run build"
   },

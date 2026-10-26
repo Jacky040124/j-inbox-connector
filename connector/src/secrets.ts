@@ -1,12 +1,22 @@
-// Where the two tokens live: the Beeper API token and the J-Inbox device token. On macOS they go
-// to the login Keychain through /usr/bin/security; the value is written via `security -i` on
-// stdin so it never shows up in a process list. Never in config files or logs.
+// Where the tokens live: the Beeper API token, the J-Inbox device token and one Google refresh
+// token per Gmail account (`gmail:<address>`). On macOS they go to the login Keychain through
+// /usr/bin/security; the value is written via `security -i` on stdin so it never shows up in a
+// process list. Never in config files or logs.
 import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
+import { normalizeGmailAddress } from "@j-inbox/protocol";
 import type { Runner } from "./runner.ts";
 
-export type SecretName = "beeper-token" | "device-token";
+export type SecretName = "beeper-token" | "device-token" | `gmail:${string}`;
+/** The fixed names; Gmail accounts add `gmail:<address>` (gmailSecretName). */
 export const SECRET_NAMES: readonly SecretName[] = ["beeper-token", "device-token"];
+
+/** Keychain account for a Gmail account's refresh token. */
+export function gmailSecretName(email: string): SecretName {
+  const v = normalizeGmailAddress(email);
+  if (!v || v !== email) throw new Error("invalid Gmail address");
+  return `gmail:${v}`;
+}
 export const KEYCHAIN_SERVICE = "build.jsuite.j-inbox";
 
 export interface SecretStore {
@@ -21,7 +31,10 @@ export function isStorableSecret(v: unknown): v is string {
 }
 
 function checkName(name: string): asserts name is SecretName {
-  if (!SECRET_NAMES.includes(name as SecretName)) throw new Error("unknown secret name");
+  if (SECRET_NAMES.includes(name as SecretName)) return;
+  // gmail:<address>: only plain lower-case addresses (no quotes or spaces that could break `security -i`).
+  if (typeof name === "string" && name.startsWith("gmail:") && normalizeGmailAddress(name.slice(6)) === name.slice(6)) return;
+  throw new Error("unknown secret name");
 }
 
 const SECURITY = "/usr/bin/security";
@@ -72,6 +85,7 @@ export class MemorySecretStore implements SecretStore {
     this.m.set(name, value);
   }
   async delete(name: SecretName) {
+    checkName(name);
     this.m.delete(name);
   }
 }
@@ -114,6 +128,7 @@ export class FileSecretStore implements SecretStore {
     this.write({ ...this.read(), [name]: value });
   }
   async delete(name: SecretName) {
+    checkName(name);
     const all = this.read();
     if (!(name in all)) return;
     delete all[name];

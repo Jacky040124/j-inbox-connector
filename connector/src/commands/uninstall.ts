@@ -1,7 +1,9 @@
-// `j-inbox uninstall`: background service, both tokens and J-Inbox's own files. Beeper itself is
-// left alone (it may be used for other things).
+// `j-inbox uninstall`: background service, the tokens (Gmail accounts' access is revoked at Google
+// first) and J-Inbox's own files. Beeper itself is left alone (it may be used for other things).
 import { rmSync } from "node:fs";
-import { loadConfig } from "../config.ts";
+import { googleEndpoints, loadConfig } from "../config.ts";
+import { GmailAccounts } from "../gmail/accounts.ts";
+import { revokeAtGoogle } from "../gmail/client.ts";
 import { uninstallAgent } from "../launchd.ts";
 import { revokeInCloud } from "./pair.ts";
 import { SECRET_NAMES } from "../secrets.ts";
@@ -27,6 +29,21 @@ export async function uninstallCommand(ctx: Ctx): Promise<number> {
   }
   await uninstallAgent({ launchAgentsDir: paths.launchAgentsDir, uid: deps.uid, run: deps.run });
   deps.out("Removed the background service.");
+  // Gmail accounts: revoke J-Inbox's access at Google (needs no secret), then forget the tokens.
+  const gmail = new GmailAccounts({ path: paths.gmailFile, secrets: ctx.secrets });
+  let oauthURL: string | undefined;
+  try {
+    oauthURL = googleEndpoints(deps.env, paths).oauthURL;
+  } catch {}
+  for (const a of gmail.list()) {
+    try {
+      const token = await gmail.refreshToken(a.email);
+      if (token && !(await revokeAtGoogle({ token, oauthURL, fetchImpl: deps.fetchImpl }))) deps.err("Could not reach Google to revoke a Gmail account's access; remove J-Inbox at myaccount.google.com/permissions.");
+      await gmail.remove(a.email);
+    } catch (e) {
+      deps.err(`Could not remove a Gmail account's token from the Keychain: ${(e as Error).message}`);
+    }
+  }
   for (const name of SECRET_NAMES) {
     try {
       await ctx.secrets.delete(name);

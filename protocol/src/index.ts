@@ -1,6 +1,7 @@
 export * from "./schema.ts";
 export * from "./limits.ts";
 export * from "./errors.ts";
+export * from "./gmail.ts";
 export * from "./textutil.ts";
 export * from "./model.ts";
 export * from "./actions.ts";

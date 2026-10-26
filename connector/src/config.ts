@@ -23,6 +23,8 @@ export type Paths = {
   secretsFile: string;
   idempotencyFile: string;
   assetsFile: string;
+  /** Gmail accounts this connector runs (addresses and status; the tokens are in the Keychain). */
+  gmailFile: string;
   /** Everything lives under J_INBOX_CONFIG_DIR. */
   testMode: boolean;
 };
@@ -56,6 +58,7 @@ export function resolvePaths(env: Record<string, string | undefined>): Paths {
     secretsFile: join(configDir, "dev-secrets.json"),
     idempotencyFile: join(dataDir, "idempotency.json"),
     assetsFile: join(dataDir, "assets.json"),
+    gmailFile: join(dataDir, "gmail.json"),
     testMode: override !== undefined,
   };
 }
@@ -146,4 +149,30 @@ export function writeAtomic(path: string, text: string, mode = 0o600): void {
   }
   renameSync(tmp, path);
   chmodSync(path, mode);
+}
+
+/**
+ * Google endpoints. Real Google by default; J_INBOX_GMAIL_API_URL / J_INBOX_GOOGLE_OAUTH_URL may
+ * point at a loopback fake, and only in test mode (J_INBOX_CONFIG_DIR set), like J_INBOX_SECRETS=file.
+ */
+export function googleEndpoints(env: Record<string, string | undefined>, p: Paths): { gmailURL: string; oauthURL: string } {
+  const pick = (key: string, fallback: string) => {
+    const v = env[key];
+    if (v === undefined || v === "") return fallback;
+    if (!p.testMode) throw new Error(`${key} is only allowed together with J_INBOX_CONFIG_DIR (tests and local development).`);
+    const u = plainOrigin(v, key);
+    if (u.protocol !== "http:" || !LOOPBACK.has(u.hostname)) throw new Error(`${key} must be a loopback http:// URL.`);
+    return u.origin;
+  };
+  return { gmailURL: pick("J_INBOX_GMAIL_API_URL", "https://gmail.googleapis.com"), oauthURL: pick("J_INBOX_GOOGLE_OAUTH_URL", "https://oauth2.googleapis.com") };
+}
+
+/** J_INBOX_GMAIL_POLL_MS (tests only, with J_INBOX_CONFIG_DIR): a shorter Gmail history poll. undefined: the default. */
+export function gmailPollOverride(env: Record<string, string | undefined>, p: Paths): number | undefined {
+  const v = env.J_INBOX_GMAIL_POLL_MS;
+  if (v === undefined || v === "") return undefined;
+  if (!p.testMode) throw new Error("J_INBOX_GMAIL_POLL_MS is only allowed together with J_INBOX_CONFIG_DIR (tests and local development).");
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 200 || n > 600_000) throw new Error("J_INBOX_GMAIL_POLL_MS must be 200-600000.");
+  return n;
 }

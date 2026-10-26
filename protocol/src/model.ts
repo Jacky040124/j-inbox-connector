@@ -109,6 +109,25 @@ export const sharedPost = object({
 });
 export type SharedPost = Infer<typeof sharedPost>;
 
+/** A person on an email (header address, lenient: whatever the sender put there, single line). */
+export const emailPerson = object({
+  name: optional(string({ min: 1, max: MAX_NAME_LENGTH })),
+  address: string({ min: 1, max: 320, pattern: /^[^\s<>]+$/, format: "email-address" }),
+});
+export type EmailPerson = Infer<typeof emailPerson>;
+export const MAX_EMAIL_PEOPLE = 100;
+/** Headers of an email (Gmail messages only). */
+export const emailHeaders = object({
+  subject: string({ min: 0, max: MAX_TITLE_LENGTH }),
+  from: emailPerson,
+  to: array(emailPerson, { max: MAX_EMAIL_PEOPLE }),
+  cc: array(emailPerson, { max: MAX_EMAIL_PEOPLE }),
+});
+export type EmailHeaders = Infer<typeof emailHeaders>;
+
+/** A recipient J-Inbox sends to: a plain address (no display name, no list syntax). */
+export const emailRecipient = string({ min: 3, max: 254, pattern: /^[^\s@<>",;:()\[\]\\]{1,64}@[^\s@<>",;:()\[\]\\.]+(?:\.[^\s@<>",;:()\[\]\\.]+)+$/, format: "email" });
+
 export const messageItem = object({
   id: messageID,
   chatID,
@@ -132,6 +151,8 @@ export const messageItem = object({
   reactions: optional(array(reaction, { max: MAX_REACTIONS_PER_MESSAGE })),
   sendStatus: optional(enumOf(SEND_STATUSES)),
   sharedPost: optional(sharedPost),
+  /** Email headers (Gmail chats only). `text` is the plain-text body. */
+  email: optional(emailHeaders),
 });
 export type MessageItem = Infer<typeof messageItem>;
 

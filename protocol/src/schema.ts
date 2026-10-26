@@ -146,15 +146,20 @@ export function base64(opts: { max: number }): Schema<string> {
   });
 }
 
-const ASSET_RE = /^(?:mxc|localmxc):\/\/[^\s/][^\s]*$|^file:\/\/\/[^\s]+$/;
+// gmail://<urlencoded account email>/<messageId>/<attachmentId>: an email attachment the connector
+// fetches from Gmail (protocol gmail.ts gmailAssetURL).
+const ASSET_RE = /^(?:mxc|localmxc):\/\/[^\s/][^\s]*$|^file:\/\/\/[^\s]+$|^gmail:\/\/[^\s/]+\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+$/;
 
-/** A Beeper media URL accepted by GET /v1/assets/serve: mxc://, localmxc:// or local file:/// without traversal. */
+/**
+ * A media URL for get_media: a Beeper one (mxc://, localmxc:// or local file:/// without traversal)
+ * or an email attachment (gmail://<account>/<messageId>/<attachmentId>).
+ */
 export function assetUrl(max = 2048): Schema<string> {
   const base = stringCheck({ min: 1, max, multiline: false });
   return make({ type: "string", min: 1, max, multiline: false, format: "asset-url" }, (input, path, ctx) => {
     const v = base(input, path, ctx);
     if (v === INVALID) return v;
-    if (!ASSET_RE.test(v)) return ctx.add(path, "must be an mxc://, localmxc:// or file:/// URL"), INVALID;
+    if (!ASSET_RE.test(v)) return ctx.add(path, "must be an mxc://, localmxc://, file:/// or gmail:// URL"), INVALID;
     let decoded: string;
     try {
       decoded = decodeURIComponent(v);
