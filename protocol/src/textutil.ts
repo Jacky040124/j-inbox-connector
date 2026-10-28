@@ -26,11 +26,19 @@ export function sanitizeLine(s: string, max: number): string {
   return truncateText(line, max).text.trimEnd();
 }
 
-// Only bodies that are HTML: they start with a block or inline formatting tag and close one (or
-// break a line). Ordinary chat text that merely contains tags ("hi <b>x</b>", a code snippet) is
-// shown exactly as sent.
+// Bodies that are HTML: they start with a block or inline formatting tag and close one (or break a
+// line), or they carry a bridge's line break or link anywhere. Beeper's WhatsApp and X bridges send
+// multi-line messages as "text<br>more<br><a href=…>…</a>" (seen on real chats, 2026-10-28). Other
+// chat text that merely contains tags ("hi <b>x</b>", a code snippet) is shown as sent.
 const HTML_TAGS = "p|div|span|b|i|u|strong|em|a|ul|ol|li|blockquote|h[1-6]";
-const HTML_HINT = new RegExp(`^\\s*<(?:${HTML_TAGS}|br)(?:\\s[^<>]*)?\\/?>[\\s\\S]*(?:<\\/(?:${HTML_TAGS})>|<br\\s*\\/?>)`, "i");
+const HTML_HINT = new RegExp(
+  `^\\s*<(?:${HTML_TAGS}|br)(?:\\s[^<>]*)?\\/?>[\\s\\S]*(?:<\\/(?:${HTML_TAGS})>|<br\\s*\\/?>)|<br\\s*\\/?>|<a(?:\\s[^<>]*)?>[\\s\\S]*?<\\/a>`,
+  "i",
+);
+// The few character references bridges escape in otherwise plain text (X sends "&amp;", some SMS
+// senders "Msg&amp;Data"). Decoded on their own when the body is not HTML.
+const PLAIN_ENTITY = /&(?:amp|lt|gt|quot|#39|#x27);/i;
+const MATRIX_LINK = /^https:\/\/matrix\.to\/#\//i;
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", "#39": "'" };
 
 /**
@@ -39,12 +47,14 @@ const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"'
  * unchanged. Never produces markup: the result is plain text for a text node.
  */
 export function htmlToPlainText(s: string): string {
-  if (!HTML_HINT.test(s)) return s;
+  if (!HTML_HINT.test(s)) return PLAIN_ENTITY.test(s) ? decodeEntities(s) : s;
   const text = s
     .replace(/\r\n?/g, "\n")
     // Links keep their address so the page can still link them: "text (url)", or just the url.
     .replace(/<a\s[^<>]*?href\s*=\s*"([^"]*)"[^<>]*>([\s\S]*?)<\/a>/gi, (_m, href: string, inner: string) => {
       const label = inner.replace(/<[^<>]*>/g, "").trim();
+      // A mention ("@name" linking to a matrix.to user page) reads as the name only.
+      if (MATRIX_LINK.test(decodeEntities(href))) return label || href;
       return !label || label === href || href.includes(label.replace(/…$/, "")) ? href : `${label} (${href})`;
     })
     .replace(/<br\s*\/?>/gi, "\n")
@@ -55,15 +65,21 @@ export function htmlToPlainText(s: string): string {
     .replace(/\n\u0001/g, "\n")
     .replace(/\u0001/g, "\n")
     .replace(/<\/?[a-z][a-z0-9]*(?:\s[^<>]*)?\/?>/gi, "")
-    .replace(/&(#x[0-9a-f]{1,6}|#[0-9]{1,7}|[a-z]+[0-9]*);/gi, (m, e: string) => {
-      const k = e.toLowerCase();
-      if (k in ENTITIES) return ENTITIES[k]!;
-      const code = k.startsWith("#x") ? parseInt(k.slice(2), 16) : k.startsWith("#") ? parseInt(k.slice(1), 10) : NaN;
-      return Number.isInteger(code) && code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff) ? String.fromCodePoint(code) : m;
-    })
+    .replace(/&(#x[0-9a-f]{1,6}|#[0-9]{1,7}|[a-z]+[0-9]*);/gi, decodeEntity)
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n");
   return text.trim();
+}
+
+function decodeEntity(m: string, e: string): string {
+  const k = e.toLowerCase();
+  if (k in ENTITIES) return ENTITIES[k]!;
+  const code = k.startsWith("#x") ? parseInt(k.slice(2), 16) : k.startsWith("#") ? parseInt(k.slice(1), 10) : NaN;
+  return Number.isInteger(code) && code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff) ? String.fromCodePoint(code) : m;
+}
+
+function decodeEntities(s: string): string {
+  return s.replace(/&(#x[0-9a-f]{1,6}|#[0-9]{1,7}|[a-z]+[0-9]*);/gi, decodeEntity);
 }
 
 const POST_NETWORKS: [RegExp, string][] = [

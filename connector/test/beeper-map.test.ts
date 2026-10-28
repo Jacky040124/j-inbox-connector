@@ -27,6 +27,13 @@ describe("defaults for fields Beeper omits", () => {
     expect(messageTypeOf({ type: "REACTION", text: "x" })).toBe("REACTION");
     expect(messageTypeOf({ type: "SOMETHING_NEW", text: "x" })).toBe("UNKNOWN");
   });
+  test("a sender name that is only a Matrix ID is dropped; real names and bridge HTML bodies are cleaned", () => {
+    const base = { id: "1", chatID: "c", accountID: "a", senderID: "s", timestamp: "2026-10-01T10:00:00.000Z", sortKey: "5", type: "TEXT" };
+    expect(mapMessage({ ...base, senderName: "@whatsapp_lid-84280210395312:beeper.local" })!.senderName).toBeUndefined();
+    expect(mapMessage({ ...base, senderName: "Noa" })!.senderName).toBe("Noa");
+    expect(mapMessage({ ...base, senderName: "@theloudmell" })!.senderName).toBe("@theloudmell");
+    expect(mapMessage({ ...base, text: "hi<br>there &amp; you" })!.text).toBe("hi\nthere & you");
+  });
   test("missing isSender, chat flags and account network get safe defaults", () => {
     const m = mapMessage({ id: "1", chatID: "c", accountID: "a", senderID: "s", timestamp: "2026-10-01T10:00:00.000Z", sortKey: "5" })!;
     expect(m.isSender).toBe(false);
@@ -101,7 +108,7 @@ describe("HTML message bodies", () => {
   test("a LinkedIn-style HTML body reaches agents and the web page as plain text", () => {
     const raw = { id: "m1", chatID: "!c:beeper.local", accountID: "linkedin", senderID: "u", timestamp: "2026-10-21T10:00:00.000Z", sortKey: "1", text: "<p>Hi Jacky</p><br><p>Tom &amp; Jerry</p>" };
     expect(mapMessage(raw)!.text).toBe("Hi Jacky\n\nTom & Jerry");
-    expect(mapMessage({ ...raw, text: "a <b> c &amp; <p> d" })!.text).toBe("a <b> c &amp; <p> d");
+    expect(mapMessage({ ...raw, text: "a <b> c &amp; <p> d" })!.text).toBe("a <b> c & <p> d");
   });
 });
 

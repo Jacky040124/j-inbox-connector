@@ -129,6 +129,8 @@ export function selfIDsIn(raw: unknown): string[] {
   return out;
 }
 
+const MATRIX_USER_ID = /^@[^\s:]+:[A-Za-z0-9.-]+$/;
+
 export function mapMessage(raw: unknown, opts: MapOptions = {}): MessageItem | null {
   if (!isObj(raw)) return null;
   const id = ok(idSchema, raw.id);
@@ -139,7 +141,9 @@ export function mapMessage(raw: unknown, opts: MapOptions = {}): MessageItem | n
   const sortKey = ok(sortKeySchema, raw.sortKey);
   if (!id || !chatID || !accountID || !senderID || !timestamp || !sortKey) return null;
   const out: MessageItem = { id, chatID, accountID, senderID, timestamp, sortKey, type: messageTypeOf(raw), isSender: raw.isSender === true };
-  if (typeof raw.senderName === "string") out.senderName = sanitizeLine(raw.senderName, MAX_NAME_LENGTH);
+  // Beeper sometimes gives the sender's Matrix ID as the name ("@whatsapp_lid-123:beeper.local" in
+  // chat-list previews): no name is better than an ID.
+  if (typeof raw.senderName === "string" && !MATRIX_USER_ID.test(raw.senderName.trim())) out.senderName = sanitizeLine(raw.senderName, MAX_NAME_LENGTH);
   if (typeof raw.text === "string") {
     const t = truncateText(sanitizeText(htmlToPlainText(raw.text)), MAX_RESULT_TEXT_LENGTH);
     out.text = t.text;
