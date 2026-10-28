@@ -25,6 +25,8 @@ Real-API behaviour it models (from the read-only smoke run, see `e2e/README.md`)
   plus Beeper's own `matrix` account.
 - `controls.emptyOlderPageForIMessage`: `hasMore: true`, then an empty older page.
 - `PATCH /v1/chats/{id}` refuses a non-empty draft while one exists (409 `CONFLICT`).
+- `POST /v1/chats/{id}/unread` within 5 s of an unarchive puts the chat back in the archive (seen on
+  Beeper Desktop 4.3, 2026-10-28); unread first, then unarchive, keeps both.
 - `/v1/ws` `subscriptions.set` with `app: {state: true}` gets `app.state.updated`;
   `fb.setAppState("needs-login")` changes it.
 - Every request is logged in `fb.state.calls` before auth and fault injection (`authorized`,

@@ -3,6 +3,10 @@
 import type { BChat, BMessage } from "./fixtures.ts";
 import type { Call, FakeBeeperState } from "./state.ts";
 
+/** When each chat was last unarchived, for the unread-after-unarchive quirk (see POST /unread). */
+const unarchivedAt = new WeakMap<object, number>();
+const UNREAD_REARCHIVE_MS = 5_000;
+
 export const FAKE_BEEPER_VERSION = "4.2.999-fake";
 
 export type Controls = {
@@ -440,7 +444,10 @@ async function dispatch(method: string, r: Route, q: URLSearchParams, body: Reco
       const c = chat();
       onlyKeys(body, ["archived"]);
       if ("archived" in body && typeof body.archived !== "boolean") throw bad("archived must be boolean");
+      const was = c.isArchived === true;
       c.isArchived = body.archived === undefined ? true : (body.archived as boolean);
+      if (was && !c.isArchived) unarchivedAt.set(c, Date.now());
+      else unarchivedAt.delete(c);
       state.emitChat(c);
       return new Response(null, { status: 204, headers: { "x-beeper-desktop-version": FAKE_BEEPER_VERSION } });
     }
@@ -470,6 +477,11 @@ async function dispatch(method: string, r: Route, q: URLSearchParams, body: Reco
       onlyKeys(body, ["messageID"]);
       if (body.messageID !== undefined && typeof body.messageID !== "string") throw bad("messageID must be a string");
       c.isMarkedUnread = true;
+      // Real Beeper (Desktop 4.3, seen 2026-10-28): marking a chat unread right after unarchiving it
+      // puts it back in the archive. Unread first, then unarchive, keeps both.
+      const at = unarchivedAt.get(c);
+      if (at !== undefined && Date.now() - at < UNREAD_REARCHIVE_MS) c.isArchived = true;
+      unarchivedAt.delete(c);
       state.emitChat(c);
       return json(chatOut(c));
     }

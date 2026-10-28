@@ -230,3 +230,20 @@ describe("/v1/ws app state", () => {
     c.ws.close();
   });
 });
+
+describe("unread right after unarchive (real Beeper quirk)", () => {
+  const chatPath = (id: string) => `/v1/chats/${enc(id)}`;
+  test("unarchive then unread leaves the chat archived; unread then unarchive keeps both", async () => {
+    const id = CHAT_IDS.archived;
+    await send("POST", chatPath(id) + "/archive", { archived: true });
+    await send("POST", chatPath(id) + "/archive", { archived: false });
+    await send("POST", chatPath(id) + "/unread", {});
+    let c = (await get(chatPath(id))).body;
+    expect([c.isArchived, c.isMarkedUnread]).toEqual([true, true]);
+    await send("POST", chatPath(id) + "/unread", {});
+    await send("POST", chatPath(id) + "/archive", { archived: false });
+    c = (await get(chatPath(id))).body;
+    expect([c.isArchived, c.isMarkedUnread]).toEqual([false, true]);
+    await send("POST", chatPath(id) + "/archive", { archived: true });
+  });
+});
