@@ -30,6 +30,7 @@ import {
 import { errorBody, errorCode } from "./errors.ts";
 import { beeperHealth, chatID, ownId, versionString } from "./model.ts";
 import { SNOOZE_REASONS } from "./snooze.ts";
+import { draftMeta, raftAgentID } from "./drafts.ts";
 import { approvalView, canonicalOrigin } from "./agent.ts";
 import { eventFrame } from "./frames.ts";
 import type { ActionName } from "./actions.ts";
@@ -77,7 +78,19 @@ export const API_ROUTES = {
   settings: { method: "GET", path: "/api/settings" },
   /** Body: settingsRequest. Response: settingsResponse. */
   updateSettings: { method: "POST", path: "/api/settings" },
+  /**
+   * A Raft agent's picture (Settings > Agents, the draft picker), fetched by the cloud from the
+   * avatar URL in the stored directory (Raft's origin only, images only, capped) and served from
+   * the app's origin, so the CSP stays img-src 'self' blob:. {id} is a raftAgentID (server
+   * metadata, not chat content). 404 when there is none.
+   */
+  agentAvatar: { method: "GET", path: "/api/agent-avatar/{id}" },
 } as const;
+
+export function agentAvatarPath(agentID: string): string {
+  if (!parse(raftAgentID, agentID).ok) throw new Error("invalid agent id");
+  return `/api/agent-avatar/${encodeURIComponent(agentID)}`;
+}
 
 export const settingsResponse = object({ agentAccess: boolean() });
 export const settingsRequest = object({ agentAccess: boolean() });
@@ -95,6 +108,8 @@ export const WEB_PAGES = {
   approval: "/approvals/{id}",
   accounts: "/settings/accounts",
   devices: "/settings/devices",
+  /** The Raft server's agents that may draft replies (added 2026-10-28). */
+  agents: "/settings/agents",
   activity: "/settings/activity",
   general: "/settings/general",
 } as const;
@@ -316,6 +331,13 @@ export const liveServerMessage = discriminated("type", {
    * another way), "dropped" (could not be brought back: the chat is gone).
    */
   snooze: object({ type: literal("snooze"), chatID, until: nullable(isoDateTime()), reason: enumOf(SNOOZE_REASONS) }),
+  /**
+   * A draft request was made or changed (added 2026-10-28): metadata only. When `status` is
+   * drafted the page reads the draft with list_drafts {chatID}.
+   */
+  draft: object({ type: literal("draft"), request: draftMeta }),
+  /** The allowed agents or the agent directory changed (Settings > Agents in another tab). */
+  draft_agents: object({ type: literal("draft_agents") }),
 });
 
 export const liveClientMessage = discriminated("type", {

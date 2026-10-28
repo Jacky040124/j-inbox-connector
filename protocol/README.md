@@ -21,7 +21,8 @@ Changes must be **additive** and recorded in the root README changelog (see "Rul
 | `model.ts` | Normalized data shapes: `chatSummary`, `messageItem` (optional `email` headers), `attachment`, `reaction`, `account`, `beeperHealth`, `mediaHead`, `emailHeaders`/`emailPerson`, `emailRecipient`. |
 | `actions.ts` | The action catalogue `ACTIONS`, `parseActionParams` (fills defaults), `parseActionResult`, `coerceAgentParams`. |
 | `frames.ts` | Connector<->cloud frames, `parseConnectorFrame`, `parseCloudFrame`, `encodeFrame`, media chunking and flow control (`makeChunkFrames`, `ChunkAssembler`, `ChunkWindow`, `mediaDeadlineMs`), `CLOSE_CODES`, `shouldReconnect`, `backoffDelay`. |
-| `agent.ts` | Raft App surface: `buildRaftManifest`, agent action response, approvals (`approvalTicket`, `approvalView`), `agentMediaResult`, owner notices (`ownerNoticeText`, `offlineAlertDue`), room binding (`canBindRoom`, `authorizeRoomAccess`), meta actions `whoami` and `approval_status`. |
+| `agent.ts` | Raft App surface: `buildRaftManifest`, agent action response, approvals (`approvalTicket`, `approvalView`), `agentMediaResult`, owner notices (`ownerNoticeText`, `offlineAlertDue`), room binding (`canBindRoom`, `authorizeRoomAccess`), meta actions `whoami`, `approval_status`, `get_draft_request` and `submit_draft`. |
+| `drafts.ts` | Drafts by agents: `draftMeta` (what the cloud keeps), `draftView` (+ the texts from the computer), `storedDraft`, `raftAgent`, `raftAgentsResult`, ids (`draftRequestID`, `raftAgentID`), `DRAFT_STATUSES`, `ACTIVE_DRAFT_STATUSES`, `DRAFT_DELIVERIES`, limits (`DRAFT_DEADLINE_MS` 30 min, `MAX_DRAFT_INSTRUCTION_LENGTH` 2000, `MAX_ACTIVE_DRAFTS` 50, `MAX_DRAFT_READ` 10, `DRAFT_KEEP_MS` 7 days), the Raft event (`draftEventSummary`, `draftEventPayload`). |
 | `web.ts` | Browser API routes and shapes, CSRF header, `mediaResponseHeaders`, `WEB_HTML_HEADERS`, human and agent session cookies, logout, local-cache rules, upgrade `Origin` checks, `/live` messages. |
 | `auth.ts` | Login with Raft (`startHumanLogin`, `handleRaftCallback`: state + nonce + PKCE for humans, stateless only for proven agents), session lifetimes (`sessionExpired`, `agentSessionMaxAge`), surfaces (`surfaceForPath`, `sessionKindForSurface`, `authorizeSurface`). |
 | `pairing.ts` | Device-code pairing flow, user/device codes, device tokens, `hashToken`, `checkPairConfirm`, `approximateIP`, `PairingGuard` attempt limits. |
@@ -99,6 +100,12 @@ camelCase (like Beeper). Agent writes marked "approval" go through the approval 
 | `snooze_chat` | `chatID until` (ISO 8601 with timezone; `snoozeUntilProblem`: 1 min to 7 days ahead, 10 min clock slack) | `{chatID, until}` | yes (cloud) | **yes** (60/min, like `archive`) | none itself: the cloud keeps the snooze (see "Snooze") and runs `read_chat` (limit 1) and `archive` now |
 | `unsnooze_chat` | `chatID` | `{chatID}` | yes (cloud) | **yes** (60/min) | none itself: the cloud runs `archive {archived:false}` and forgets the snooze |
 | `list_snoozed` | – | `{items: {chatID, until, snoozedAt, chat?: ChatSummary (no preview)}[]}` soonest first, at most `MAX_SNOOZES` (500) | (cloud) | (10/min) | the cloud's store (ids and times), then `list_chats {inbox: archive}` and `read_chat` (limit 1) for chats that page missed, 6 at a time within one request timeout; offline: no `chat` |
+| `request_draft` | `chatID agentID instruction(1-2000)` | `draftView` | yes (cloud, `humanOnly`) | n/a (owner 20/min is the human budget) | none itself: see "Drafts by agents" |
+| `cancel_draft`, `discard_draft`, `mark_draft_sent` | `requestId` | `draftView` (cancelled / discarded / sent) | yes (cloud, `humanOnly`) | n/a | `draft_store_delete` at the connector |
+| `list_drafts` | `chatID?` | `{items: draftView[]}` (active ones, newest first, at most `MAX_ACTIVE_DRAFTS`) | (cloud, `humanOnly`) | n/a | the cloud's store, then `draft_store_get` |
+| `list_raft_agents` | `refresh?` | `raftAgentsResult {agents, allowedAgentIDs, fetchedAt, signInNeeded}` | (cloud, `humanOnly`) | n/a | Raft's agent directory (owner's token) |
+| `set_draft_agents` | `agentIDs[0-100]` | `{allowedAgentIDs}` | yes (cloud, `humanOnly`) | n/a | none |
+| `draft_store_put` / `_get` / `_set_text` / `_delete` | see `actions.ts` | | (cloud-only, `humanOnly`) | n/a | the connector's local draft store |
 | `get_media` | `url` (an attachment `url` or chat `avatarURL` from another result) | `res` = `{mimeType, size (null if unknown), fileName?}` then `chunk` frames | | | `GET /v1/assets/serve?url=`; `gmail://` URLs: Gmail `messages.attachments.get` |
 
 Notes for implementers:
@@ -155,6 +162,45 @@ owner's computer are ordinary connector actions:
   `snooze_chat`, `unsnooze_chat`, `snooze.return`, `snooze.early_return`, `snooze.clear`,
   `snooze.drop` as metadata).
 - `/live` `snooze {chatID, until|null, reason}` tells open browsers (`SNOOZE_REASONS`).
+
+### Drafts by agents (`drafts.ts`; cloud actions, agent meta actions)
+
+The owner asks an allowed agent of the Raft server to draft a reply; the agent drafts, the owner
+sends (or edits, discards, asks again). Nothing is written into Beeper or Gmail drafts.
+
+- **Who may be asked**: Settings > Agents. `list_raft_agents` answers the directory the cloud read
+  from Raft (`GET <raft>/api/oauth/agents` with the owner's Login-with-Raft token, scope
+  `agent:read`, at sign-in and on `refresh: true`; `signInNeeded: true` when the session's token
+  is expired or lacks the scope) and `allowedAgentIDs`. `set_draft_agents` stores the allowed ids
+  (each must be in the directory). Both are owner-only, like every draft action.
+- **`request_draft {chatID, agentID, instruction}`**: the agent must be allowed and in the
+  directory (`NOT_ALLOWED`), agent access on (`NOT_ALLOWED`), the computer online (`OFFLINE`) with
+  `"drafts.v1"` (`NOT_SUPPORTED`). The cloud reads the chat (`read_chat` limit 1, `NOT_FOUND`), puts
+  the instruction in the connector's draft store (`draft_store_put`), stores the request's metadata,
+  and sends the agent a Raft event: `summary` = `draftEventSummary(owner, requestId)`, `payload` =
+  `{type:"draft_request", requestId}`, `externalEventId` = the request id, `ttlSeconds` 1800. No chat
+  content, chat id or instruction ever goes to Raft. A new request for a chat replaces its active
+  one (pending: cancelled; drafted, expired, failed: discarded). At most `MAX_ACTIVE_DRAFTS` (50)
+  active per room (`TOO_LARGE`). `delivery`: `sent`, `awaiting_approval` (Raft holds the
+  agent-request for an approval; the cloud keeps asking) or `retrying` (Raft did not answer).
+- **The agent**: `get_draft_request {requestId}` -> `{requestId, chatID, network, chatTitle,
+  instruction, status:"pending", deadline}` and `submit_draft {requestId, text}` ->
+  `{requestId, status:"drafted"}` (agent meta actions, never forwarded as such). Only the agent the
+  request was made for (`caller.sub === agentID`; anyone else: `NOT_FOUND`), only while it is
+  pending and before its deadline (`CONFLICT` otherwise), `DRAFT_GET_PER_MINUTE` (30) /
+  `DRAFT_SUBMIT_PER_MINUTE` (10) per agent. The text goes to the connector (`draft_store_set_text`).
+  No owner approval: nothing is sent.
+- **Deadline**: `DRAFT_DEADLINE_MS` (30 min) after the request; then `expired` (the room's alarm).
+- **The owner**: `list_drafts {chatID?}` (active requests with the instruction and draft read from
+  the computer, absent while it is offline), `cancel_draft` (pending), `discard_draft` (drafted,
+  expired or failed), `mark_draft_sent` (drafted; the page sends with `send_message` itself).
+  Handled requests leave the connector's store at once (`draft_store_delete`; offline: when the
+  computer is back), and the connector forgets every request `DRAFT_KEEP_MS` (7 days) after it was
+  made anyway.
+- **What the cloud keeps** per request: `draftMeta` only (request id, the chat id sealed and an
+  HMAC of it, the agent id, status, times, deadline, delivery bookkeeping, an error code). Never the
+  instruction, the draft, a title or a network. `/live` `draft {request: draftMeta}` and
+  `draft_agents {}` keep tabs in step.
 
 ### Gmail (`gmail.ts`, design/gmail-plan.md)
 
@@ -303,7 +349,7 @@ both                 ping {t} / pong {t}                    every 25 s; 60 s sil
   `canBindRoom(human, existing)` lets only a server `owner`/`admin` pair, and refuses a second
   owner on an already bound server (`CONFLICT`). `authorizeRoomAccess(principal, binding)` runs on
   every request: humans only reach their own room; agents only the room bound to their server.
-- Meta actions (cloud-only, never forwarded): `whoami`, `approval_status`.
+- Meta actions (cloud-only, never forwarded): `whoami`, `approval_status`, `get_draft_request`, `submit_draft` (see "Drafts by agents").
 
 ## Browser API (`web.ts`)
 

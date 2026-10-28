@@ -51,8 +51,9 @@ const JSON_LIMITS = { maxDepth: 32, maxKeys: 50_000 };
 /**
  * Values for hello.capabilities. "media.v1": get_media streams chunks under ack flow control
  * (ChunkWindow). "gmail.v1": the connector runs Gmail accounts (gmail_connect, compose_email, Gmail chats).
+ * "drafts.v1": the connector keeps draft requests' texts (draft_store_put / _get / _set_text / _delete).
  */
-export const CAPABILITIES = { media: "media.v1", gmail: "gmail.v1" } as const;
+export const CAPABILITIES = { media: "media.v1", gmail: "gmail.v1", drafts: "drafts.v1" } as const;
 
 export const helloFrame = object({
   type: literal("hello"),

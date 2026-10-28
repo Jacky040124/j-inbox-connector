@@ -1,6 +1,7 @@
 // The ACTION catalogue: the single list of things anyone may ask J-Inbox to do. Used by the
 // connector whitelist, the Raft agent manifest and the web API. A few (`cloud: true`, the snooze
-// store) are answered by the cloud room itself and never sent to the connector as such.
+// store and the draft requests) are answered by the cloud room itself and never sent to the
+// connector as such.
 import {
   array,
   assetUrl,
@@ -51,6 +52,18 @@ import {
 import { errorBody } from "./error-schema.ts";
 import { oauthToken } from "./gmail.ts";
 import { MAX_SNOOZES, snoozeItem } from "./snooze.ts";
+import {
+  MAX_ACTIVE_DRAFTS,
+  MAX_DRAFT_AGENTS,
+  MAX_DRAFT_READ,
+  draftInstruction,
+  draftRequestID,
+  draftText,
+  draftView,
+  raftAgentID,
+  raftAgentsResult,
+  storedDraft,
+} from "./drafts.ts";
 
 
 type Shape = Record<string, Schema<any>>;
@@ -71,9 +84,9 @@ export interface ActionDef<P extends Shape, R> {
   /** Only the cloud itself sends it to the connector (never from the web API or agents). Implies humanOnly. */
   readonly cloudOnly?: boolean;
   /**
-   * Answered by the cloud room itself (the snooze store), never sent to the connector in a `req`
-   * (not in CONNECTOR_ACTION_NAMES). Its effects on the owner's computer run as ordinary connector
-   * actions (archive, mark_read, read_chat).
+   * Answered by the cloud room itself (the snooze store, draft requests), never sent to the
+   * connector in a `req` (not in CONNECTOR_ACTION_NAMES). Its effects on the owner's computer run
+   * as ordinary connector actions (archive, mark_read, read_chat, draft_store_*).
    */
   readonly cloud?: boolean;
   /** Result is sent as `res` (metadata) followed by `chunk` frames. */
@@ -428,6 +441,179 @@ export const ACTIONS = {
     // Each call reads every snoozed chat at the connector: agents get a per-action cap.
     rateLimitPerMinute: 10,
     beeper: "the cloud's snooze store (chat ids and times only), then list_chats {inbox: archive} and read_chat (limit 1) for chats that page missed, at most 6 at a time; nothing while the computer is offline"
+  }),
+
+  // ---- drafts by agents (protocol drafts.ts): the owner asks, the cloud keeps the request's
+  // metadata, the connector keeps its texts. Agents use get_draft_request / submit_draft (agent.ts).
+
+  request_draft: define({
+    description:
+      "Ask one of the allowed Raft agents (Settings > Agents) to draft a reply in a chat. The agent gets a Raft event with the request id only and has 30 minutes. A new request for the same chat replaces the open one. Owner only.",
+    params: object({ chatID, agentID: raftAgentID, instruction: draftInstruction }),
+    paramDocs: { chatID: "Chat ID", agentID: "The agent's id (from list_raft_agents, allowed)", instruction: `What the agent should write, 1-2000 characters (kept on the owner's computer)` },
+    defaults: {},
+    result: draftView,
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    cloud: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    rateLimitPerMinute: 20,
+    beeper: "none: the cloud runs read_chat (limit 1) and draft_store_put at the connector, then sends the Raft agent event",
+  }),
+
+  cancel_draft: define({
+    description: "Cancel a pending draft request (the agent can no longer submit). Owner only.",
+    params: object({ requestId: draftRequestID }),
+    paramDocs: { requestId: "requestId from request_draft or list_drafts" },
+    defaults: {},
+    result: draftView,
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    cloud: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    beeper: "none: the cloud forgets the texts on the computer (draft_store_delete)",
+  }),
+
+  discard_draft: define({
+    description: "Throw a draft away (or put an expired or failed request aside). Owner only.",
+    params: object({ requestId: draftRequestID }),
+    paramDocs: { requestId: "requestId from list_drafts" },
+    defaults: {},
+    result: draftView,
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    cloud: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    beeper: "none: draft_store_delete at the connector",
+  }),
+
+  mark_draft_sent: define({
+    description: "The owner sent the draft (with send_message, as written or edited): the request is done. Owner only.",
+    params: object({ requestId: draftRequestID }),
+    paramDocs: { requestId: "requestId of a drafted request" },
+    defaults: {},
+    result: draftView,
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    cloud: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    beeper: "none: draft_store_delete at the connector",
+  }),
+
+  list_drafts: define({
+    description: "The draft requests not handled yet (pending, drafted, expired, failed), newest first, with the instruction and the draft read from the owner's computer (absent while it is offline). Owner only.",
+    params: object({ chatID: optional(chatID) }),
+    paramDocs: { chatID: "Only this chat's" },
+    defaults: {},
+    result: object({ items: array(draftView, { max: MAX_ACTIVE_DRAFTS }) }),
+    write: false,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    cloud: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    beeper: "the cloud's request store (metadata), then draft_store_get at the connector",
+  }),
+
+  list_raft_agents: define({
+    description: "The agents of the owner's Raft server (from Raft, read at sign-in or on refresh) and which of them may be asked to draft. Owner only.",
+    params: object({ refresh: optional(boolean()) }),
+    paramDocs: { refresh: "Read the list from Raft again now (needs a recent sign-in that allows agent:read)" },
+    defaults: {},
+    result: raftAgentsResult,
+    write: false,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    cloud: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    beeper: "none (Raft's agent directory, GET /api/oauth/agents with the owner's Raft token)",
+  }),
+
+  set_draft_agents: define({
+    description: "Which agents of the Raft server may be asked to draft (agent ids only). Owner only.",
+    params: object({ agentIDs: array(raftAgentID, { max: MAX_DRAFT_AGENTS }) }),
+    paramDocs: { agentIDs: "Agent ids from list_raft_agents" + ARRAY_DOC },
+    defaults: {},
+    result: object({ allowedAgentIDs: array(raftAgentID, { max: MAX_DRAFT_AGENTS }) }),
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    cloud: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    beeper: "none",
+  }),
+
+  // The connector's draft store (the instruction and the draft text stay on the owner's computer).
+  // Cloud-only: only the room sends them, as the steps of the draft actions above.
+
+  draft_store_put: define({
+    description: "Internal: keep a draft request's instruction on the owner's computer.",
+    params: object({ requestId: draftRequestID, chatID, instruction: draftInstruction, deadline: isoDateTime() }),
+    paramDocs: { requestId: "The request id", chatID: "Chat ID", instruction: "The owner's instruction", deadline: "When the request expires" },
+    defaults: {},
+    result: object({ requestId: draftRequestID, stored: literal(true) }),
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    cloudOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    beeper: "none (the connector's local draft store)",
+  }),
+
+  draft_store_get: define({
+    description: "Internal: read draft requests (instruction, draft) from the owner's computer. Unknown ids are left out.",
+    params: object({ requestIds: array(draftRequestID, { min: 1, max: MAX_DRAFT_READ }) }),
+    paramDocs: { requestIds: "Request ids" },
+    defaults: {},
+    result: object({ items: array(storedDraft, { max: MAX_DRAFT_READ }) }),
+    write: false,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    cloudOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    beeper: "none (the connector's local draft store)",
+  }),
+
+  draft_store_set_text: define({
+    description: "Internal: keep the agent's draft for a request on the owner's computer (NOT_FOUND if the request is not there).",
+    params: object({ requestId: draftRequestID, text: draftText }),
+    paramDocs: { requestId: "The request id", text: "The draft" },
+    defaults: {},
+    result: object({ requestId: draftRequestID, stored: literal(true) }),
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    cloudOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    beeper: "none (the connector's local draft store)",
+  }),
+
+  draft_store_delete: define({
+    description: "Internal: forget draft requests (instruction and draft) on the owner's computer.",
+    params: object({ requestIds: array(draftRequestID, { min: 1, max: MAX_ACTIVE_DRAFTS }) }),
+    paramDocs: { requestIds: "Request ids" },
+    defaults: {},
+    result: object({ deleted: integer({ min: 0, max: MAX_ACTIVE_DRAFTS }) }),
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    cloudOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    beeper: "none (the connector's local draft store)",
   }),
 
   get_media: define({

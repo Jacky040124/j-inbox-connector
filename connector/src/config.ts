@@ -1,6 +1,6 @@
 // Where the connector keeps things, and its (secret-free) config file.
 //   config  ~/.config/j-inbox/config.json      cloud URL, Beeper URL, device id and name
-//   data    ~/Library/Application Support/j-inbox   idempotency journal, asset allowlist (hashes)
+//   data    ~/Library/Application Support/j-inbox   idempotency journal, asset allowlist (hashes), draft store
 //   logs    ~/Library/Logs/j-inbox              audit.jsonl (metadata only), service.log
 // J_INBOX_CONFIG_DIR moves all of it, including the LaunchAgents dir, under one directory (tests).
 import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
@@ -25,6 +25,8 @@ export type Paths = {
   assetsFile: string;
   /** Gmail accounts this connector runs (addresses and status; the tokens are in the Keychain). */
   gmailFile: string;
+  /** Draft requests' instructions and drafts (drafts.ts): kept here, never in the cloud. */
+  draftsFile: string;
   /** Everything lives under J_INBOX_CONFIG_DIR. */
   testMode: boolean;
 };
@@ -59,6 +61,7 @@ export function resolvePaths(env: Record<string, string | undefined>): Paths {
     idempotencyFile: join(dataDir, "idempotency.json"),
     assetsFile: join(dataDir, "assets.json"),
     gmailFile: join(dataDir, "gmail.json"),
+    draftsFile: join(dataDir, "drafts.json"),
     testMode: override !== undefined,
   };
 }

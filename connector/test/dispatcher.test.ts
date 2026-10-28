@@ -39,6 +39,11 @@ const CASES: Record<ConnectorActionName, { params: () => Record<string, unknown>
   get_media: { params: () => ({ url: ASSET_URLS.imgSmall }), routes: ["GET /v1/assets/serve"] },
   compose_email: { params: () => ({ accountID: "gmail:owner@example.com", to: ["a@example.com"], subject: "s", text: "t" }), routes: [], error: "NOT_FOUND" },
   gmail_connect: { params: () => ({ email: "owner@example.com", refreshToken: "1//0fake-token" }), routes: [], error: "NOT_ALLOWED" },
+  // The draft store is local: never Beeper.
+  draft_store_put: { params: () => ({ requestId: "drq_0123456789abcdef", chatID: CHAT_IDS.imessageAlice, instruction: "Say yes", deadline: new Date(Date.now() + 1800_000).toISOString() }), routes: [] },
+  draft_store_get: { params: () => ({ requestIds: ["drq_0123456789abcdef"] }), routes: [] },
+  draft_store_set_text: { params: () => ({ requestId: "drq_0123456789abcdef", text: "Yes!" }), routes: [], error: "NOT_FOUND" },
+  draft_store_delete: { params: () => ({ requestIds: ["drq_0123456789abcdef"] }), routes: [] },
 };
 
 describe("dispatcher whitelist", () => {
@@ -70,10 +75,22 @@ describe("dispatcher whitelist", () => {
     }
     expect(fb.state.calls).toEqual([]);
   });
-  test("the cloud's own actions (the snooze store) are NOT_ALLOWED here, even with valid params", async () => {
+  test("the cloud's own actions (the snooze store, the draft requests) are NOT_ALLOWED here, even with valid params", async () => {
     const { d } = make();
-    expect([...CLOUD_ACTION_NAMES].sort()).toEqual(["list_snoozed", "snooze_chat", "unsnooze_chat"]);
-    const valid = { snooze_chat: { chatID: CHAT_IDS.imessageAlice, until: new Date(Date.now() + 3600_000).toISOString() }, unsnooze_chat: { chatID: CHAT_IDS.imessageAlice }, list_snoozed: {} };
+    const rid = { requestId: "drq_0123456789abcdef" };
+    const valid: Record<string, unknown> = {
+      snooze_chat: { chatID: CHAT_IDS.imessageAlice, until: new Date(Date.now() + 3600_000).toISOString() },
+      unsnooze_chat: { chatID: CHAT_IDS.imessageAlice },
+      list_snoozed: {},
+      request_draft: { chatID: CHAT_IDS.imessageAlice, agentID: "agent_x", instruction: "Say yes" },
+      cancel_draft: rid,
+      discard_draft: rid,
+      mark_draft_sent: rid,
+      list_drafts: {},
+      list_raft_agents: {},
+      set_draft_agents: { agentIDs: [] },
+    };
+    expect([...CLOUD_ACTION_NAMES].sort() as string[]).toEqual(Object.keys(valid).sort());
     for (const a of CLOUD_ACTION_NAMES) {
       const r = await d.dispatch(a, valid[a]);
       expect(r.kind === "res" && !r.ok && r.error.code).toBe("NOT_ALLOWED");

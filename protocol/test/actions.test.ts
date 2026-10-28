@@ -15,17 +15,19 @@ import { MAX_PAGE_LIMIT, MAX_SEND_TEXT_LENGTH } from "../src/limits.ts";
 import { account, chat, chatID, message } from "./fixtures/examples.ts";
 import { parse } from "../src/schema.ts";
 
-const EXPECTED = ["status", "list_chats", "unread_summary", "read_chat", "search_messages", "draft_reply", "send_message", "react", "mark_read", "archive", "remove_account", "compose_email", "gmail_connect", "snooze_chat", "unsnooze_chat", "list_snoozed", "get_media"];
+const EXPECTED = ["status", "list_chats", "unread_summary", "read_chat", "search_messages", "draft_reply", "send_message", "react", "mark_read", "archive", "remove_account", "compose_email", "gmail_connect", "snooze_chat", "unsnooze_chat", "list_snoozed", "request_draft", "cancel_draft", "discard_draft", "mark_draft_sent", "list_drafts", "list_raft_agents", "set_draft_agents", "draft_store_put", "draft_store_get", "draft_store_set_text", "draft_store_delete", "get_media"];
+const DRAFT_OWNER: string[] = ["request_draft", "cancel_draft", "discard_draft", "mark_draft_sent", "list_drafts", "list_raft_agents", "set_draft_agents"];
+const DRAFT_STORE: string[] = ["draft_store_put", "draft_store_get", "draft_store_set_text", "draft_store_delete"];
 
 describe("catalogue", () => {
   test("has exactly the agreed actions", () => expect([...ACTION_NAMES].sort() as string[]).toEqual([...EXPECTED].sort()));
   test("write flags", () => {
     const writes = ACTION_NAMES.filter((n) => ACTIONS[n].write).sort();
-    expect(writes).toEqual(["archive", "compose_email", "draft_reply", "gmail_connect", "mark_read", "react", "remove_account", "send_message", "snooze_chat", "unsnooze_chat"]);
+    expect(writes).toEqual(["archive", "cancel_draft", "compose_email", "discard_draft", "draft_reply", "draft_store_delete", "draft_store_put", "draft_store_set_text", "gmail_connect", "mark_draft_sent", "mark_read", "react", "remove_account", "request_draft", "send_message", "set_draft_agents", "snooze_chat", "unsnooze_chat"]);
   });
-  test("human-only actions: remove_account and the cloud-only gmail_connect, and never one that agents could get approved", () => {
-    expect(ACTION_NAMES.filter((n) => ACTIONS[n].humanOnly === true)).toEqual(["remove_account", "gmail_connect"]);
-    expect(ACTION_NAMES.filter((n) => (ACTIONS[n] as { cloudOnly?: boolean }).cloudOnly === true)).toEqual(["gmail_connect"]);
+  test("human-only actions: remove_account, the draft actions and the cloud-only gmail_connect and draft store, and never one that agents could get approved", () => {
+    expect(ACTION_NAMES.filter((n) => ACTIONS[n].humanOnly === true) as string[]).toEqual(["remove_account", "gmail_connect", ...DRAFT_OWNER, ...DRAFT_STORE]);
+    expect(ACTION_NAMES.filter((n) => (ACTIONS[n] as { cloudOnly?: boolean }).cloudOnly === true) as string[]).toEqual(["gmail_connect", ...DRAFT_STORE]);
     for (const n of ACTION_NAMES) if (ACTIONS[n].humanOnly) expect(ACTIONS[n].needsApprovalForAgents).toBe(false);
     for (const n of ACTION_NAMES) if ((ACTIONS[n] as { cloudOnly?: boolean }).cloudOnly) expect(ACTIONS[n].humanOnly).toBe(true);
   });
@@ -40,13 +42,15 @@ describe("catalogue", () => {
   test("every approval action is a write action", () => {
     for (const n of ACTION_NAMES) if (ACTIONS[n].needsApprovalForAgents) expect(ACTIONS[n].write).toBe(true);
   });
-  test("cloud actions: the snooze store, answered by the cloud, never in a req frame, open to agents", () => {
-    expect([...CLOUD_ACTION_NAMES].sort()).toEqual(["list_snoozed", "snooze_chat", "unsnooze_chat"]);
+  test("cloud actions: the snooze store (open to agents) and the draft requests (owner only), answered by the cloud, never in a req frame", () => {
+    expect([...CLOUD_ACTION_NAMES].sort() as string[]).toEqual([...DRAFT_OWNER, "list_snoozed", "snooze_chat", "unsnooze_chat"].sort());
     expect([...CONNECTOR_ACTION_NAMES, ...CLOUD_ACTION_NAMES].sort()).toEqual([...ACTION_NAMES].sort());
     for (const n of CLOUD_ACTION_NAMES) {
       expect(isCloudAction(n)).toBe(true);
-      expect([ACTIONS[n].humanOnly, (ACTIONS[n] as { cloudOnly?: boolean }).cloudOnly, ACTIONS[n].streamed]).toEqual([undefined, undefined, false]);
+      expect([ACTIONS[n].humanOnly, (ACTIONS[n] as { cloudOnly?: boolean }).cloudOnly, ACTIONS[n].streamed]).toEqual([DRAFT_OWNER.includes(n) ? true : undefined, undefined, false]);
     }
+    // The draft store runs at the connector, but only the cloud ever asks for it.
+    for (const n of DRAFT_STORE) expect([isCloudAction(n), (CONNECTOR_ACTION_NAMES as readonly string[]).includes(n)]).toEqual([false, true]);
     for (const n of CONNECTOR_ACTION_NAMES) expect(isCloudAction(n)).toBe(false);
     for (const n of ["__proto__", "whoami", "", null]) expect(isCloudAction(n)).toBe(false);
   });
@@ -100,6 +104,17 @@ const VALID: Record<ActionName, unknown[]> = {
   snooze_chat: [{ chatID, until: "2026-10-30T09:00:00.000Z" }, { chatID: "gmail:jacky@example.com:18c2f0a1b2c3d4e5", until: "2026-10-30T09:00:00+02:00" }],
   unsnooze_chat: [{ chatID }],
   list_snoozed: [{}],
+  request_draft: [{ chatID, agentID: "bbbbbbbb-0000-4000-8000-000000000001", instruction: "Say yes, Friday works.\nKeep it short 🙂" }, { chatID: "gmail:jacky@example.com:18c2f0a1b2c3d4e5", agentID: "agent_x", instruction: "x".repeat(2000) }],
+  cancel_draft: [{ requestId: "drq_0123456789abcdef" }],
+  discard_draft: [{ requestId: "drq_0123456789abcdef" }],
+  mark_draft_sent: [{ requestId: "drq_0123456789abcdef" }],
+  list_drafts: [{}, { chatID }],
+  list_raft_agents: [{}, { refresh: true }],
+  set_draft_agents: [{ agentIDs: [] }, { agentIDs: ["bbbbbbbb-0000-4000-8000-000000000001", "agent_x"] }],
+  draft_store_put: [{ requestId: "drq_0123456789abcdef", chatID, instruction: "Say yes", deadline: "2026-10-28T10:30:00.000Z" }],
+  draft_store_get: [{ requestIds: ["drq_0123456789abcdef"] }],
+  draft_store_set_text: [{ requestId: "drq_0123456789abcdef", text: "Yes, Friday works!" }],
+  draft_store_delete: [{ requestIds: ["drq_0123456789abcdef", "drq_fedcba9876543210"] }],
   get_media: [{ url: "mxc://beeper.local/abc" }, { url: "localmxc://local-whatsapp/xyz" }, { url: "gmail://jacky%40example.com/18c2f0a1b2c3d4e5/ANGjdJ8-abc_DEF" }],
 };
 
@@ -131,6 +146,17 @@ const INVALID: Record<ActionName, unknown[]> = {
   snooze_chat: [{}, { chatID }, { until: "2026-10-30T09:00:00.000Z" }, { chatID: "", until: "2026-10-30T09:00:00.000Z" }, { chatID: "a b", until: "2026-10-30T09:00:00.000Z" }, { chatID: "x".repeat(513), until: "2026-10-30T09:00:00.000Z" }, { chatID, until: "tomorrow" }, { chatID, until: "2026-10-30T09:00:00" }, { chatID, until: "2026-13-30T09:00:00Z" }, { chatID, until: 1793350800000 }, { chatID, until: "2026-10-30T09:00:00Z", archived: true }],
   unsnooze_chat: [{}, { chatID: "" }, { chatID: 5 }, { chatID, until: "2026-10-30T09:00:00Z" }],
   list_snoozed: [{ chatID }, null, []],
+  request_draft: [{}, { chatID, agentID: "a" }, { chatID, instruction: "x" }, { chatID, agentID: "a", instruction: "" }, { chatID, agentID: "a", instruction: "   \n " }, { chatID, agentID: "a", instruction: "x".repeat(2001) }, { chatID, agentID: "a b", instruction: "x" }, { chatID, agentID: "", instruction: "x" }, { chatID, agentID: "x".repeat(129), instruction: "x" }, { chatID: "a b", agentID: "a", instruction: "x" }, { chatID, agentID: "a", instruction: "x", send: true }],
+  cancel_draft: [{}, { requestId: "apr_0123456789abcdef" }, { requestId: "drq_" }, { requestId: "drq_has space" }, { requestId: "drq_" + "a".repeat(64) }],
+  discard_draft: [{}, { requestId: 5 }],
+  mark_draft_sent: [{}, { requestId: "drq_0123456789abcdef", text: "x" }],
+  list_drafts: [{ chatID: "" }, { chatID, status: "pending" }, null],
+  list_raft_agents: [{ refresh: "yes" }, { agentID: "a" }],
+  set_draft_agents: [{}, { agentIDs: "a" }, { agentIDs: ["a b"] }, { agentIDs: Array.from({ length: 101 }, (_, i) => `a${i}`) }],
+  draft_store_put: [{ requestId: "drq_0123456789abcdef", chatID, instruction: "x" }, { requestId: "drq_0123456789abcdef", chatID, instruction: "", deadline: "2026-10-28T10:30:00.000Z" }],
+  draft_store_get: [{ requestIds: [] }, { requestIds: Array.from({ length: 11 }, (_, i) => `drq_0123456789abcd${i}x`) }],
+  draft_store_set_text: [{ requestId: "drq_0123456789abcdef", text: "" }, { requestId: "drq_0123456789abcdef", text: "x".repeat(MAX_SEND_TEXT_LENGTH + 1) }],
+  draft_store_delete: [{ requestIds: [] }, {}],
   get_media: [{ url: "gmail://jacky%40example.com/../ANG" }, { url: "gmail://jacky%40example.com/18c2/a/b" }, {}, { url: "https://evil.example/a.png" }, { url: "file:///etc/../etc/passwd" }, { url: "javascript:alert(1)" }, { url: "mxc://" + "a".repeat(3000) }],
 };
 
@@ -167,6 +193,8 @@ describe("parseActionParams", () => {
   });
 });
 
+const DRAFT = { requestId: "drq_0123456789abcdef", chatID, agent: { id: "bbbbbbbb-0000-4000-8000-000000000001", name: "龙虾" }, status: "pending", createdAt: "2026-10-28T09:00:00.000Z", updatedAt: "2026-10-28T09:00:00.000Z", deadline: "2026-10-28T09:30:00.000Z", delivery: "sent" };
+
 const RESULTS: Record<ActionName, unknown> = {
   status: { online: true, lastSeenAt: null, connectorVersion: "0.1.0", beeper: { reachable: true, version: "4.2.1", appState: "ready" }, accounts: [account] },
   list_chats: { items: [chat], hasMore: true, nextCursor: "abc" },
@@ -184,6 +212,17 @@ const RESULTS: Record<ActionName, unknown> = {
   snooze_chat: { chatID, until: "2026-10-30T09:00:00.000Z" },
   unsnooze_chat: { chatID },
   list_snoozed: { items: [{ chatID, until: "2026-10-30T09:00:00.000Z", snoozedAt: "2026-10-28T09:00:00.000Z", chat: { ...chat, preview: undefined } }, { chatID: "imsg##thread:+1", until: "2026-10-30T09:00:00.000Z", snoozedAt: "2026-10-28T09:00:00.000Z" }] },
+  request_draft: DRAFT,
+  cancel_draft: { ...DRAFT, status: "cancelled" },
+  discard_draft: { ...DRAFT, status: "discarded" },
+  mark_draft_sent: { ...DRAFT, status: "sent" },
+  list_drafts: { items: [{ ...DRAFT, status: "drafted", instruction: "Say yes", text: "Yes!" }, { ...DRAFT, status: "failed", error: { code: "NOT_FOUND", message: "That agent is not on your Raft server." } }] },
+  list_raft_agents: { agents: [{ id: "bbbbbbbb-0000-4000-8000-000000000001", name: "龙虾", handle: "longxia", avatarURL: "https://api.raft.test/a.svg" }], allowedAgentIDs: ["bbbbbbbb-0000-4000-8000-000000000001"], fetchedAt: "2026-10-28T09:00:00.000Z", signInNeeded: false },
+  set_draft_agents: { allowedAgentIDs: [] },
+  draft_store_put: { requestId: "drq_0123456789abcdef", stored: true },
+  draft_store_get: { items: [{ requestId: "drq_0123456789abcdef", chatID, instruction: "Say yes", text: "Yes!" }] },
+  draft_store_set_text: { requestId: "drq_0123456789abcdef", stored: true },
+  draft_store_delete: { deleted: 2 },
   get_media: { mimeType: "image/png", size: 1234, fileName: "a.png" },
 };
 

@@ -12,6 +12,7 @@ import { gmailPollOverride, googleEndpoints, loadConfig, writeAtomic, type Paths
 import { createDispatcher } from "./dispatcher.ts";
 import { BeeperEventStream, HealthMonitor, Reconciler } from "./events.ts";
 import { FileIdempotencyJournal } from "./idempotency.ts";
+import { DraftStore } from "./drafts.ts";
 import type { SecretStore } from "./secrets.ts";
 import { cloudTokenRefresher } from "./gmail/client.ts";
 import { createGmailService } from "./gmail/service.ts";
@@ -122,7 +123,7 @@ export async function startService(o: ServiceOptions): Promise<Service> {
     log: (m) => log(m),
     onLifecycle: (e) => audit.lifecycle(e),
   });
-  const dispatcher = createDispatcher({ actions, client, assets, gmail, idempotency });
+  const dispatcher = createDispatcher({ actions, client, assets, gmail, idempotency, drafts: new DraftStore({ path: o.paths.draftsFile }) });
 
   let link: CloudLink;
   const send = (f: EventFrame) => link.sendEvent(f);

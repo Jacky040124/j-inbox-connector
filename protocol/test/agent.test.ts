@@ -49,9 +49,9 @@ describe("Raft manifest", () => {
   });
   test("lists every catalogue action except the owner-only ones, plus the meta actions", () => {
     const names = m.actions.map((a: any) => a.name).sort();
-    expect(names).toEqual([...ACTION_NAMES.filter((n) => n !== "remove_account" && n !== "gmail_connect"), ...AGENT_META_ACTIONS].sort());
-    expect(names).not.toContain("remove_account");
-    expect(names).not.toContain("gmail_connect");
+    expect(names).toEqual([...ACTION_NAMES.filter((n) => !ACTIONS[n].humanOnly), ...AGENT_META_ACTIONS].sort());
+    for (const n of ["remove_account", "gmail_connect", "request_draft", "cancel_draft", "discard_draft", "mark_draft_sent", "list_drafts", "list_raft_agents", "set_draft_agents", "draft_store_put", "draft_store_get", "draft_store_set_text", "draft_store_delete"]) expect(names).not.toContain(n);
+    for (const n of ["get_draft_request", "submit_draft"]) expect(names).toContain(n);
     expect(names).toContain("compose_email");
   });
   test("each action posts to the agent action prefix", () => {
@@ -100,8 +100,8 @@ describe("Raft manifest", () => {
 
 describe("isAgentActionName", () => {
   test("catalogue + meta, nothing else", () => {
-    for (const n of [...ACTION_NAMES.filter((n) => n !== "remove_account" && n !== "gmail_connect"), "whoami", "approval_status"]) expect(isAgentActionName(n)).toBe(true);
-    for (const n of ["__proto__", "hasOwnProperty", "approve", "decide_approval", "", "remove_account", "gmail_connect"]) expect(isAgentActionName(n)).toBe(false);
+    for (const n of [...ACTION_NAMES.filter((n) => !ACTIONS[n].humanOnly), "whoami", "approval_status", "get_draft_request", "submit_draft"]) expect(isAgentActionName(n)).toBe(true);
+    for (const n of ["__proto__", "hasOwnProperty", "approve", "decide_approval", "", "remove_account", "gmail_connect", "request_draft", "list_drafts", "set_draft_agents", "draft_store_get", "draft_store_set_text"]) expect(isAgentActionName(n)).toBe(false);
   });
 });
 
