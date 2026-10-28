@@ -25,6 +25,32 @@ export function parseBeeperControl(msg: unknown): BeeperControl | null {
 
 const valid = (f: unknown): f is EventFrame => parse(eventFrame, f).ok;
 
+/**
+ * message.upserted `entries` (Beeper Message objects) -> `othersAt` for snooze's early return: the
+ * newest timestamp among messages someone else sent (never later than now), null when every entry
+ * is the owner's (their sends, status updates) or a reaction, undefined when Beeper sent no entries
+ * or an entry does not say who sent it. Only this one timestamp leaves the Mac, never who or what.
+ */
+export function othersAtOf(entries: unknown, now: string): string | null | undefined {
+  if (!Array.isArray(entries) || !entries.length) return undefined;
+  let newest: number | null = null;
+  let known = true;
+  for (const e of entries) {
+    if (typeof e !== "object" || e === null || Array.isArray(e)) return undefined;
+    const m = e as Record<string, unknown>;
+    if (m.type === "REACTION") continue;
+    if (m.isSender === true) continue;
+    const at = typeof m.timestamp === "string" ? Date.parse(m.timestamp) : Number.NaN;
+    if (m.isSender !== false || !Number.isFinite(at)) {
+      known = false;
+      continue;
+    }
+    newest = Math.max(newest ?? at, at);
+  }
+  if (newest !== null) return new Date(Math.min(newest, Date.parse(now) || newest)).toISOString();
+  return known ? null : undefined;
+}
+
 export function mapBeeperEvent(msg: unknown, ctx: { beeperVersion: string | null; now: string }): EventFrame[] {
   if (typeof msg !== "object" || msg === null || Array.isArray(msg)) return [];
   const m = msg as Record<string, any>;
@@ -42,9 +68,10 @@ export function mapBeeperEvent(msg: unknown, ctx: { beeperVersion: string | null
     return valid(f) ? [f] : [];
   }
   const ids: string[] = (Array.isArray(m.ids) ? m.ids : []).filter((x: unknown) => parse(messageID, x).ok);
+  const othersAt = op === "upserted" ? othersAtOf(m.entries, ts) : undefined;
   const out: EventFrame[] = [];
   for (let i = 0; i < ids.length; i += MAX_EVENT_IDS) {
-    const f = { type: "event", kind: "message", op, chatID: m.chatID, messageIDs: ids.slice(i, i + MAX_EVENT_IDS), ts };
+    const f = { type: "event", kind: "message", op, chatID: m.chatID, messageIDs: ids.slice(i, i + MAX_EVENT_IDS), ts, ...(othersAt !== undefined ? { othersAt } : {}) };
     if (valid(f)) out.push(f);
   }
   return out;

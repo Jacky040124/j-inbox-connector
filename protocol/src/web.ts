@@ -28,7 +28,8 @@ import {
   type Schema,
 } from "./schema.ts";
 import { errorBody, errorCode } from "./errors.ts";
-import { beeperHealth, ownId, versionString } from "./model.ts";
+import { beeperHealth, chatID, ownId, versionString } from "./model.ts";
+import { SNOOZE_REASONS } from "./snooze.ts";
 import { approvalView, canonicalOrigin } from "./agent.ts";
 import { eventFrame } from "./frames.ts";
 import type { ActionName } from "./actions.ts";
@@ -308,6 +309,13 @@ export const liveServerMessage = discriminated("type", {
   pong: object({ type: literal("pong"), t: epochMs }),
   /** The room dropped connector events (rate limit): refetch what is on screen. */
   resync: object({ type: literal("resync"), reason: enumOf(["events_dropped"] as const) }),
+  /**
+   * A chat's snooze changed (added 2026-10-28). reason "snoozed": set or moved, `until` is when it
+   * comes back. Otherwise it was cleared (`until` null): "due" (back, unarchived and marked unread),
+   * "early" (someone wrote: back the same way), "unsnoozed", "unarchived" (moved back to the inbox
+   * another way), "dropped" (could not be brought back: the chat is gone).
+   */
+  snooze: object({ type: literal("snooze"), chatID, until: nullable(isoDateTime()), reason: enumOf(SNOOZE_REASONS) }),
 });
 
 export const liveClientMessage = discriminated("type", {

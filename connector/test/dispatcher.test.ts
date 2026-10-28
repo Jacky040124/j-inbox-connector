@@ -2,7 +2,7 @@
 // anything else is NOT_ALLOWED and never reaches Beeper.
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { ASSET_URLS, CHAT_IDS, startFakeBeeper, type FakeBeeper } from "@j-inbox/fake-beeper";
-import { ACTION_NAMES, parseActionResult, type ActionName } from "@j-inbox/protocol";
+import { CLOUD_ACTION_NAMES, CONNECTOR_ACTION_NAMES, parseActionResult, type ActionName, type ConnectorActionName } from "@j-inbox/protocol";
 import { createBeeperClient } from "../src/beeper-client.ts";
 import { createActions } from "../src/actions.ts";
 import { AssetAllowlist } from "../src/assets.ts";
@@ -24,7 +24,7 @@ const routes = () => [...new Set(fb.state.calls.map((c) => c.route))].sort();
 
 const mid = () => fb.state.messagesOf(CHAT_IDS.imessageAlice)[0]!.id;
 // Gmail-only actions never reach Beeper; without a Gmail account they answer an error (gmail.test.ts runs them for real).
-const CASES: Record<ActionName, { params: () => Record<string, unknown>; routes: string[]; error?: string }> = {
+const CASES: Record<ConnectorActionName, { params: () => Record<string, unknown>; routes: string[]; error?: string }> = {
   status: { params: () => ({}), routes: ["GET /v1/accounts", "GET /v1/chats", "GET /v1/info"] },
   list_chats: { params: () => ({ limit: 5 }), routes: ["GET /v1/chats"] },
   unread_summary: { params: () => ({}), routes: ["GET /v1/chats"] },
@@ -42,10 +42,10 @@ const CASES: Record<ActionName, { params: () => Record<string, unknown>; routes:
 };
 
 describe("dispatcher whitelist", () => {
-  test("covers exactly the protocol catalogue", () => {
-    expect(Object.keys(CASES).sort()).toEqual([...ACTION_NAMES].sort());
+  test("covers exactly the protocol catalogue's connector actions", () => {
+    expect(Object.keys(CASES).sort()).toEqual([...CONNECTOR_ACTION_NAMES].sort());
   });
-  for (const name of Object.keys(CASES) as ActionName[]) {
+  for (const name of Object.keys(CASES) as ConnectorActionName[]) {
     test(`${name} calls only ${CASES[name].routes.join(", ")} and returns a valid result`, async () => {
       const { d, assets } = make();
       if (name === "get_media") assets.add(ASSET_URLS.imgSmall);
@@ -66,6 +66,16 @@ describe("dispatcher whitelist", () => {
     const { d } = make();
     for (const a of ["delete_chat", "__proto__", "constructor", "toString", "whoami", "approval_status", "", "STATUS", "status ", "send_message\u0000"]) {
       const r = await d.dispatch(a, {});
+      expect(r.kind === "res" && !r.ok && r.error.code).toBe("NOT_ALLOWED");
+    }
+    expect(fb.state.calls).toEqual([]);
+  });
+  test("the cloud's own actions (the snooze store) are NOT_ALLOWED here, even with valid params", async () => {
+    const { d } = make();
+    expect([...CLOUD_ACTION_NAMES].sort()).toEqual(["list_snoozed", "snooze_chat", "unsnooze_chat"]);
+    const valid = { snooze_chat: { chatID: CHAT_IDS.imessageAlice, until: new Date(Date.now() + 3600_000).toISOString() }, unsnooze_chat: { chatID: CHAT_IDS.imessageAlice }, list_snoozed: {} };
+    for (const a of CLOUD_ACTION_NAMES) {
+      const r = await d.dispatch(a, valid[a]);
       expect(r.kind === "res" && !r.ok && r.error.code).toBe("NOT_ALLOWED");
     }
     expect(fb.state.calls).toEqual([]);

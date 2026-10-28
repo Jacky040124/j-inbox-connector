@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test";
 import {
   ACTION_NAMES,
   ACTIONS,
+  CLOUD_ACTION_NAMES,
+  CONNECTOR_ACTION_NAMES,
   coerceAgentParams,
+  isCloudAction,
   isActionName,
   parseActionParams,
   parseActionResult,
@@ -12,13 +15,13 @@ import { MAX_PAGE_LIMIT, MAX_SEND_TEXT_LENGTH } from "../src/limits.ts";
 import { account, chat, chatID, message } from "./fixtures/examples.ts";
 import { parse } from "../src/schema.ts";
 
-const EXPECTED = ["status", "list_chats", "unread_summary", "read_chat", "search_messages", "draft_reply", "send_message", "react", "mark_read", "archive", "remove_account", "compose_email", "gmail_connect", "get_media"];
+const EXPECTED = ["status", "list_chats", "unread_summary", "read_chat", "search_messages", "draft_reply", "send_message", "react", "mark_read", "archive", "remove_account", "compose_email", "gmail_connect", "snooze_chat", "unsnooze_chat", "list_snoozed", "get_media"];
 
 describe("catalogue", () => {
   test("has exactly the agreed actions", () => expect([...ACTION_NAMES].sort() as string[]).toEqual([...EXPECTED].sort()));
   test("write flags", () => {
     const writes = ACTION_NAMES.filter((n) => ACTIONS[n].write).sort();
-    expect(writes).toEqual(["archive", "compose_email", "draft_reply", "gmail_connect", "mark_read", "react", "remove_account", "send_message"]);
+    expect(writes).toEqual(["archive", "compose_email", "draft_reply", "gmail_connect", "mark_read", "react", "remove_account", "send_message", "snooze_chat", "unsnooze_chat"]);
   });
   test("human-only actions: remove_account and the cloud-only gmail_connect, and never one that agents could get approved", () => {
     expect(ACTION_NAMES.filter((n) => ACTIONS[n].humanOnly === true)).toEqual(["remove_account", "gmail_connect"]);
@@ -26,13 +29,26 @@ describe("catalogue", () => {
     for (const n of ACTION_NAMES) if (ACTIONS[n].humanOnly) expect(ACTIONS[n].needsApprovalForAgents).toBe(false);
     for (const n of ACTION_NAMES) if ((ACTIONS[n] as { cloudOnly?: boolean }).cloudOnly) expect(ACTIONS[n].humanOnly).toBe(true);
   });
-  test("approval flags: send/react/mark_read/archive/compose_email need approval for agents, draft_reply does not", () => {
+  test("approval flags: send/react/mark_read/archive/compose_email/snooze/unsnooze need approval for agents, draft_reply does not", () => {
     const approval = ACTION_NAMES.filter((n) => ACTIONS[n].needsApprovalForAgents).sort();
-    expect(approval).toEqual(["archive", "compose_email", "mark_read", "react", "send_message"]);
+    expect(approval).toEqual(["archive", "compose_email", "mark_read", "react", "send_message", "snooze_chat", "unsnooze_chat"]);
+    // Snoozing hides a chat like archive does: the same policy and the same per-agent cap.
+    for (const n of ["snooze_chat", "unsnooze_chat"] as const) expect([ACTIONS[n].needsApprovalForAgents, ACTIONS[n].rateLimitPerMinute]).toEqual([ACTIONS.archive.needsApprovalForAgents, ACTIONS.archive.rateLimitPerMinute]);
+    expect(ACTIONS.list_snoozed.needsApprovalForAgents).toBe(false);
     expect(ACTIONS.draft_reply.needsApprovalForAgents).toBe(false);
   });
   test("every approval action is a write action", () => {
     for (const n of ACTION_NAMES) if (ACTIONS[n].needsApprovalForAgents) expect(ACTIONS[n].write).toBe(true);
+  });
+  test("cloud actions: the snooze store, answered by the cloud, never in a req frame, open to agents", () => {
+    expect([...CLOUD_ACTION_NAMES].sort()).toEqual(["list_snoozed", "snooze_chat", "unsnooze_chat"]);
+    expect([...CONNECTOR_ACTION_NAMES, ...CLOUD_ACTION_NAMES].sort()).toEqual([...ACTION_NAMES].sort());
+    for (const n of CLOUD_ACTION_NAMES) {
+      expect(isCloudAction(n)).toBe(true);
+      expect([ACTIONS[n].humanOnly, (ACTIONS[n] as { cloudOnly?: boolean }).cloudOnly, ACTIONS[n].streamed]).toEqual([undefined, undefined, false]);
+    }
+    for (const n of CONNECTOR_ACTION_NAMES) expect(isCloudAction(n)).toBe(false);
+    for (const n of ["__proto__", "whoami", "", null]) expect(isCloudAction(n)).toBe(false);
   });
   test("only get_media streams", () => expect(ACTION_NAMES.filter((n) => ACTIONS[n].streamed)).toEqual(["get_media"]));
   test("every param is documented and every action has a description", () => {
@@ -81,6 +97,9 @@ const VALID: Record<ActionName, unknown[]> = {
     { accountID: "gmail:jacky@example.com", to: ["a@example.com", "b.c+d@sub.example.org"], cc: [], subject: "Lunch? 🍜", text: "hello\nthere", idempotencyKey: "idem-key-0001" },
   ],
   gmail_connect: [{ email: "jacky@example.com", refreshToken: "1//0gFAKE-refresh_token.xyz" }],
+  snooze_chat: [{ chatID, until: "2026-10-30T09:00:00.000Z" }, { chatID: "gmail:jacky@example.com:18c2f0a1b2c3d4e5", until: "2026-10-30T09:00:00+02:00" }],
+  unsnooze_chat: [{ chatID }],
+  list_snoozed: [{}],
   get_media: [{ url: "mxc://beeper.local/abc" }, { url: "localmxc://local-whatsapp/xyz" }, { url: "gmail://jacky%40example.com/18c2f0a1b2c3d4e5/ANGjdJ8-abc_DEF" }],
 };
 
@@ -109,6 +128,9 @@ const INVALID: Record<ActionName, unknown[]> = {
     { accountID: "gmail:jacky@example.com", to: ["a@example.com"], subject: "x", text: "hi", bcc: ["b@example.com"] },
   ],
   gmail_connect: [{}, { email: "jacky@example.com" }, { email: "jacky@example.com", refreshToken: "has space in it" }, { email: "nope", refreshToken: "1//0gFAKE-refresh" }],
+  snooze_chat: [{}, { chatID }, { until: "2026-10-30T09:00:00.000Z" }, { chatID: "", until: "2026-10-30T09:00:00.000Z" }, { chatID: "a b", until: "2026-10-30T09:00:00.000Z" }, { chatID: "x".repeat(513), until: "2026-10-30T09:00:00.000Z" }, { chatID, until: "tomorrow" }, { chatID, until: "2026-10-30T09:00:00" }, { chatID, until: "2026-13-30T09:00:00Z" }, { chatID, until: 1793350800000 }, { chatID, until: "2026-10-30T09:00:00Z", archived: true }],
+  unsnooze_chat: [{}, { chatID: "" }, { chatID: 5 }, { chatID, until: "2026-10-30T09:00:00Z" }],
+  list_snoozed: [{ chatID }, null, []],
   get_media: [{ url: "gmail://jacky%40example.com/../ANG" }, { url: "gmail://jacky%40example.com/18c2/a/b" }, {}, { url: "https://evil.example/a.png" }, { url: "file:///etc/../etc/passwd" }, { url: "javascript:alert(1)" }, { url: "mxc://" + "a".repeat(3000) }],
 };
 
@@ -159,6 +181,9 @@ const RESULTS: Record<ActionName, unknown> = {
   remove_account: { accountID: "whatsapp", removed: true, scope: "all-devices", affectedAccountIDs: ["whatsapp"] },
   compose_email: { accountID: "gmail:jacky@example.com", chatID: "gmail:jacky@example.com:18c2f0a1b2c3d4e5", pendingMessageID: "18c2f0a1b2c3d4e6" },
   gmail_connect: { accountID: "gmail:jacky@example.com", connected: true },
+  snooze_chat: { chatID, until: "2026-10-30T09:00:00.000Z" },
+  unsnooze_chat: { chatID },
+  list_snoozed: { items: [{ chatID, until: "2026-10-30T09:00:00.000Z", snoozedAt: "2026-10-28T09:00:00.000Z", chat: { ...chat, preview: undefined } }, { chatID: "imsg##thread:+1", until: "2026-10-30T09:00:00.000Z", snoozedAt: "2026-10-28T09:00:00.000Z" }] },
   get_media: { mimeType: "image/png", size: 1234, fileName: "a.png" },
 };
 

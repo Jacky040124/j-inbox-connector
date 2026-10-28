@@ -19,6 +19,7 @@ import {
   encodeFrame,
   mediaDeadlineMs,
   isActionName,
+  isCloudAction,
   makeError,
   networkName,
   parse,
@@ -289,7 +290,8 @@ export class CloudLink {
       return;
     }
     if (!j || typeof j !== "object" || j.type !== "req" || !parse(requestId, j.id).ok || this.pending.has(j.id)) return;
-    const known = isActionName(j.action);
+    // The cloud's own actions (the snooze store) are never the connector's to run.
+    const known = isActionName(j.action) && !isCloudAction(j.action);
     this.sendRes(j.id, { kind: "res", ok: false, error: makeError(known ? "BAD_PARAMS" : "NOT_ALLOWED", known ? "Invalid request." : "This action is not allowed.") });
     this.o.onRequest?.({ action: known ? j.action : "unknown", ok: false, code: known ? "BAD_PARAMS" : "NOT_ALLOWED", ms: 0 });
   }

@@ -19,6 +19,8 @@ export type PollerOptions = {
 
 const MAX_HISTORY_PAGES = 10;
 
+const SENDER_RANK = { self: 0, unknown: 1, others: 2 } as const;
+
 export class GmailPoller {
   private historyIds = new Map<string, string>();
   private timer?: ReturnType<typeof setInterval>;
@@ -81,6 +83,8 @@ export class GmailPoller {
       return 0;
     }
     const added = new Map<string, Set<string>>();
+    // Per thread with added mail: someone else wrote (no SENT label), only the owner did, or unknown (no labels).
+    const senders = new Map<string, "others" | "self" | "unknown">();
     const deleted = new Map<string, Set<string>>();
     const touched = new Set<string>();
     let pageToken: string | undefined;
@@ -110,6 +114,11 @@ export class GmailPoller {
               set.add(m.id);
               into.set(m.threadId, set);
             }
+            if (into === added) {
+              const who = !Array.isArray(m.labelIds) ? "unknown" : m.labelIds.includes("SENT") ? "self" : "others";
+              const was = senders.get(m.threadId);
+              if (was === undefined || SENDER_RANK[who] > SENDER_RANK[was]) senders.set(m.threadId, who);
+            }
           }
         };
         note(rec?.messagesAdded, added);
@@ -127,7 +136,10 @@ export class GmailPoller {
       for (const [threadId, ids] of map) {
         const all = [...ids];
         for (let i = 0; i < all.length; i += MAX_EVENT_IDS) {
-          this.emit({ type: "event", kind: "message", op, chatID: gmailChatID(s.email, threadId), messageIDs: all.slice(i, i + MAX_EVENT_IDS), ts });
+          // othersAt (snooze's early return): Gmail history has no times, and added mail is new: the poll's time.
+          const who = op === "upserted" ? senders.get(threadId) : undefined;
+          const othersAt = who === "others" ? ts : who === "self" ? null : undefined;
+          this.emit({ type: "event", kind: "message", op, chatID: gmailChatID(s.email, threadId), messageIDs: all.slice(i, i + MAX_EVENT_IDS), ts, ...(othersAt !== undefined ? { othersAt } : {}) });
           n++;
         }
       }

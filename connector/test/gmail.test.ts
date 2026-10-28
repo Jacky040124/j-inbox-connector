@@ -500,7 +500,9 @@ describe("live updates", () => {
       const m = fg.google.deliver(OWNER_EMAIL, { threadId: THREADS.kickoff, from: "Bob <bob@example.com>", subject: "Re: Project kickoff", text: "secret agenda text" });
       await t.ok("archive", { chatID: chat("lunch") });
       await t.gmail.pollNow();
-      expect(events).toContainEqual({ type: "event", kind: "message", op: "upserted", chatID: chat("kickoff"), messageIDs: [m.id], ts: expect.any(String) });
+      // Mail from someone else says so (othersAt, at the poll's time: snooze's early return).
+      const ev = events.find((e) => e.kind === "message" && e.chatID === chat("kickoff")) as EventFrame & { othersAt?: string };
+      expect(ev).toEqual({ type: "event", kind: "message", op: "upserted", chatID: chat("kickoff"), messageIDs: [m.id], ts: expect.any(String), othersAt: ev.ts });
       expect(events).toContainEqual(expect.objectContaining({ kind: "chat", op: "upserted", chatID: chat("kickoff") }));
       expect(events).toContainEqual(expect.objectContaining({ kind: "chat", op: "upserted", chatID: chat("lunch") }));
       expect(JSON.stringify(events)).not.toContain("secret agenda");
@@ -509,6 +511,13 @@ describe("live updates", () => {
       await t.ok("draft_reply", { chatID: chat("kickoff"), text: "draft text" });
       await t.gmail.pollNow();
       expect(events.filter((e) => e.kind === "message")).toEqual([]);
+      // The owner's own reply (SENT): othersAt null, it never brings a snoozed thread back.
+      events.length = 0;
+      await t.ok("send_message", { chatID: chat("kickoff"), text: "my reply" });
+      await t.gmail.pollNow();
+      const mine = events.filter((e) => e.kind === "message");
+      expect(mine).toHaveLength(1);
+      expect(mine[0]).toMatchObject({ chatID: chat("kickoff"), othersAt: null });
       // History too old: a re-sync announces the newest threads.
       events.length = 0;
       fg.google.deliver(OWNER_EMAIL, { from: "New <new@example.com>", subject: "Brand new", text: "hi" });

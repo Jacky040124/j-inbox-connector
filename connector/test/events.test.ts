@@ -5,6 +5,7 @@ import { CHAT_IDS, startFakeBeeper, type FakeBeeper } from "@j-inbox/fake-beeper
 import { parseConnectorFrame, type EventFrame } from "@j-inbox/protocol";
 import { createBeeperClient } from "../src/beeper-client.ts";
 import { BeeperEventStream, HealthMonitor, Reconciler, beeperWsURL, parseBeeperMessage } from "../src/events.ts";
+import { othersAtOf } from "../src/beeper-ws.ts";
 
 let fb: FakeBeeper;
 beforeAll(async () => {
@@ -108,6 +109,57 @@ describe("parseBeeperMessage", () => {
     const f = parseBeeperMessage(JSON.stringify({ type: "message.upserted", chatID: "imsg##thread:+1", ids: ["m1"], entries: [{ text: "SECRET" }] }), ctx);
     expect(f).toHaveLength(1);
     expect(JSON.stringify(f)).not.toContain("SECRET");
+  });
+});
+
+// Snooze's early return: did someone else write? Only one timestamp leaves the Mac.
+describe("othersAt on message events", () => {
+  const now = "2026-10-25T12:00:00.000Z";
+  const ctx = { beeperVersion: null, now };
+  const ev = (entries: unknown, extra: Record<string, unknown> = {}) => parseBeeperMessage(JSON.stringify({ type: "message.upserted", chatID: "imsg##thread:+1", ids: ["m1", "m2"], ...(entries === undefined ? {} : { entries }), ...extra }), ctx);
+  const other = (ts: string, extra: Record<string, unknown> = {}) => ({ id: "m1", isSender: false, timestamp: ts, senderID: "@alice:x", senderName: "Alice SECRET", text: "SECRET", ...extra });
+  const own = (ts: string) => ({ id: "m2", isSender: true, timestamp: ts, senderID: "@me:x", text: "mine" });
+  test("someone else wrote: the newest such timestamp (never later than now)", () => {
+    expect(othersAtOf([other("2026-10-25T11:58:00Z"), own("2026-10-25T11:59:30Z"), other("2026-10-25T11:59:00+00:00")], now)).toBe("2026-10-25T11:59:00.000Z");
+    expect(othersAtOf([other("2030-01-01T00:00:00Z")], now)).toBe(now);
+    const [f] = ev([other("2026-10-25T11:59:00Z")]);
+    expect(f).toEqual({ type: "event", kind: "message", op: "upserted", chatID: "imsg##thread:+1", messageIDs: ["m1", "m2"], ts: now, othersAt: "2026-10-25T11:59:00.000Z" });
+    expect(JSON.stringify(f)).not.toMatch(/SECRET|alice/);
+    expect(parseConnectorFrame(JSON.stringify(f)).ok).toBe(true);
+  });
+  test("only the owner's own messages (and reactions): null", () => {
+    expect(othersAtOf([own("2026-10-25T11:59:00Z")], now)).toBeNull();
+    expect(othersAtOf([own("2026-10-25T11:59:00Z"), other("2026-10-25T11:59:00Z", { type: "REACTION" })], now)).toBeNull();
+    expect(ev([own("2026-10-25T11:59:00Z")])[0]).toMatchObject({ othersAt: null });
+  });
+  test("not known: no entries, an entry without isSender or a time, or deletions", () => {
+    for (const entries of [undefined, [], "x", [null], [[1]], [{ id: "m1", timestamp: "2026-10-25T11:59:00Z" }], [other("not a time")], [own("2026-10-25T11:59:00Z"), { id: "m3", isSender: "no" }]]) {
+      expect(othersAtOf(entries, now)).toBeUndefined();
+      const fs = ev(entries);
+      expect(fs).toHaveLength(1);
+      expect("othersAt" in fs[0]!).toBe(false);
+    }
+    // a known other wins over an unknown entry
+    expect(othersAtOf([{ id: "m3" }, other("2026-10-25T11:00:00Z")], now)).toBe("2026-10-25T11:00:00.000Z");
+    const del = parseBeeperMessage(JSON.stringify({ type: "message.deleted", chatID: "imsg##thread:+1", ids: ["m1"], entries: [other("2026-10-25T11:59:00Z")] }), ctx);
+    expect("othersAt" in del[0]!).toBe(false);
+  });
+  test("every chunk of a big event carries it", () => {
+    const ids = Array.from({ length: 150 }, (_, i) => `m${i}`);
+    const fs = parseBeeperMessage(JSON.stringify({ type: "message.upserted", chatID: "imsg##thread:+1", ids, entries: [other("2026-10-25T11:59:00Z")] }), ctx);
+    expect(fs.map((f) => (f as { othersAt?: unknown }).othersAt)).toEqual(["2026-10-25T11:59:00.000Z", "2026-10-25T11:59:00.000Z"]);
+  });
+  test("over the real socket: a message from someone else has othersAt, the owner's own send has null", async () => {
+    const { frames } = stream();
+    await waitFor(() => frames.some((f) => f.kind === "status"), 3000, "subscribed");
+    const incoming = fb.state.receive(CHAT_IDS.imessageAlice, { text: "hello" });
+    const got = await waitFor(() => frames.find((f) => f.kind === "message" && f.messageIDs.includes(incoming.id)), 3000, "incoming");
+    expect((got as { othersAt?: string }).othersAt).toBe(new Date(Date.parse(incoming.timestamp)).toISOString());
+    frames.length = 0;
+    const chat = fb.state.chats.get(CHAT_IDS.imessageAlice)!;
+    const mine = fb.state.sendOwn(chat, "mine", undefined, 0);
+    const sent = await waitFor(() => frames.filter((f) => f.kind === "message" && f.messageIDs.includes(mine.id)).length >= 2 && frames, 3000, "own send and its settle");
+    for (const f of sent.filter((x) => x.kind === "message")) expect((f as { othersAt?: unknown }).othersAt).toBeNull();
   });
 });
 

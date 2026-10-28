@@ -1,7 +1,8 @@
 // The connector's whitelist. A request names a catalogue action; params are validated (and
 // defaulted) with parseActionParams; the action calls only its own Beeper endpoints; the result is
-// checked with parseActionResult before it may leave the Mac. Anything else is NOT_ALLOWED.
-import { ACTIONS, isActionName, makeError, parseActionParams, parseActionResult, parseGmailAssetURL, type ActionName, type ErrorBody, type MediaHead } from "@j-inbox/protocol";
+// checked with parseActionResult before it may leave the Mac. Anything else (the cloud's own
+// actions included: the snooze store lives in the cloud) is NOT_ALLOWED.
+import { ACTIONS, isActionName, isCloudAction, makeError, parseActionParams, parseActionResult, parseGmailAssetURL, type ConnectorActionName, type ErrorBody, type MediaHead } from "@j-inbox/protocol";
 import type { BeeperClient } from "./beeper-client.ts";
 import type { AssetAllowlist } from "./assets.ts";
 import type { BeeperActions, Outcome, RequestContext } from "./actions.ts";
@@ -40,7 +41,7 @@ async function openGmailMedia(gmail: GmailService | null, assets: AssetAllowlist
 export function createDispatcher(o: { actions: BeeperActions; client: BeeperClient; assets: AssetAllowlist; gmail?: GmailService | null; idempotency?: IdempotencyCache<Outcome<unknown>> }) {
   const router = createRouter({ beeper: o.actions, gmail: o.gmail ?? null, assets: o.assets, idempotency: o.idempotency });
   const via =
-    (name: Exclude<ActionName, "get_media">): Handler =>
+    (name: Exclude<ConnectorActionName, "get_media">): Handler =>
     async (p, ctx) => {
       const r = await (router[name] as (p: unknown, ctx: RequestContext) => Promise<{ ok: boolean; data?: unknown; error?: ErrorBody }>)(p, ctx);
       if (!r.ok) return { kind: "res", ok: false, error: r.error! };
@@ -67,12 +68,12 @@ export function createDispatcher(o: { actions: BeeperActions; client: BeeperClie
       const r = await openMedia(o.client, o.assets, p.url, ctx.signal);
       return r.ok ? { kind: "media", head: r.head, body: r.body, cancel: r.cancel } : { kind: "res", ok: false, error: r.error };
     },
-  } satisfies Record<ActionName, Handler>;
+  } satisfies Record<ConnectorActionName, Handler>;
 
   return {
     isWrite: (action: string): boolean => !isActionName(action) || ACTIONS[action].write,
     async dispatch(action: string, raw: unknown, ctx: RequestContext = {}): Promise<DispatchResult> {
-      if (!isActionName(action)) return fail("NOT_ALLOWED", "This action is not allowed.");
+      if (!isActionName(action) || isCloudAction(action)) return fail("NOT_ALLOWED", "This action is not allowed.");
       const p = parseActionParams(action, raw);
       if (!p.ok) {
         const where = [...new Set(p.issues.map((i) => i.path.join(".") || "params"))].slice(0, 5).join(", ");

@@ -4,6 +4,7 @@ export * from "./errors.ts";
 export * from "./gmail.ts";
 export * from "./textutil.ts";
 export * from "./model.ts";
+export * from "./snooze.ts";
 export * from "./actions.ts";
 export * from "./frames.ts";
 export * from "./agent.ts";

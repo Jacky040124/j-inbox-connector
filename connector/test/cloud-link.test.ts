@@ -126,6 +126,9 @@ describe("requests", () => {
     expect(unknown.res.error?.code).toBe("NOT_ALLOWED");
     const proto = await cloud.req("__proto__", {});
     expect(proto.res.error?.code).toBe("NOT_ALLOWED");
+    // The cloud's own actions (the snooze store) are never the connector's to run.
+    const snooze = await cloud.req("snooze_chat", { chatID: "imsg##thread:+1", until: new Date(Date.now() + 3600_000).toISOString() });
+    expect(snooze.res.error?.code).toBe("NOT_ALLOWED");
     const bad = await cloud.req("list_chats", "params");
     expect(bad.res.error?.code).toBe("BAD_PARAMS");
     expect(d.calls).toEqual([]);

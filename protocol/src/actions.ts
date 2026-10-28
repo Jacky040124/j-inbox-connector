@@ -1,5 +1,6 @@
-// The ACTION catalogue: the single list of things anyone may ask the connector to do.
-// Used by the connector whitelist, the Raft agent manifest and the web API.
+// The ACTION catalogue: the single list of things anyone may ask J-Inbox to do. Used by the
+// connector whitelist, the Raft agent manifest and the web API. A few (`cloud: true`, the snooze
+// store) are answered by the cloud room itself and never sent to the connector as such.
 import {
   array,
   assetUrl,
@@ -49,6 +50,7 @@ import {
 } from "./model.ts";
 import { errorBody } from "./error-schema.ts";
 import { oauthToken } from "./gmail.ts";
+import { MAX_SNOOZES, snoozeItem } from "./snooze.ts";
 
 
 type Shape = Record<string, Schema<any>>;
@@ -68,6 +70,12 @@ export interface ActionDef<P extends Shape, R> {
   readonly humanOnly?: boolean;
   /** Only the cloud itself sends it to the connector (never from the web API or agents). Implies humanOnly. */
   readonly cloudOnly?: boolean;
+  /**
+   * Answered by the cloud room itself (the snooze store), never sent to the connector in a `req`
+   * (not in CONNECTOR_ACTION_NAMES). Its effects on the owner's computer run as ordinary connector
+   * actions (archive, mark_read, read_chat).
+   */
+  readonly cloud?: boolean;
   /** Result is sent as `res` (metadata) followed by `chunk` frames. */
   readonly streamed: boolean;
   readonly timeoutMs: number;
@@ -77,8 +85,8 @@ export interface ActionDef<P extends Shape, R> {
   readonly beeper: string;
 }
 
-function define<P extends Shape, R>(def: ActionDef<P, R>): ActionDef<P, R> {
-  return def;
+function define<P extends Shape, R, const C extends boolean | undefined = undefined>(def: ActionDef<P, R> & { cloud?: C }): ActionDef<P, R> & (C extends true ? { readonly cloud: true } : {}) {
+  return def as ActionDef<P, R> & (C extends true ? { readonly cloud: true } : {});
 }
 
 const limit = (max: number) => integer({ min: 1, max });
@@ -374,6 +382,54 @@ export const ACTIONS = {
     beeper: "none (Gmail users.getProfile to verify, then the Keychain)",
   }),
 
+  snooze_chat: define({
+    description:
+      "Snooze a chat (any network, Gmail too): it is archived now and comes back to the inbox, unarchived and marked unread, at `until` (1 minute to 7 days ahead). A new message from someone else brings it back sooner. Snoozing again moves the time. Agents need the owner's approval.",
+    params: object({ chatID, until: isoDateTime() }),
+    paramDocs: { chatID: "Chat ID", until: "When the chat comes back: an ISO 8601 time with timezone, 1 minute to 7 days from now" },
+    defaults: {},
+    result: object({ chatID, until: isoDateTime() }),
+    write: true,
+    needsApprovalForAgents: true,
+    cloud: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    rateLimitPerMinute: 60,
+    beeper: "none itself: the cloud keeps the snooze and runs read_chat (limit 1) and archive now, archive {archived:false} + mark_read {read:false} when it is due",
+  }),
+
+  unsnooze_chat: define({
+    description: "End a chat's snooze now: it is moved back to the inbox (unarchived, its read state unchanged). Agents need the owner's approval.",
+    params: object({ chatID }),
+    paramDocs: { chatID: "Chat ID of a snoozed chat (from list_snoozed)" },
+    defaults: {},
+    result: object({ chatID }),
+    write: true,
+    needsApprovalForAgents: true,
+    cloud: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    rateLimitPerMinute: 60,
+    beeper: "none itself: the cloud runs archive {archived:false} and forgets the snooze",
+  }),
+
+  list_snoozed: define({
+    description:
+      "The owner's snoozed chats, soonest return first: when each comes back (until) and when it was snoozed, with each chat's details (title, network, account) read from the owner's computer; while the computer is offline the details are missing.",
+    params: object({}),
+    paramDocs: {},
+    defaults: {},
+    result: object({ items: array(snoozeItem, { max: MAX_SNOOZES }) }),
+    write: false,
+    needsApprovalForAgents: false,
+    cloud: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    // Each call reads every snoozed chat at the connector: agents get a per-action cap.
+    rateLimitPerMinute: 10,
+    beeper: "the cloud's snooze store (chat ids and times only), then list_chats {inbox: archive} and read_chat (limit 1) for chats that page missed, at most 6 at a time; nothing while the computer is offline"
+  }),
+
   get_media: define({
     description: "Download an image or file from a message (attachment url or chat avatarURL; email attachments too).",
     params: object({ url: assetUrl() }),
@@ -394,6 +450,17 @@ export type ActionParams<A extends ActionName> = Infer<Actions[A]["params"]>;
 export type ActionResult<A extends ActionName> = Infer<Actions[A]["result"]>;
 
 export const ACTION_NAMES = Object.freeze(Object.keys(ACTIONS) as ActionName[]);
+
+/** Actions the cloud answers itself (`cloud: true`): never in a `req` frame. */
+export type CloudActionName = { [K in ActionName]: Actions[K] extends { cloud: true } ? K : never }[ActionName];
+/** Actions the connector runs: everything a `req` frame may name. */
+export type ConnectorActionName = Exclude<ActionName, CloudActionName>;
+export const CLOUD_ACTION_NAMES = Object.freeze(ACTION_NAMES.filter((n) => (ACTIONS[n] as { cloud?: boolean }).cloud === true) as CloudActionName[]);
+export const CONNECTOR_ACTION_NAMES = Object.freeze(ACTION_NAMES.filter((n) => (ACTIONS[n] as { cloud?: boolean }).cloud !== true) as ConnectorActionName[]);
+
+export function isCloudAction(v: unknown): v is CloudActionName {
+  return isActionName(v) && (ACTIONS[v] as { cloud?: boolean }).cloud === true;
+}
 
 export function isActionName(v: unknown): v is ActionName {
   return typeof v === "string" && Object.prototype.hasOwnProperty.call(ACTIONS, v);

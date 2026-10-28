@@ -96,6 +96,9 @@ camelCase (like Beeper). Agent writes marked "approval" go through the approval 
 | `archive` | `chatID archived?(true)` | `{chatID, archived}` | yes | **yes** | `POST /v1/chats/{id}/archive` |
 | `compose_email` | `accountID (gmail:<address>) to[1-50] cc?[0-50] subject(0-500, single line) text(1-10000) idempotencyKey?` (bare addresses, `emailRecipient`) | `{accountID, chatID, pendingMessageID}` (a new thread) | yes | **yes** (10/min) | Gmail `users.messages.send` |
 | `gmail_connect` | `email refreshToken` | `{accountID, connected: true}` | yes (cloud-only, `humanOnly`) | n/a | Gmail `users.getProfile` (the address must match), then the Keychain |
+| `snooze_chat` | `chatID until` (ISO 8601 with timezone; `snoozeUntilProblem`: 1 min to 7 days ahead, 10 min clock slack) | `{chatID, until}` | yes (cloud) | **yes** (60/min, like `archive`) | none itself: the cloud keeps the snooze (see "Snooze") and runs `read_chat` (limit 1) and `archive` now |
+| `unsnooze_chat` | `chatID` | `{chatID}` | yes (cloud) | **yes** (60/min) | none itself: the cloud runs `archive {archived:false}` and forgets the snooze |
+| `list_snoozed` | – | `{items: {chatID, until, snoozedAt, chat?: ChatSummary (no preview)}[]}` soonest first, at most `MAX_SNOOZES` (500) | (cloud) | (10/min) | the cloud's store (ids and times), then `list_chats {inbox: archive}` and `read_chat` (limit 1) for chats that page missed, 6 at a time within one request timeout; offline: no `chat` |
 | `get_media` | `url` (an attachment `url` or chat `avatarURL` from another result) | `res` = `{mimeType, size (null if unknown), fileName?}` then `chunk` frames | | | `GET /v1/assets/serve?url=`; `gmail://` URLs: Gmail `messages.attachments.get` |
 
 Notes for implementers:
@@ -121,6 +124,37 @@ Notes for implementers:
   `MAX_FRAME_BYTES` (long CJK texts, many attachments and reactions). The connector then returns
   fewer items (newest kept), `hasMore: true` and a cursor that continues exactly after the last item
   it returned. One maximal message always fits.
+
+### Snooze (`snooze.ts`; cloud actions)
+
+Actions marked `cloud: true` in the catalogue (`CLOUD_ACTION_NAMES`: `snooze_chat`,
+`unsnooze_chat`, `list_snoozed`) are answered by the cloud room itself: they are on the web API and
+in the agent manifest like the others, but never in a `req` frame (`reqFrame.action` is one of
+`CONNECTOR_ACTION_NAMES`; the connector refuses them with `NOT_ALLOWED`). Their effects on the
+owner's computer are ordinary connector actions:
+
+- `snooze_chat` needs the computer online (`OFFLINE` otherwise): the cloud reads the chat
+  (`read_chat` limit 1: `NOT_FOUND` if it is not there; nothing of it is kept), stores the snooze,
+  then `archive`s it (a failed archive forgets the snooze again). Snoozing a snoozed chat
+  moves its time. At most `MAX_SNOOZES` (500) per room (`TOO_LARGE`).
+- When `until` comes (the room's alarm; the browser has no part in it): `archive {archived:false}`,
+  then `mark_read {read:false}`, then the snooze is forgotten. Offline at that time: it waits and
+  runs as soon as the computer is back. A failing step is retried with backoff (1 min doubling to
+  30 min, for ever), except `NOT_FOUND`/`BAD_PARAMS`/`NOT_SUPPORTED`/`NOT_ALLOWED`, which drop it.
+- **Early return** (like Gmail): a `message` event for a snoozed chat whose `othersAt` is later than
+  the time it was snoozed brings it back the same way at once. `othersAt: null` (the owner's own
+  messages) never does. A connector that sends no `othersAt` makes the cloud read the chat's newest
+  messages (`read_chat` limit 5, at most once per chat per 30 s) to decide.
+- `unsnooze_chat` (computer online) unarchives now, read state untouched. `archive {archived:false}`
+  by anyone (the owner's Archive toggle, an approved agent) also ends the snooze.
+- What the cloud keeps per snooze: only what the timer needs. The chat id sealed with AES-GCM (a
+  key derived from the Worker's `LOGIN_SECRET`), an HMAC of it to find it, the times and the retry
+  bookkeeping; deleted when the snooze ends. Never a title, network or account: `list_snoozed`
+  reads those from the connector each time (`chat`), and has none while the computer is offline.
+  Nothing readable without the Worker secret; never in logs or the audit log (which records
+  `snooze_chat`, `unsnooze_chat`, `snooze.return`, `snooze.early_return`, `snooze.clear`,
+  `snooze.drop` as metadata).
+- `/live` `snooze {chatID, until|null, reason}` tells open browsers (`SNOOZE_REASONS`).
 
 ### Gmail (`gmail.ts`, design/gmail-plan.md)
 
@@ -205,13 +239,18 @@ connector -> cloud   res    {id, ok:true, data} | {id, ok:false, error{code,mess
 connector -> cloud   chunk  {id, seq, data(base64 <= 256 KiB raw), last, error?}   get_media only, after res
 cloud -> connector   ack    {id, seq}                       get_media flow control: chunk seq was written out
 cloud -> connector   cancel {id}                            caller gone or timed out
-connector -> cloud   event  {kind:"message", op, chatID, messageIDs[1..100], ts}
+connector -> cloud   event  {kind:"message", op, chatID, messageIDs[1..100], ts, othersAt?: time|null}
                             {kind:"chat", op, chatID, ts, unreadCount?}
                             {kind:"status", ts, beeper{reachable, version, appState?}}
 both                 ping {t} / pong {t}                    every 25 s; 60 s silence = dead
 ```
 
 - Events carry **metadata only**; clients refetch content with `read_chat`.
+- `message` events may carry `othersAt` (snooze's early return): the newest timestamp among the
+  upserted messages that someone other than the owner sent, `null` when none was (the owner's own
+  sends and their status updates), absent when the connector cannot tell (Beeper sent no message
+  entries; `REACTION` entries do not count). Gmail: added messages without the `SENT` label count,
+  at the poll's time.
 - `req.caller` (optional) says who asked, for the connector's local audit log only: the caller type
   and the Raft display name (`sanitizeLine`d, 1-200 chars, omitted when empty). Never a sub, chat
   or message value.
@@ -302,7 +341,8 @@ query): URLs are written to Worker logs, browser history and proxies.
 | POST | `/auth/logout` | | `{ok:true}`; expires the cookie (`expiredSessionCookie`), drops the server session, sends `LOGOUT_RESPONSE_HEADERS` (`Clear-Site-Data: "cache", "storage"`) |
 | GET | `/auth/google/start` | | a top-level navigation (no CSRF header): 302 to Google, or to `/settings/accounts?gmail_error=<code>` (see "Gmail") |
 
-Cloud-only actions (`gmail_connect`) are `NOT_FOUND` on `POST /api/actions/{action}`.
+Cloud-only actions (`gmail_connect`) are `NOT_FOUND` on `POST /api/actions/{action}`. The cloud's
+own actions (`snooze_chat`, `unsnooze_chat`, `list_snoozed`) are answered there like the others.
 
 Media responses (`mediaResponseHeaders`): always `X-Content-Type-Options: nosniff`,
 `Content-Security-Policy: sandbox; default-src 'none'`, `Cache-Control: no-store`,
@@ -321,8 +361,9 @@ cached data only while `/api/me` returns the same `sub` (`shouldKeepLocalCache`)
 on any 401 and on a `sub` mismatch.
 
 `/live` (WebSocket, same cookie): server sends `snapshot` first, then `presence`, `event`
-(a connector event frame, metadata only), `approval`, `pong`, and `resync {reason:"events_dropped"}`
-(the room dropped connector events over its per-minute budget: refetch what is on screen). A
+(a connector event frame, metadata only), `approval`, `pong`, `resync {reason:"events_dropped"}`
+(the room dropped connector events over its per-minute budget: refetch what is on screen), and
+`snooze {chatID, until, reason}` (a snooze was set, or cleared and why). A
 socket evicted because the owner has too many tabs open is closed with
 `LIVE_CLOSE_CODES.TOO_MANY_TABS` (4429); the browser must not reconnect on its own after it.
 Browser may send `ping {t}` only.

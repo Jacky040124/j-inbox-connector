@@ -23,7 +23,7 @@ import {
   type Issue,
   type Result,
 } from "./schema.ts";
-import { ACTION_NAMES } from "./actions.ts";
+import { CONNECTOR_ACTION_NAMES } from "./actions.ts";
 import { errorBody, type ErrorCode } from "./errors.ts";
 import { beeperHealth, chatID, messageID, networkName, ownId, versionString } from "./model.ts";
 import {
@@ -104,6 +104,13 @@ export const messageEvent = object({
   chatID,
   messageIDs: array(messageID, { min: 1, max: MAX_EVENT_IDS }),
   ts: eventTs,
+  /**
+   * Optional (added 2026-10-28, for snooze's early return): who sent the upserted messages, as far
+   * as the connector knows. A time: the newest timestamp among them sent by someone else (not the
+   * owner). null: none was (the owner's own sends, their status updates). Absent: not known (an
+   * older connector, Beeper sent no message entries, deletions). Metadata only, never a sender.
+   */
+  othersAt: optional(nullable(isoDateTime())),
 });
 export const chatEvent = object({
   type: literal("event"),
@@ -145,11 +152,14 @@ export const welcomeFrame = object({
   maxFrameBytes: integer({ min: 1024, max: MAX_FRAME_BYTES }),
 });
 
-/** params is any bounded JSON object here; the connector validates it with parseActionParams and answers BAD_PARAMS. */
+/**
+ * params is any bounded JSON object here; the connector validates it with parseActionParams and
+ * answers BAD_PARAMS. The cloud's own actions (CLOUD_ACTION_NAMES, the snooze store) never ride here.
+ */
 export const reqFrame = object({
   type: literal("req"),
   id: requestId,
-  action: enumOf(ACTION_NAMES),
+  action: enumOf(CONNECTOR_ACTION_NAMES),
   params: jsonObject(JSON_LIMITS),
   /**
    * Optional (added 2026-10-26): who asked, for the connector's local audit log only. The name is

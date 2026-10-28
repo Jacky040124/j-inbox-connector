@@ -108,6 +108,13 @@ Request handling (`CloudLink`):
 - Beeper health: a `status` event on every change and again every 10 checks (5 min), in case one
   was lost. Under backpressure (more than 4 MiB unsent) chat/message events are dropped, never a
   `status` event.
+- `message` events say whether someone else wrote (`othersAt`, for the cloud's snooze early
+  return): Beeper's `message.upserted` entries give `isSender` and the time (the newest other
+  person's message time, `null` for the owner's own sends, left out when Beeper sent no entries);
+  Gmail history: added mail without the `SENT` label, at the poll's time. Only that one timestamp
+  leaves the Mac, never who wrote or what. The snooze itself lives in the cloud: the connector only
+  runs `archive` and `mark_read` for it, and refuses `snooze_chat`/`unsnooze_chat`/`list_snoozed`
+  (`NOT_ALLOWED`).
 - `list_chats` with `inbox: "primary"` (the web's All chats and Unread) reads `GET /v1/chats`
   (`ChatWithPreview`) and filters archived/low-priority (and unread) chats here, so every row has
   its last message; text queries, chat types and the other inboxes use `/v1/chats/search` (no
