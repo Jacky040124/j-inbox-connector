@@ -200,7 +200,8 @@ sends (or edits, discards, asks again). Nothing is written into Beeper or Gmail 
   must be allowed and agent access on (`NOT_ALLOWED`), the computer online with `"drafts.v1"`; the
   chat is read (`NOT_FOUND`), the request stored already `drafted` with `origin: "agent"` (the
   connector keeps `AGENT_OWN_DRAFT_INSTRUCTION` as its instruction; the web does not show it), the
-  text through `draft_store_set_text`, the chat to Unread, no Raft event. It replaces the chat's
+  text through `draft_store_set_text`, the chat to Unread (an archived chat is also unarchived, any
+  draft, asked or not: Unread leaves archived chats out), no Raft event. It replaces the chat's
   expired or failed request and this agent's own earlier draft; any other pending or drafted one
   answers `CONFLICT`. Answer: `{chatID, draftSet: true}` as before. The owner's own `draft_reply`
   (the web never sends one) still goes to the connector.
