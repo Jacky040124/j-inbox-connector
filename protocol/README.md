@@ -194,6 +194,16 @@ sends (or edits, discards, asks again). Nothing is written into Beeper or Gmail 
   pending and before its deadline (`CONFLICT` otherwise), `DRAFT_GET_PER_MINUTE` (30) /
   `DRAFT_SUBMIT_PER_MINUTE` (10) per agent. The text goes to the connector (`draft_store_set_text`).
   No owner approval: nothing is sent.
+- **An agent's own `draft_reply`** (since 2026-10-29, Jacky: agents never make Beeper or Gmail
+  drafts): the cloud answers it, the connector never gets `draft_reply` from an agent. If the owner
+  asked this agent for this chat (pending), it is that request's `submit_draft`. Otherwise the agent
+  must be allowed and agent access on (`NOT_ALLOWED`), the computer online with `"drafts.v1"`; the
+  chat is read (`NOT_FOUND`), the request stored already `drafted` with `origin: "agent"` (the
+  connector keeps `AGENT_OWN_DRAFT_INSTRUCTION` as its instruction; the web does not show it), the
+  text through `draft_store_set_text`, the chat to Unread, no Raft event. It replaces the chat's
+  expired or failed request and this agent's own earlier draft; any other pending or drafted one
+  answers `CONFLICT`. Answer: `{chatID, draftSet: true}` as before. The owner's own `draft_reply`
+  (the web never sends one) still goes to the connector.
 - **Deadline**: `DRAFT_DEADLINE_MS` (30 min) after the request; then `expired` (the room's alarm).
 - **The owner**: `list_drafts {chatID?}` (active requests with the instruction and draft read from
   the computer, absent while it is offline), `cancel_draft` (pending), `discard_draft` (drafted,

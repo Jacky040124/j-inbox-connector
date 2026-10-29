@@ -270,7 +270,7 @@ export const ACTIONS = {
 
   draft_reply: define({
     description:
-      "Put a draft into a chat's input box without sending it (Gmail: a reply-all draft in the thread). The owner decides whether to send. Never replaces an existing draft (the owner may be typing): fails with CONFLICT if the chat already has one.",
+      "Draft a reply without sending it. For agents it becomes a J-Inbox draft card in that chat (Send / Edit / Discard for the owner, the chat goes to Unread); nothing is written into Beeper or Gmail. If the owner asked you for this chat's draft, it answers that request. Fails with CONFLICT while the chat has an open draft from someone else. The owner decides whether to send.",
     params: object({ chatID, text: sendText }),
     paramDocs: { chatID: "Chat ID", text: "Draft text (plain text or Markdown)" },
     defaults: {},

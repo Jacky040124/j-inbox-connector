@@ -62,6 +62,16 @@ export const draftRequestID = string({ min: 8, max: 64, pattern: /^drq_[A-Za-z0-
 export const draftInstruction = text({ min: 1, max: MAX_DRAFT_INSTRUCTION_LENGTH });
 export const draftText = text({ min: 1, max: MAX_SEND_TEXT_LENGTH });
 
+/**
+ * Where a draft came from: the owner asked an agent (asked), or an agent called draft_reply on its
+ * own (agent, since 2026-10-29: an agent's draft_reply never writes into Beeper or Gmail any more,
+ * it becomes a J-Inbox draft like an asked one; Jacky, #CHAT-GPT:df5ad78f).
+ */
+export const DRAFT_ORIGINS = ["asked", "agent"] as const;
+export type DraftOrigin = (typeof DRAFT_ORIGINS)[number];
+/** The instruction the connector's store keeps for an agent's own draft (the store needs one; the web does not show it). */
+export const AGENT_OWN_DRAFT_INSTRUCTION = "(drafted by the agent on its own)";
+
 /** One agent of the owner's Raft server (Settings > Agents): Raft's directory, nothing else. */
 export const raftAgent = object({
   id: raftAgentID,
@@ -96,6 +106,8 @@ export const draftMeta = object({
   delivery: optional(enumOf(DRAFT_DELIVERIES)),
   /** failed: why (Raft refused, the agent is gone ...). */
   error: optional(errorBody),
+  /** agent: the agent drafted it on its own (draft_reply); absent: the owner asked. */
+  origin: optional(enumOf(DRAFT_ORIGINS)),
 });
 export type DraftMeta = Infer<typeof draftMeta>;
 
