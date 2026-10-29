@@ -356,6 +356,7 @@ describe("long ids and long Beeper cursors", () => {
       },
       write: async () => ({ ok: false as const, error: { code: "INTERNAL" as const, message: "x" } }),
       stream: async () => ({ ok: false as const, error: { code: "INTERNAL" as const, message: "x" } }),
+      upload: async () => ({ ok: false as const, error: { code: "INTERNAL" as const, message: "x" } }),
     };
     return { actions: createActions(client), calls };
   };

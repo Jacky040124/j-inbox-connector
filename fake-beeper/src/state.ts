@@ -1,5 +1,8 @@
 // Mutable in-memory world of the fake Beeper. Mutations emit domain events like /v1/ws does.
-import { buildFixture, chatAccount, type BAccount, type BAsset, type BChat, type BMessage, type Fixture } from "./fixtures.ts";
+import { buildFixture, chatAccount, type BAccount, type BAsset, type BAttachment, type BChat, type BMessage, type Fixture } from "./fixtures.ts";
+
+/** A file uploaded with POST /v1/assets/upload (or /upload/base64), kept until the fake is reset. */
+export type BUpload = { uploadID: string; fileName: string; mimeType: string; srcURL: string; bytes: Uint8Array };
 
 export type DomainEventType = "chat.upserted" | "chat.deleted" | "message.upserted" | "message.deleted";
 export type DomainEvent = { type: DomainEventType; chatID: string; ids: string[]; entries?: Record<string, unknown>[] };
@@ -27,6 +30,8 @@ export class FakeBeeperState {
   chats: Map<string, BChat>;
   messages: Map<string, BMessage[]>;
   assets: Map<string, BAsset>;
+  /** Files uploaded with /v1/assets/upload, by uploadID. Their srcURL is also served as an asset. */
+  uploads = new Map<string, BUpload>();
   /** Every request the fake handled, in order. Tests assert on writes here. */
   calls: Call[] = [];
   private listeners = new Set<(e: DomainEvent) => void>();
@@ -77,8 +82,18 @@ export class FakeBeeperState {
     this.emit({ type: "message.upserted", chatID: msg.chatID, ids: [msg.id], entries: [structuredClone(msg) as Record<string, unknown>] });
   }
 
+  /** A temporary upload (POST /v1/assets/upload): served at its srcURL like any asset. */
+  upload(o: { fileName: string; mimeType: string; bytes: Uint8Array }): BUpload {
+    const uploadID = `upload_${++this.pendingCounter}`;
+    const srcURL = `file:///tmp/fake-beeper-uploads/${uploadID}/${encodeURIComponent(o.fileName)}`;
+    const u: BUpload = { uploadID, fileName: o.fileName, mimeType: o.mimeType, srcURL, bytes: o.bytes };
+    this.uploads.set(uploadID, u);
+    this.assets.set(srcURL, { url: srcURL, mimeType: o.mimeType, fileName: o.fileName, size: o.bytes.length, bytes: () => o.bytes });
+    return u;
+  }
+
   /** Message sent by us (POST /messages). Starts PENDING, becomes SUCCESS after `settleMs`. */
-  sendOwn(chat: BChat, text: string | undefined, replyTo: string | undefined, settleMs: number): BMessage {
+  sendOwn(chat: BChat, text: string | undefined, replyTo: string | undefined, settleMs: number, attachment?: BAttachment): BMessage {
     // iMessage has no /v1/accounts entry: fall back to the chat's own self participant.
     const account = this.accounts.find((a) => a.accountID === chat.accountID) ?? chatAccount(chat.accountID);
     const self = chat.participants.items.find((p) => p.isSelf);
@@ -91,8 +106,9 @@ export class FakeBeeperState {
       senderName: self?.fullName ?? account?.user.fullName,
       timestamp: ts,
       sortKey: this.nextSortKey(),
-      ...(chat.accountID === "imessage" ? {} : { type: "TEXT" }),
-      text,
+      ...(chat.accountID === "imessage" ? {} : { type: attachment ? attachmentMessageType(attachment) : "TEXT" }),
+      ...(text !== undefined ? { text } : {}),
+      ...(attachment ? { attachments: [attachment] } : {}),
       isSender: true,
       sendStatus: { status: "PENDING", timestamp: ts },
       ...(replyTo ? { linkedMessageID: replyTo } : {}),
@@ -153,4 +169,8 @@ export class FakeBeeperState {
     this.messages.delete(chatID);
     this.emit({ type: "chat.deleted", chatID, ids: [chatID] });
   }
+}
+
+function attachmentMessageType(a: BAttachment): string {
+  return a.type === "img" ? "IMAGE" : a.type === "video" ? "VIDEO" : a.type === "audio" ? "AUDIO" : "FILE";
 }

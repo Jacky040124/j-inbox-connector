@@ -11,8 +11,10 @@ import {
   type ErrorBody,
   type ErrorCode,
   type MessageItem,
+  type UploadInfo,
 } from "@j-inbox/protocol";
 import type { BeeperCall, BeeperClient, CallOptions } from "./beeper-client.ts";
+import { UploadError } from "./uploads.ts";
 import { mapAccount, mapChat, mapMessage, selfIDsIn, type MapOptions } from "./beeper-map.ts";
 import type { AssetAllowlist } from "./assets.ts";
 import { IdempotencyCache, hashKey, type IdempotencyJournal } from "./idempotency.ts";
@@ -55,6 +57,7 @@ async function guard<T>(fn: () => Promise<Outcome<T>>): Promise<Outcome<T>> {
     return await fn();
   } catch (e) {
     if (e instanceof BeeperFailure) return { ok: false, error: e.body };
+    if (e instanceof UploadError) return { ok: false, error: e.body };
     if (e instanceof CursorTooLong) return err("TOO_LARGE", "Beeper's page cursor is too long to continue paging. Start again without a cursor or use a narrower filter.");
     if (e instanceof CursorExpired) return err("BAD_PARAMS", "The cursor expired because the list changed. Reload from the first page.");
     if (e instanceof RequestAborted) return err("TIMEOUT", "The request ran out of time or was cancelled.");
@@ -131,6 +134,25 @@ export function connectedNetworks(accounts: Account[], rawChats: unknown[]): str
   return [...out].sort().slice(0, 50);
 }
 
+/** Finished uploads by id (uploads.ts UploadStore): the file a send's attachmentId names. read() throws UploadError (NOT_FOUND) when it is gone. */
+export type UploadSource = { read(id: string): UploadInfo & { bytes: Uint8Array }; delete(ids: readonly string[]): number };
+
+/**
+ * Beeper refused a send with a file (or the file itself): say so with Beeper's own reason. A 400 or
+ * 422 means the chat's network does not take it (NOT_SUPPORTED); nothing was sent either way.
+ */
+export function fileRefused(r: { error: ErrorBody; detail?: string }, where = "Beeper"): Outcome<never> {
+  const why = r.detail ? `: ${r.detail}` : "";
+  if (r.error.code === "BAD_PARAMS" || r.error.code === "CONFLICT") return err("NOT_SUPPORTED", `${where} refused the file${why}. This chat's network may not take files like this one.`);
+  if (r.error.code === "TOO_LARGE") return err("TOO_LARGE", `${where} refused the file as too large${why}.`);
+  return { ok: false, error: r.error };
+}
+
+/** The idempotency digest of a send: unchanged for sends without a file (keys journaled before files existed stay valid). */
+export function sendFingerprint(parts: unknown[], attachmentId: string | undefined): string {
+  return fingerprint(attachmentId ? [...parts, attachmentId] : parts);
+}
+
 export type ActionsOptions = {
   /** Reported by status. */
   connectorVersion?: string;
@@ -139,6 +161,8 @@ export type ActionsOptions = {
   scan?: { maxPages?: number; budgetMs?: number };
   /** get_media allowlist: every asset URL in a returned result is added here. */
   assets?: AssetAllowlist;
+  /** The upload store: files send_message sends (attachmentId), gone once sent. */
+  uploads?: UploadSource;
 };
 
 /** A mapped value plus the asset URLs it carries, so only URLs that are actually returned get allowed. */
@@ -304,18 +328,42 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
     });
   }
 
-  async function send_message(p: ActionParams<"send_message">, ctx: RequestContext = {}): Promise<Outcome<ActionResult<"send_message">>> {
+  /** A file from the upload store, uploaded to Beeper for one message: the message's attachment, or why not. */
+  async function beeperAttachment(id: string, ctx: RequestContext, files: UploadSource | undefined): Promise<Outcome<{ uploadID: string; fileName: string; mimeType: string }>> {
+    if (!files) return err("NOT_SUPPORTED", "This connector cannot send files.");
+    const f = files.read(id);
+    const form = new FormData();
+    form.set("file", new Blob([f.bytes as Uint8Array<ArrayBuffer>], { type: f.mimeType }), f.fileName);
+    form.set("fileName", f.fileName);
+    form.set("mimeType", f.mimeType);
+    const up = await client.upload("/v1/assets/upload", form, callOpts(ctx));
+    if (!up.ok) return fileRefused(up);
+    const b = isObj(up.body) ? up.body : {};
+    if (typeof b.error === "string" && b.error) return err("NOT_SUPPORTED", `Beeper could not take the file: ${sanitizeLine(b.error, 200)}.`);
+    if (typeof b.uploadID !== "string" || !b.uploadID || b.uploadID.length > 512) return err("BEEPER_DOWN", "Beeper took the file but sent no upload id.");
+    return { ok: true, data: { uploadID: b.uploadID, fileName: f.fileName, mimeType: f.mimeType } };
+  }
+
+  /** `files`: the upload store attachmentId is read from (the router passes the dispatcher's). */
+  async function send_message(p: ActionParams<"send_message">, ctx: RequestContext = {}, files: UploadSource | undefined = opts.uploads): Promise<Outcome<ActionResult<"send_message">>> {
     const run = () =>
       guard(async (): Promise<Outcome<ActionResult<"send_message">>> => {
-        const body = must(await client.write("POST", client.chatPath(p.chatID, "messages"), { text: p.text, ...(p.replyToMessageID ? { replyToMessageID: p.replyToMessageID } : {}) }, callOpts(ctx)));
+        // A file goes to Beeper first (POST /v1/assets/upload), then the message names it (one per message).
+        const file = p.attachmentId ? await beeperAttachment(p.attachmentId, ctx, files) : null;
+        if (file && !file.ok) return file;
+        const payload = { ...(p.text !== undefined ? { text: p.text } : {}), ...(p.replyToMessageID ? { replyToMessageID: p.replyToMessageID } : {}), ...(file ? { attachment: file.data } : {}) };
+        const sent = await client.write("POST", client.chatPath(p.chatID, "messages"), payload, callOpts(ctx));
+        if (!sent.ok && file) return fileRefused(sent);
+        const body = must(sent);
         const result = parseActionResult("send_message", { chatID: isObj(body) && typeof body.chatID === "string" ? body.chatID : p.chatID, pendingMessageID: isObj(body) ? body.pendingMessageID : undefined });
         // Beeper accepted the send but its answer is unreadable: the message may be out.
+        if (p.attachmentId) files?.delete([p.attachmentId]);
         if (!result.ok) return err("UNKNOWN_OUTCOME", "Beeper accepted the message but its answer was unreadable. Check the chat before sending again.");
         return { ok: true, data: result.value };
       });
     if (!p.idempotencyKey) return run();
     const key = `send_message\u0000${p.chatID}\u0000${p.idempotencyKey}`;
-    return (dedupe.run(key, run, { fingerprint: fingerprint([p.text, p.replyToMessageID ?? null]) }) as Promise<Outcome<ActionResult<"send_message">>>).then((r) => withChatID(p.chatID, r)).catch(() =>
+    return (dedupe.run(key, run, { fingerprint: sendFingerprint([p.text, p.replyToMessageID ?? null], p.attachmentId) }) as Promise<Outcome<ActionResult<"send_message">>>).then((r) => withChatID(p.chatID, r)).catch(() =>
       err("INTERNAL", "The connector could not record this write, so it was not sent."),
     );
   }

@@ -44,6 +44,12 @@ const CASES: Record<ConnectorActionName, { params: () => Record<string, unknown>
   draft_store_get: { params: () => ({ requestIds: ["drq_0123456789abcdef"] }), routes: [] },
   draft_store_set_text: { params: () => ({ requestId: "drq_0123456789abcdef", text: "Yes!" }), routes: [], error: "NOT_FOUND" },
   draft_store_delete: { params: () => ({ requestIds: ["drq_0123456789abcdef"] }), routes: [] },
+  // The upload store is local too (uploads.test.ts runs it with files and sends).
+  upload_store_begin: { params: () => ({ uploadId: "upl_0123456789abcdef", owner: "o_0123456789abcdef", fileName: "a.pdf", mimeType: "application/pdf", size: 3 }), routes: [] },
+  upload_store_chunk: { params: () => ({ uploadId: "upl_0123456789abcdef", owner: "o_0123456789abcdef", index: 0, data: "JVBE" }), routes: [], error: "NOT_FOUND" },
+  upload_store_commit: { params: () => ({ uploadId: "upl_0123456789abcdef", owner: "o_0123456789abcdef" }), routes: [], error: "NOT_FOUND" },
+  upload_store_delete: { params: () => ({ uploadIds: ["upl_0123456789abcdef"] }), routes: [] },
+  discard_upload: { params: () => ({ uploadId: "upl_0123456789abcdef" }), routes: [] },
 };
 
 describe("dispatcher whitelist", () => {

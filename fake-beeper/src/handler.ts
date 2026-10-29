@@ -1,6 +1,6 @@
 // HTTP side of the fake Beeper Client API as a web-standard (Request) => Response handler.
 // Behaviour follows vendor/beeper-client-api-spec.json; where the spec is silent the choice is noted.
-import type { BChat, BMessage } from "./fixtures.ts";
+import type { BAttachment, BChat, BMessage } from "./fixtures.ts";
 import type { Call, FakeBeeperState } from "./state.ts";
 
 /** When each chat was last unarchived, for the unread-after-unarchive quirk (see POST /unread). */
@@ -161,9 +161,9 @@ function pageByCursor<T>(sorted: T[], key: (x: T) => { t: number; id: string }, 
   return { page, hasMore };
 }
 
-async function readJson(req: Request): Promise<Record<string, unknown>> {
+async function readJson(req: Request, max = 2_000_000): Promise<Record<string, unknown>> {
   const text = await req.text();
-  if (text.length > 2_000_000) throw new HttpError(413, "PAYLOAD_TOO_LARGE", "Body too large");
+  if (text.length > max) throw new HttpError(413, "PAYLOAD_TOO_LARGE", "Body too large");
   if (!text.trim()) return {};
   let v: unknown;
   try {
@@ -173,6 +173,39 @@ async function readJson(req: Request): Promise<Record<string, unknown>> {
   }
   if (!v || typeof v !== "object" || Array.isArray(v)) throw bad("Body must be a JSON object");
   return v as Record<string, unknown>;
+}
+
+/** Beeper's own cap on one upload (spec: max 500 MB); the fake keeps uploads in memory, so less. */
+const MAX_UPLOAD_BYTES = 64 * 1024 * 1024;
+
+/** POST /v1/assets/upload: multipart/form-data with `file` and optional `fileName`, `mimeType`. */
+async function readUpload(req: Request): Promise<{ file: { name: string; type: string; bytes: Uint8Array } | null; fields: Record<string, unknown> }> {
+  const ct = req.headers.get("content-type") ?? "";
+  if (!/^multipart\/form-data;\s*boundary=/i.test(ct)) throw bad("Body must be multipart/form-data");
+  const declared = Number(req.headers.get("content-length") ?? "0");
+  if (declared > MAX_UPLOAD_BYTES + 64 * 1024) throw new HttpError(413, "PAYLOAD_TOO_LARGE", "File too large (max 500 MB)");
+  const form = await req.formData();
+  const fields: Record<string, unknown> = {};
+  let file: { name: string; type: string; bytes: Uint8Array } | null = null;
+  for (const [k, v] of form.entries()) {
+    if (k === "file" && typeof v !== "string") {
+      const f = v as File;
+      file = { name: f.name, type: f.type, bytes: new Uint8Array(await f.arrayBuffer()) };
+      fields.fileSize = file.bytes.length;
+    } else if ((k === "fileName" || k === "mimeType") && typeof v === "string") fields[k] = v;
+    else throw bad(`Unknown field ${k}`);
+  }
+  return { file, fields };
+}
+
+function sniff(b: Uint8Array): string {
+  if (b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46) return "application/pdf";
+  if (b[0] === 0x89 && b[1] === 0x50) return "image/png";
+  return "application/octet-stream";
+}
+
+function uploadOutput(u: { uploadID: string; srcURL: string; fileName: string; mimeType: string; bytes: Uint8Array }) {
+  return { uploadID: u.uploadID, srcURL: u.srcURL, fileName: u.fileName, mimeType: u.mimeType, fileSize: u.bytes.length };
 }
 
 function onlyKeys(body: Record<string, unknown>, allowed: string[]) {
@@ -211,6 +244,8 @@ function resolveRoute(method: string, segs: string[]): Route | null {
   if (n === 3 && a === "chats" && b === "search" && method === "GET") return { route: "/v1/chats/search", params: {} };
   if (n === 3 && a === "messages" && b === "search") return { route: "/v1/messages/search", params: {} };
   if (n === 3 && a === "assets" && b === "serve") return { route: "/v1/assets/serve", params: {} };
+  if (n === 3 && a === "assets" && b === "upload" && method === "POST") return { route: "/v1/assets/upload", params: {} };
+  if (n === 4 && a === "assets" && b === "upload" && c === "base64" && method === "POST") return { route: "/v1/assets/upload/base64", params: {} };
   if (a !== "chats" || b === undefined) return null;
   if (n === 3) return { route: "/v1/chats/{chatID}", params: { chatID: b } };
   if (n === 4 && ["archive", "read", "unread", "messages"].includes(c!)) return { route: `/v1/chats/{chatID}/${c}`, params: { chatID: b } };
@@ -239,9 +274,19 @@ export function createBeeperHandler(ctx: HandlerContext) {
     // refused requests still count as attempts (a test for "sent only once" must see them).
     let body: Record<string, unknown> = {};
     let bodyError: HttpError | null = null;
-    if (method === "POST" || method === "PATCH" || method === "PUT") {
+    // A multipart upload is read as a form; the call log keeps its name, type and size, not its bytes.
+    let file: { name: string; type: string; bytes: Uint8Array } | null = null;
+    if (route === "/v1/assets/upload") {
       try {
-        body = await readJson(req);
+        const r = await readUpload(req);
+        file = r.file;
+        body = r.fields;
+      } catch (e) {
+        bodyError = e instanceof HttpError ? e : bad("Body is not valid multipart/form-data");
+      }
+    } else if (method === "POST" || method === "PATCH" || method === "PUT") {
+      try {
+        body = await readJson(req, route === "/v1/assets/upload/base64" ? MAX_UPLOAD_BYTES * 2 : undefined);
       } catch (e) {
         bodyError = e instanceof HttpError ? e : bad("Body is not valid JSON");
       }
@@ -280,7 +325,7 @@ export function createBeeperHandler(ctx: HandlerContext) {
     if (bodyError) return done(error(bodyError.status, bodyError.code, bodyError.message));
 
     try {
-      return done(await dispatch(method, found, url.searchParams, body, req, state, ctx));
+      return done(await dispatch(method, found, url.searchParams, body, req, state, ctx, file));
     } catch (e) {
       if (e instanceof HttpError) return done(error(e.status, e.code, e.message));
       return done(error(500, "INTERNAL_ERROR", "Internal error"));
@@ -288,7 +333,7 @@ export function createBeeperHandler(ctx: HandlerContext) {
   };
 }
 
-async function dispatch(method: string, r: Route, q: URLSearchParams, body: Record<string, unknown>, req: Request, state: FakeBeeperState, ctx: HandlerContext): Promise<Response> {
+async function dispatch(method: string, r: Route, q: URLSearchParams, body: Record<string, unknown>, req: Request, state: FakeBeeperState, ctx: HandlerContext, file: { name: string; type: string; bytes: Uint8Array } | null = null): Promise<Response> {
   const key = `${method} ${r.route}`;
   const chat = () => {
     const c = state.chats.get(r.params.chatID!);
@@ -521,15 +566,48 @@ async function dispatch(method: string, r: Route, q: URLSearchParams, body: Reco
       const c = chat();
       onlyKeys(body, ["text", "replyToMessageID", "attachment"]);
       if (body.text !== undefined && typeof body.text !== "string") throw bad("text must be a string");
-      if (body.attachment !== undefined) throw new HttpError(404, "NOT_FOUND", "Upload not found");
-      if (!body.text) throw bad("text or attachment is required");
+      let attachment: BAttachment | undefined;
+      if (body.attachment !== undefined) {
+        const a = body.attachment as Record<string, unknown> | null;
+        if (!a || typeof a !== "object" || Array.isArray(a)) throw bad("attachment must be an object");
+        onlyKeys(a, ["uploadID", "mimeType", "fileName", "size", "duration", "type"]);
+        if (typeof a.uploadID !== "string") throw bad("attachment.uploadID is required");
+        const up = state.uploads.get(a.uploadID);
+        if (!up) throw new HttpError(404, "NOT_FOUND", "Upload not found");
+        const mime = typeof a.mimeType === "string" && a.mimeType ? a.mimeType : up.mimeType;
+        const kind: BAttachment["type"] = mime.startsWith("image/") ? "img" : mime.startsWith("video/") ? "video" : mime.startsWith("audio/") ? "audio" : "unknown";
+        attachment = { id: `att_${up.uploadID}`, type: kind, srcURL: up.srcURL, mimeType: mime, fileName: typeof a.fileName === "string" && a.fileName ? a.fileName : up.fileName, fileSize: up.bytes.length };
+      }
+      if (!body.text && !attachment) throw bad("text or attachment is required");
       if (body.replyToMessageID !== undefined) {
         if (typeof body.replyToMessageID !== "string") throw bad("replyToMessageID must be a string");
         if (!state.messagesOf(c.id).some((m) => m.id === body.replyToMessageID)) throw notFound("Message");
       }
       if (c.isReadOnly) throw new HttpError(403, "FORBIDDEN", "Cannot send messages in this chat");
-      const msg = state.sendOwn(c, body.text as string, body.replyToMessageID as string | undefined, ctx.controls.settleMs);
+      const msg = state.sendOwn(c, (body.text as string | undefined) || undefined, body.replyToMessageID as string | undefined, ctx.controls.settleMs, attachment);
       return json({ chatID: c.id, pendingMessageID: msg.id });
+    }
+
+    case "POST /v1/assets/upload": {
+      if (!file) throw bad("file is required");
+      if (file.bytes.length > MAX_UPLOAD_BYTES) throw new HttpError(413, "PAYLOAD_TOO_LARGE", "File too large (max 500 MB)");
+      const name = typeof body.fileName === "string" && body.fileName ? body.fileName : file.name || "file";
+      const mime = typeof body.mimeType === "string" && body.mimeType ? body.mimeType : file.type || sniff(file.bytes);
+      return json(uploadOutput(state.upload({ fileName: name, mimeType: mime, bytes: file.bytes })));
+    }
+
+    case "POST /v1/assets/upload/base64": {
+      onlyKeys(body, ["content", "fileName", "mimeType"]);
+      if (typeof body.content !== "string" || !body.content) throw bad("content is required");
+      let bytes: Uint8Array;
+      try {
+        bytes = Uint8Array.from(atob(body.content), (ch) => ch.charCodeAt(0));
+      } catch {
+        throw bad("content is not valid base64");
+      }
+      const name = typeof body.fileName === "string" && body.fileName ? body.fileName : `upload_${state.uploads.size + 1}`;
+      const mime = typeof body.mimeType === "string" && body.mimeType ? body.mimeType : sniff(bytes);
+      return json(uploadOutput(state.upload({ fileName: name, mimeType: mime, bytes })));
     }
 
     case "GET /v1/chats/{chatID}/messages/{messageID}":

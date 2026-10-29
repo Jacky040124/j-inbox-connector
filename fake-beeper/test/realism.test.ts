@@ -247,3 +247,44 @@ describe("unread right after unarchive (real Beeper quirk)", () => {
     await send("POST", chatPath(id) + "/archive", { archived: true });
   });
 });
+
+describe("files: POST /v1/assets/upload, then a message with attachment {uploadID}", () => {
+  const pdf = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37, 0x0a, 0x25]);
+  const upload = async (fields: Record<string, string> = {}) => {
+    const form = new FormData();
+    form.set("file", new Blob([pdf], { type: "application/pdf" }), "quote.pdf");
+    for (const [k, v] of Object.entries(fields)) form.set(k, v);
+    const r = await fetch(fb.url + "/v1/assets/upload", { method: "POST", headers: auth(), body: form });
+    return { status: r.status, body: (await r.json()) as any };
+  };
+  test("an upload answers UploadAssetOutput; the call log has the name and size, never the bytes", async () => {
+    const r = await upload({ fileName: "报价 – Quote.pdf", mimeType: "application/pdf" });
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ uploadID: expect.stringMatching(/^upload_/), fileName: "报价 – Quote.pdf", mimeType: "application/pdf", fileSize: pdf.length });
+    expect(r.body.srcURL).toStartWith("file:///");
+    const w = fb.writes().find((c) => c.route === "POST /v1/assets/upload")!;
+    expect(w.body).toEqual({ fileName: "报价 – Quote.pdf", mimeType: "application/pdf", fileSize: pdf.length });
+  });
+  test("the message carries the file (type FILE, the attachment served at its srcURL); text may be left out", async () => {
+    const up = (await upload()).body;
+    const sent = await send("POST", sendPath(CHAT_IDS.longHistory), { attachment: { uploadID: up.uploadID, fileName: "quote.pdf", mimeType: "application/pdf" } });
+    expect(sent.status).toBe(200);
+    const id = ((await sent.json()) as any).pendingMessageID;
+    const m = fb.state.messagesOf(CHAT_IDS.longHistory).find((x) => x.id === id)!;
+    expect(m.type).toBe("FILE");
+    expect(m.text).toBeUndefined();
+    expect(m.attachments).toEqual([expect.objectContaining({ type: "unknown", mimeType: "application/pdf", fileName: "quote.pdf", fileSize: pdf.length, srcURL: up.srcURL })]);
+    const served = await fetch(`${fb.url}/v1/assets/serve?url=${enc(up.srcURL)}`, { headers: auth() });
+    expect(new Uint8Array(await served.arrayBuffer())).toEqual(pdf);
+  });
+  test("an unknown uploadID is 404; no text and no file is 400; multipart only", async () => {
+    expect((await send("POST", sendPath(CHAT_IDS.imessageAlice), { text: "x", attachment: { uploadID: "upload_nope" } })).status).toBe(404);
+    expect((await send("POST", sendPath(CHAT_IDS.imessageAlice), {})).status).toBe(400);
+    expect((await send("POST", "/v1/assets/upload", { content: "AAAA" })).status).toBe(400);
+  });
+  test("the base64 upload works too", async () => {
+    const r = await send("POST", "/v1/assets/upload/base64", { content: btoa(String.fromCharCode(...pdf)), fileName: "a.pdf" });
+    expect(r.status).toBe(200);
+    expect(((await r.json()) as any).mimeType).toBe("application/pdf");
+  });
+});

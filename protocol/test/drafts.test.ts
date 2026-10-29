@@ -133,6 +133,7 @@ describe("draft actions", () => {
     expect(submit.parameters).toEqual({
       requestId: { type: "string", description: AGENT_META.submit_draft.paramDocs.requestId!, required: true },
       text: { type: "string", description: AGENT_META.submit_draft.paramDocs.text!, required: true },
+      attachmentId: { type: "string", description: AGENT_META.submit_draft.paramDocs.attachmentId!, required: false },
     });
     expect(submit.description).toMatch(/never send/);
     expect(submit.description).toMatch(/language/);

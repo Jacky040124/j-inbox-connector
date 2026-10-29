@@ -24,6 +24,7 @@ Changes must be **additive** and recorded in the root README changelog (see "Rul
 | `agent.ts` | Raft App surface: `buildRaftManifest`, agent action response, approvals (`approvalTicket`, `approvalView`), `agentMediaResult`, owner notices (`ownerNoticeText`, `offlineAlertDue`), room binding (`canBindRoom`, `authorizeRoomAccess`), meta actions `whoami`, `approval_status`, `get_draft_request`, `submit_draft`, `get_delegation_request` and `report_delegation`. |
 | `drafts.ts` | Drafts by agents: `draftMeta` (what the cloud keeps), `draftView` (+ the texts from the computer), `storedDraft`, `raftAgent`, `raftAgentsResult`, ids (`draftRequestID`, `raftAgentID`), `DRAFT_STATUSES`, `ACTIVE_DRAFT_STATUSES`, `DRAFT_DELIVERIES`, limits (`DRAFT_DEADLINE_MS` 30 min, `MAX_DRAFT_INSTRUCTION_LENGTH` 2000, `MAX_ACTIVE_DRAFTS` 50, `MAX_DRAFT_READ` 10, `DRAFT_KEEP_MS` 7 days), the Raft event (`draftEventSummary`, `draftEventPayload`). |
 | `delegations.ts` | Delegations to agents as Raft tasks: `delegationMeta` (what the cloud keeps), `delegationView` (+ the instruction from the computer), `delegationRequestForAgent`, `delegationRequestID` (`dlg_`), channels (`raftChannel`, `CHANNEL_PATTERN`, `normalizeChannel`, `sameChannel`), `delegationTask`, `cleanDelegationReason`, `coerceReportParams`, `DELEGATION_STATUSES` / `SHOWN_` / `OPEN_`, limits (`DELEGATION_DEADLINE_MS` 30 min, `MAX_ACTIVE_DELEGATIONS` 50, `MAX_SHOWN_DELEGATIONS` 200, `MAX_RECENT_CHANNELS` 20, `MAX_DELEGATION_REASON_LENGTH` 200), the Raft event (`delegationEventSummary`, `delegationEventPayload`). `drafts.ts` adds `storedRequestID` (`drq_` or `dlg_`: the connector's one request store). |
+| `uploads.ts` | Files sent from J-Inbox (since 2026-10-29): `uploadID` (`upl_`), `uploadOwner` / `uploadOwnerTag(caller)`, `fileName` / `sanitizeFileName`, `cleanMimeType`, `uploadInfo`, `uploadHead` (POST /api/upload's first line), `uploadBeginParams`, `fileSizeLabel`, limits (`MAX_UPLOAD_BYTES` = `MAX_MEDIA_BYTES` 25 MiB, `UPLOAD_CHUNK_BYTES` 256 KiB, `MAX_UPLOAD_CHUNKS` 100, `AGENT_UPLOAD_FILE_MAX_BYTES` 512 KiB, `UPLOAD_TTL_MS` 1 h, `MAX_STORED_UPLOADS` 60, `MAX_UPLOAD_STORE_BYTES` 256 MiB, `UPLOAD_BEGIN_PER_MINUTE` 10, `UPLOAD_CHUNK_PER_MINUTE` 240, `SEND_WITH_FILE_TIMEOUT_MS` 2 min). See "Files". |
 | `web.ts` | Browser API routes and shapes, CSRF header, `mediaResponseHeaders`, `WEB_HTML_HEADERS`, human and agent session cookies, logout, local-cache rules, upgrade `Origin` checks, `/live` messages. |
 | `auth.ts` | Login with Raft (`startHumanLogin`, `handleRaftCallback`: state + nonce + PKCE for humans, stateless only for proven agents), session lifetimes (`sessionExpired`, `agentSessionMaxAge`), surfaces (`surfaceForPath`, `sessionKindForSurface`, `authorizeSurface`). |
 | `pairing.ts` | Device-code pairing flow, user/device codes, device tokens, `hashToken`, `checkPairConfirm`, `approximateIP`, `PairingGuard` attempt limits. |
@@ -91,12 +92,12 @@ camelCase (like Beeper). Agent writes marked "approval" go through the approval 
 | `unread_summary` | `limit?(1-50, 50)` | `{totalUnreadChats, totalUnreadMessages, items: ChatSummary[] (with preview), truncated}` | | | `GET /v1/chats` (ChatWithPreview) paged, keep `unreadCount>0 \|\| isMarkedUnread`, drop `isArchived` and `isLowPriority` chats (Beeper's inbox view). Not `/v1/chats/search`: it returns `Chat` without `preview` |
 | `read_chat` | `chatID cursor? limit?(1-50, 30)` | `{chat, items: MessageItem[] oldest-first, hasMore, nextCursor}` (nextCursor = older) | | | `GET /v1/chats/{id}`, `GET /v1/chats/{id}/messages?cursor&direction=before` |
 | `search_messages` | `query chatIDs? accountIDs? network? sender?(me/others) dateAfter? dateBefore? limit?(1-20, 20) cursor?` | `{items, chats: {chatID: ChatSummary}, hasMore, nextCursor}` | | | `GET /v1/messages/search` |
-| `draft_reply` | `chatID text(1-10000)` | `{chatID, draftSet: true}` | yes | no | `GET /v1/chats/{id}`; if `draft` is non-empty answer `CONFLICT` (never clear the owner's half-typed text); else `PATCH /v1/chats/{id}` `{draft:{text}}`; Beeper 409/422 -> `CONFLICT` |
-| `send_message` | `chatID text(1-10000) replyToMessageID? idempotencyKey?` | `{chatID, pendingMessageID}` | yes | **yes** (10/min) | `POST /v1/chats/{id}/messages` |
+| `draft_reply` | `chatID text(1-10000) attachmentId?` (agents only: their own upload, see "Files") | `{chatID, draftSet: true}` | yes | no | `GET /v1/chats/{id}`; if `draft` is non-empty answer `CONFLICT` (never clear the owner's half-typed text); else `PATCH /v1/chats/{id}` `{draft:{text}}`; Beeper 409/422 -> `CONFLICT` |
+| `send_message` | `chatID text?(1-10000) replyToMessageID? idempotencyKey? attachmentId?` (text or attachmentId; attachmentId: the owner only, see "Files") | `{chatID, pendingMessageID}` | yes | **yes** (10/min; agents may not attach files) | `POST /v1/chats/{id}/messages`; with a file first `POST /v1/assets/upload` (multipart), then the message with `attachment {uploadID, fileName, mimeType}` |
 | `react` | `chatID messageID reactionKey remove? idempotencyKey?` | `{chatID, messageID, reactionKey, removed?: true}` | yes | **yes** (30/min) | `POST .../messages/{mid}/reactions`; `remove:true` -> `DELETE .../reactions/{key}` (the owner's own reaction; none is Beeper's `NOT_FOUND`). `read_chat` marks the owner's reactions `isSelf: true` |
 | `mark_read` | `chatID messageID? read?(true)` (`read:false` marks unread) | `{chatID, read}` | yes | **yes** | `POST /v1/chats/{id}/read` or `/unread` |
 | `archive` | `chatID archived?(true)` | `{chatID, archived}` | yes | **yes** | `POST /v1/chats/{id}/archive` |
-| `compose_email` | `accountID (gmail:<address>) to[1-50] cc?[0-50] subject(0-500, single line) text(1-10000) idempotencyKey?` (bare addresses, `emailRecipient`) | `{accountID, chatID, pendingMessageID}` (a new thread) | yes | **yes** (10/min) | Gmail `users.messages.send` |
+| `compose_email` | `accountID (gmail:<address>) to[1-50] cc?[0-50] subject(0-500, single line) text?(1-10000) idempotencyKey? attachmentId?` (bare addresses, `emailRecipient`; text or attachmentId; attachmentId: the owner only) | `{accountID, chatID, pendingMessageID}` (a new thread) | yes | **yes** (10/min) | Gmail `users.messages.send` |
 | `gmail_connect` | `email refreshToken` | `{accountID, connected: true}` | yes (cloud-only, `humanOnly`) | n/a | Gmail `users.getProfile` (the address must match), then the Keychain |
 | `snooze_chat` | `chatID until` (ISO 8601 with timezone; `snoozeUntilProblem`: 1 min to 7 days ahead, 10 min clock slack) | `{chatID, until}` | yes (cloud) | **yes** (60/min, like `archive`) | none itself: the cloud keeps the snooze (see "Snooze") and runs `read_chat` (limit 1) and `archive` now |
 | `unsnooze_chat` | `chatID` | `{chatID}` | yes (cloud) | **yes** (60/min) | none itself: the cloud runs `archive {archived:false}` and forgets the snooze |
@@ -109,7 +110,9 @@ camelCase (like Beeper). Agent writes marked "approval" go through the approval 
 | `request_delegation` | `chatID agentID channel(#name) instruction(1-2000)` | `delegationView` | yes (cloud, `humanOnly`) | n/a | none itself: see "Delegations" |
 | `cancel_delegation`, `dismiss_delegation` | `requestId` | `delegationView` (cancelled / dismissed) | yes (cloud, `humanOnly`) | n/a | `draft_store_delete` at the connector |
 | `list_delegations` | `chatID?` | `{items: delegationView[], channels: #name[]}` (shown ones, newest first, at most `MAX_SHOWN_DELEGATIONS`; recent channels, at most 20) | (cloud, `humanOnly`) | n/a | the cloud's store, then `draft_store_get` |
-| `draft_store_put` / `_get` / `_set_text` / `_delete` | see `actions.ts` | | (cloud-only, `humanOnly`) | n/a | the connector's local request store (draft texts and, by `dlg_` id, delegation instructions; `_set_text` drafts only) |
+| `draft_store_put` / `_get` / `_set_text` / `_delete` | see `actions.ts` | | (cloud-only, `humanOnly`) | n/a | the connector's local request store (draft texts and, by `dlg_` id, delegation instructions; `_set_text` drafts only, with `attachmentId` + `owner` the agent's upload goes with the draft; `_get` answers it as `attachment`; `_delete` forgets it too) |
+| `upload_store_begin` / `_chunk` / `_commit` / `_delete` | `uploadId owner fileName mimeType size` / `uploadId owner index data(base64, 256 KiB raw)` / `uploadId owner` / `uploadIds[1-60]` | `{uploadId, stored}` / `{uploadId, index, received}` / `uploadInfo` / `{deleted}` | yes (cloud-only, `humanOnly`) | n/a | the connector's upload store (see "Files") |
+| `discard_upload` | `uploadId` | `{uploadId, deleted}` (false: not there, or on an agent's draft) | yes (`humanOnly`) | n/a | the connector's upload store |
 | `get_media` | `url` (an attachment `url` or chat `avatarURL` from another result) | `res` = `{mimeType, size (null if unknown), fileName?}` then `chunk` frames | | | `GET /v1/assets/serve?url=`; `gmail://` URLs: Gmail `messages.attachments.get` |
 
 Notes for implementers:
@@ -218,6 +221,17 @@ sends (or edits, discards, asks again). Nothing is written into Beeper or Gmail 
   `draft_agents {}` keep tabs in step.
 - The connector's store is one for drafts and delegations: `draft_store_put` / `_get` / `_delete`
   take `storedRequestID` (`drq_` or `dlg_`), `draft_store_set_text` a draft's id only.
+- **A file on a draft** (since 2026-10-29, `"attachments.v1"`): the agent uploads one file
+  (`upload_file`, or `upload_begin` / `upload_chunk` / `upload_commit`, see "Files") and passes its
+  `uploadId` as `attachmentId` to `draft_reply` or `submit_draft`. The cloud forwards it to
+  `draft_store_set_text` with `owner: uploadOwnerTag(agent)`, and the connector puts it on the draft
+  only if the upload is finished, the agent's own and on no other draft (`NOT_FOUND` otherwise); it
+  then lives as long as the draft. `list_drafts` answers it as `attachment {uploadId, fileName,
+  mimeType, size}` (read from the computer like the text, absent while it is offline); the page shows
+  it on the card, Send sends `send_message {chatID, text, attachmentId}`, Edit puts it in the
+  composer's chip. Discarded, replaced, sent (`mark_draft_sent`) or 7 days old: the file goes with the
+  draft (`draft_store_delete`, the connector's purge). The cloud keeps no sign of the file (not even
+  that there is one). A connector without `"attachments.v1"`: `NOT_SUPPORTED`.
 
 ### Delegations (`delegations.ts`; cloud actions, agent meta actions; added 2026-10-29)
 
@@ -262,6 +276,62 @@ Raft task for an agent, the chat is finished (marked read), and the owner follow
   number and its channel, an error code or the agent's cleaned reason), and the owner's recent
   channel names. Never the instruction, a title or a network. `/live` `delegation {request:
   delegationMeta}` keeps tabs in step.
+
+### Files (`uploads.ts`; added 2026-10-29)
+
+One file per message, email or agent draft (Beeper takes one attachment per message; Gmail's reply
+and New email take one too, to keep it simple). A file lives only on the owner's computer, in the
+connector's upload store, from its upload until it is sent, discarded or expires; it only passes
+through the cloud, which keeps nothing of it (no bytes, no name, no size, no id) in D1 or Durable
+Object storage, logs or the audit log (`upload.begin` / `upload.commit` as metadata only).
+
+- **Transport: cloud-only connector actions, one `req` per chunk.** `upload_store_begin {uploadId,
+  owner, fileName, mimeType, size}`, then `upload_store_chunk {uploadId, owner, index, data}` for
+  index 0, 1, 2 ... (at most `UPLOAD_CHUNK_BYTES` raw, base64: about 350 KB, well under
+  `MAX_FRAME_BYTES`), each answered before the next is sent (stop-and-wait: the cloud never holds
+  more than one chunk; a slow computer slows the sender), then `upload_store_commit {uploadId, owner}`
+  -> `uploadInfo`. No new frame type: media's `chunk`/`ack` frames stay connector -> cloud only. The
+  cloud mints `uploadId` (`upl_` + 16 random bytes) and sends `owner = uploadOwnerTag(caller)` (a
+  digest of the caller's type and sub, never the sub): every chunk, the commit and an agent's
+  `draft_store_set_text` must name the same owner. The connector checks the order (only the next
+  index), the size (never more than declared; commit needs every byte) and the owner, keeps each file
+  as a 0600 `.bin` in a 0700 `uploads/` directory with a 0600 `index.json`, at most
+  `MAX_STORED_UPLOADS` files and `MAX_UPLOAD_STORE_BYTES` (`TOO_LARGE`), and forgets an upload
+  `UPLOAD_TTL_MS` (1 h) after it began unless it is on a draft (then with the draft, 7 days at most).
+- **The owner** (web page): `POST /api/upload` (`API_ROUTES.upload`; owner session, CSRF header): the
+  body is one line of `uploadHead` JSON `{fileName, mimeType, size}`, `"\n"`, then exactly `size`
+  bytes (the name stays out of URLs and headers). The Worker reads the body as it comes and relays it
+  chunk by chunk; too large (declared or counted), a short or long body: refused, and a begun upload is
+  deleted on the computer (`upload_store_delete`). Answer: `uploadInfo`. Then `send_message {chatID,
+  text?, attachmentId}` or `compose_email {..., attachmentId}`; `discard_upload {uploadId}` when the
+  owner removes the file. The cloud gives such a send `SEND_WITH_FILE_TIMEOUT_MS` (2 min; the
+  connector too) since the computer uploads the file to Beeper or Gmail first.
+- **Agents** (meta actions, owner's agent access on, the agent allowed in Settings > Agents, the
+  computer online with `"attachments.v1"`): `upload_file {fileName, mimeType?, data}` (base64, at
+  most `AGENT_UPLOAD_FILE_MAX_BYTES` 512 KiB raw: one `--data-json` fits a macOS command line), or
+  `upload_begin {fileName, mimeType?, size}` -> `{uploadId, chunkBytes, chunks, expiresAt}`,
+  `upload_chunk {uploadId, index, data}` -> `{uploadId, index, received}` (in order; whitespace in
+  `data` is dropped, so `base64` output that wraps lines works), `upload_commit {uploadId}` ->
+  `uploadInfo`. Agent request bodies may be up to 1 MB for `upload_file` and `upload_chunk`.
+  `UPLOAD_BEGIN_PER_MINUTE` (10, `upload_begin` + `upload_file`) and `UPLOAD_CHUNK_PER_MINUTE` (240)
+  per agent. Names are cleaned with `sanitizeFileName` (the last path segment, no controls, bidi or
+  zero-width characters, no leading dots, at most 200), types with `cleanMimeType` (else
+  `application/octet-stream`). Agents attach their uploads to drafts only: `send_message` /
+  `compose_email` with `attachmentId` from an agent is `NOT_ALLOWED` (refused before any approval).
+- **Sending** (connector): Beeper: `POST /v1/assets/upload` (multipart/form-data: `file`,
+  `fileName`, `mimeType`), then `POST /v1/chats/{id}/messages {text?, replyToMessageID?, attachment:
+  {uploadID, fileName, mimeType}}` (no `text` when there is none). Gmail: the reply-all (same
+  recipients and threading headers) or the new email as `multipart/mixed`: the text/plain part, then
+  the file (`Content-Disposition: attachment; filename="<ASCII fallback>"; filename*=UTF-8''<RFC 2231>`
+  for non-ASCII names, base64). Sent: the upload is deleted. Beeper (or Gmail) refusing it with 400 or
+  422 is `NOT_SUPPORTED` with Beeper's own reason in the message ("This network does not support ...");
+  413 is `TOO_LARGE`; an upload that is gone is `NOT_FOUND` ("Attach it again"). The idempotency key's
+  digest includes `attachmentId` (unchanged for sends without a file).
+- **Capability** `"attachments.v1"`: the connector keeps uploads, sends them and keeps one with a
+  draft. Without it the cloud refuses `POST /api/upload`, the agents' upload actions, `attachmentId`
+  and `discard_upload` with `NOT_SUPPORTED` (nothing reaches the computer); `meResponse.device.
+  capabilities` and `/live` `snapshot` / `presence` `capabilities` tell the page, which then shows no
+  paperclip.
 
 ### Gmail (`gmail.ts`, design/gmail-plan.md)
 
@@ -365,7 +435,8 @@ both                 ping {t} / pong {t}                    every 25 s; 60 s sil
   under `ack` flow control; `"gmail.v1"` = the connector runs Gmail accounts (`gmail_connect`,
   `compose_email`, Gmail chats). The cloud gates Sign in with Google on `"gmail.v1"`; `"drafts.v1"` =
   the connector keeps draft requests' texts (`draft_store_*`); `"delegations.v1"` = its store also
-  takes delegation requests (`dlg_` ids). The cloud gates `request_draft` / `request_delegation` on them.
+  takes delegation requests (`dlg_` ids). The cloud gates `request_draft` / `request_delegation` on them;
+  `"attachments.v1"` = it keeps and sends files (`upload_store_*`, `discard_upload`, `attachmentId`; see "Files").
 - Connector behaviour the cloud may rely on: a duplicate in-flight `req` id is ignored; a `req`
   that arrives while the connector shuts down gets `OFFLINE` and is not dispatched; a queued `req`
   whose deadline has (nearly) passed gets `TIMEOUT` without being dispatched; a `get_media` stream
@@ -412,7 +483,7 @@ both                 ping {t} / pong {t}                    every 25 s; 60 s sil
   `canBindRoom(human, existing)` lets only a server `owner`/`admin` pair, and refuses a second
   owner on an already bound server (`CONFLICT`). `authorizeRoomAccess(principal, binding)` runs on
   every request: humans only reach their own room; agents only the room bound to their server.
-- Meta actions (cloud-only, never forwarded): `whoami`, `approval_status`, `get_draft_request`, `submit_draft` (see "Drafts by agents"), `get_delegation_request`, `report_delegation` (see "Delegations").
+- Meta actions (cloud-only, never forwarded): `whoami`, `approval_status`, `get_draft_request`, `submit_draft` (see "Drafts by agents"), `get_delegation_request`, `report_delegation` (see "Delegations"), `upload_file`, `upload_begin`, `upload_chunk`, `upload_commit` (see "Files").
 
 ## Browser API (`web.ts`)
 
@@ -438,6 +509,7 @@ query): URLs are written to Worker logs, browser history and proxies.
 | GET | `/api/me` | | `meResponse` (user, paired device + online, pendingApprovals) |
 | POST | `/api/actions/{action}` | action params | action result (humans never need approval) |
 | POST | `/api/media` | `mediaRequest {url}` | raw bytes with `mediaResponseHeaders(mimeType)`, or JSON error. The UI shows them via a `blob:` URL |
+| POST | `/api/upload` | `uploadHead` JSON line, `"\n"`, the file's bytes (`application/octet-stream`) | `uploadInfo` (see "Files") |
 | GET | `/api/devices` | | `devicesResponse` |
 | POST | `/api/devices/{id}/revoke` | | `{revoked:true}`, only after the device's live `/connect` socket was closed with 4403 and requests stopped routing to it |
 | GET | `/api/approvals` | | `approvalsResponse` |

@@ -7,10 +7,11 @@
 // atomically on every change; bounded in count and size; a request is forgotten when the cloud says
 // it was handled, or DRAFT_KEEP_MS (7 days) after it was made, whatever happened.
 import { readFileSync } from "node:fs";
-import { DRAFT_KEEP_MS, parse, storedDraft, type StoredDraft } from "@j-inbox/protocol";
+import { DRAFT_KEEP_MS, parse, storedDraft, uploadID, type StoredDraft } from "@j-inbox/protocol";
 import { writeAtomic } from "./config.ts";
 
-type Entry = StoredDraft & { createdAt: number; deadline: number; updatedAt: number };
+/** attachmentId: the upload (uploads.ts) the agent attached to its draft; its name and size live in the upload store. */
+type Entry = Omit<StoredDraft, "attachment"> & { createdAt: number; deadline: number; updatedAt: number; attachmentId?: string };
 
 /** The cloud keeps at most MAX_ACTIVE_DRAFTS (50) drafts and MAX_ACTIVE_DELEGATIONS (50) delegations open; room for those and some that were not purged yet. */
 const MAX_ENTRIES = 200;
@@ -49,10 +50,11 @@ export class DraftStore {
       if (!j || j.v !== 1 || !Array.isArray(j.entries)) return;
       for (const e of j.entries.slice(-this.max)) {
         if (!e || typeof e !== "object") continue;
-        const { createdAt, deadline, updatedAt, ...rest } = e as Record<string, unknown>;
+        const { createdAt, deadline, updatedAt, attachmentId, ...rest } = e as Record<string, unknown>;
         const d = parse(storedDraft, rest);
-        if (!d.ok || ![createdAt, deadline, updatedAt].every((t) => Number.isSafeInteger(t) && (t as number) >= 0)) continue;
-        this.entries.set(d.value.requestId, { ...d.value, createdAt: createdAt as number, deadline: deadline as number, updatedAt: updatedAt as number });
+        if (!d.ok || d.value.attachment || ![createdAt, deadline, updatedAt].every((t) => Number.isSafeInteger(t) && (t as number) >= 0)) continue;
+        if (attachmentId !== undefined && !parse(uploadID, attachmentId).ok) continue;
+        this.entries.set(d.value.requestId, { ...d.value, createdAt: createdAt as number, deadline: deadline as number, updatedAt: updatedAt as number, ...(attachmentId ? { attachmentId: attachmentId as string } : {}) });
       }
     } catch {
       // An unreadable file is ignored (and replaced on the next write): the cloud then sees the requests as gone.
@@ -112,13 +114,41 @@ export class DraftStore {
     return out;
   }
 
-  /** Keep the agent's draft. false: no such draft request here (a delegation has no draft). Throws if it cannot be written. */
-  setText(requestId: string, text: string): boolean {
+  /** The uploads these requests carry (to forget them with the requests). */
+  attachmentsOf(ids: readonly string[]): string[] {
+    const out: string[] = [];
+    for (const id of new Set(ids)) {
+      const a = this.entries.get(id)?.attachmentId;
+      if (a) out.push(a);
+    }
+    return out;
+  }
+
+  /** Is this request here (and not too old)? */
+  has(requestId: string): boolean {
+    const e = this.entries.get(requestId);
+    return !!e && this.now() - e.createdAt < this.keepMs;
+  }
+
+  /** When the request was made (the upload store keeps a draft's file as long as the draft). */
+  createdAt(requestId: string): number | null {
+    return this.entries.get(requestId)?.createdAt ?? null;
+  }
+
+  /** The upload a draft carries, if any. */
+  attachmentOf(requestId: string): string | undefined {
+    return this.entries.get(requestId)?.attachmentId;
+  }
+
+  /** Keep the agent's draft (and the upload it attached, or none). false: no such draft request here (a delegation has no draft). Throws if it cannot be written. */
+  setText(requestId: string, text: string, attachmentId?: string): boolean {
     this.purge();
     const e = this.entries.get(requestId);
     if (!e || !requestId.startsWith("drq_")) return false;
     const before = { ...e };
     e.text = text;
+    if (attachmentId) e.attachmentId = attachmentId;
+    else delete e.attachmentId;
     e.updatedAt = this.now();
     try {
       this.save();

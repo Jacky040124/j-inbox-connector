@@ -19,7 +19,7 @@ import { CursorTooLong, RequestAborted } from "../pager.ts";
 import type { RequestContext } from "../actions.ts";
 import type { GCall, GmailClient } from "./client.ts";
 import { activityMs, header, isDraft, mapGmailMessage, mapGmailThread, threadMessages, type GMessage, type GPart, type GThread } from "./map.ts";
-import { b64urlToBytes, buildMessage, headerText, parseAddressList, rawForGmail, replyAllRecipients, replyReferences, replySubject } from "./mime.ts";
+import { b64urlToBytes, buildMessage, headerText, parseAddressList, rawForGmail, replyAllRecipients, replyReferences, replySubject, type OutgoingFile } from "./mime.ts";
 import { sniffImageType } from "../media.ts";
 
 const META_HEADERS = ["From", "To", "Cc", "Subject", "Date", "Message-ID"];
@@ -321,7 +321,7 @@ export function createGmailSource(o: { email: string; client: GmailClient; scan?
   }
 
   /** The reply-all message for a thread (to its newest message, or to `replyTo`). */
-  async function buildReply(threadId: string, text: string, replyTo: string | undefined, ctx: RequestContext, refuseIfDraft: boolean): Promise<Out<{ raw: string }>> {
+  async function buildReply(threadId: string, text: string, replyTo: string | undefined, ctx: RequestContext, refuseIfDraft: boolean, attachment?: OutgoingFile): Promise<Out<{ raw: string }>> {
     const t = await client.get(client.path(["threads", threadId], { format: "metadata", metadataHeaders: REPLY_HEADERS }), opts(ctx));
     if (!t.ok) return t;
     const thread = t.body as GThread;
@@ -344,7 +344,7 @@ export function createGmailSource(o: { email: string; client: GmailClient; scan?
     const { to, cc } = replyAllRecipients(base, email);
     const refs = replyReferences(base);
     const raw = rawForGmail(
-      buildMessage({ from: email, to, cc, subject: replySubject(base.subject || firstSubject), text, ...(refs.inReplyTo ? { inReplyTo: refs.inReplyTo } : {}), ...(refs.references ? { references: refs.references } : {}), date: new Date(now()) }),
+      buildMessage({ from: email, to, cc, subject: replySubject(base.subject || firstSubject), text, ...(refs.inReplyTo ? { inReplyTo: refs.inReplyTo } : {}), ...(refs.references ? { references: refs.references } : {}), date: new Date(now()), ...(attachment ? { attachment } : {}) }),
     );
     return { ok: true, data: { raw } };
   }
@@ -356,8 +356,9 @@ export function createGmailSource(o: { email: string; client: GmailClient; scan?
     return r.ok ? { ok: true, data: null } : r;
   }
 
-  async function sendReply(threadId: string, text: string, replyTo: string | undefined, ctx: RequestContext): Promise<Out<{ id: string; threadId: string }>> {
-    const b = await buildReply(threadId, text, replyTo, ctx, false);
+  /** A reply-all in the thread; with a file, multipart/mixed (still reply-all, still threaded). */
+  async function sendReply(threadId: string, text: string, replyTo: string | undefined, ctx: RequestContext, attachment?: OutgoingFile): Promise<Out<{ id: string; threadId: string }>> {
+    const b = await buildReply(threadId, text, replyTo, ctx, false, attachment);
     if (!b.ok) return b;
     const r = await client.write(client.path(["messages", "send"]), { raw: b.data.raw, threadId }, opts(ctx));
     if (!r.ok) return r;
@@ -366,10 +367,10 @@ export function createGmailSource(o: { email: string; client: GmailClient; scan?
     return { ok: true, data: { id, threadId: typeof r.body?.threadId === "string" ? r.body.threadId : threadId } };
   }
 
-  async function compose(p: { to: string[]; cc?: string[]; subject: string; text: string }, ctx: RequestContext): Promise<Out<{ id: string; threadId: string }>> {
+  async function compose(p: { to: string[]; cc?: string[]; subject: string; text?: string }, ctx: RequestContext, attachment?: OutgoingFile): Promise<Out<{ id: string; threadId: string }>> {
     let raw: string;
     try {
-      raw = rawForGmail(buildMessage({ from: email, to: p.to.map((a) => ({ address: a })), cc: (p.cc ?? []).map((a) => ({ address: a })), subject: p.subject, text: p.text, date: new Date(now()) }));
+      raw = rawForGmail(buildMessage({ from: email, to: p.to.map((a) => ({ address: a })), cc: (p.cc ?? []).map((a) => ({ address: a })), subject: p.subject, text: p.text ?? "", date: new Date(now()), ...(attachment ? { attachment } : {}) }));
     } catch {
       return fail("BAD_PARAMS", "An address is not valid.");
     }

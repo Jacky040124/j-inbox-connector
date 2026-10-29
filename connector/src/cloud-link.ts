@@ -14,6 +14,7 @@ import {
   MAX_CONCURRENT_MEDIA_STREAMS,
   MAX_INFLIGHT_REQUESTS,
   MEDIA_TIMEOUT_MS,
+  SEND_WITH_FILE_TIMEOUT_MS,
   PROTOCOL_VERSION,
   backoffDelay,
   encodeFrame,
@@ -402,7 +403,9 @@ export class CloudLink {
     const e: Entry = { id: f.id, action: f.action, gen: this.gen, ctl: new AbortController(), answered: false, started: false, settled: false, media, t0: Date.now(), caller: f.caller };
     this.pending.set(f.id, e);
     if (media) this.mediaActive++;
-    const timeoutMs = media ? MEDIA_TIMEOUT_MS : (this.welcome?.requestTimeoutMs ?? 15_000);
+    // A send with a file uploads it to Beeper (or Gmail) first: the cloud gives it longer, so do we.
+    const withFile = (f.action === "send_message" || f.action === "compose_email") && typeof f.params.attachmentId === "string";
+    const timeoutMs = media ? MEDIA_TIMEOUT_MS : withFile ? SEND_WITH_FILE_TIMEOUT_MS : (this.welcome?.requestTimeoutMs ?? 15_000);
     const margin = this.o.marginMs ?? Math.min(1000, Math.floor(timeoutMs / 10));
     const ctx = requestContext({ timeoutMs, marginMs: margin, cancel: e.ctl.signal });
     // Watchdog: answer before the cloud gives up, whatever the action is doing.

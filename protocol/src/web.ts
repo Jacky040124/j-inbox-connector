@@ -61,6 +61,13 @@ export const API_ROUTES = {
    * The web UI shows the bytes through a blob: object URL.
    */
   media: { method: "POST", path: "/api/media" },
+  /**
+   * Body (application/octet-stream): one line of uploadHead JSON {fileName, mimeType, size}, "\n",
+   * then exactly `size` bytes of the file. The file name stays out of the URL and the headers. The
+   * Worker relays the bytes to the owner's computer in chunks (upload_store_*), keeping none of it.
+   * Response: apiResponse(uploadInfo). Owner only; needs "attachments.v1" (NOT_SUPPORTED otherwise).
+   */
+  upload: { method: "POST", path: "/api/upload" },
   devices: { method: "GET", path: "/api/devices" },
   /**
    * Before answering {revoked:true} the room closes the device's live /connect socket with 4403
@@ -257,6 +264,8 @@ export function apiResponse<T>(data: Schema<T>) {
 }
 
 const name = nullable(string({ min: 0, max: 200 }));
+/** hello.capabilities as the web sees them (CAPABILITIES values). */
+export const connectorCapabilities = array(string({ min: 1, max: 64, pattern: /^[a-z0-9._-]+$/ }), { max: 32 });
 
 export const meResponse = object({
   user: object({
@@ -267,7 +276,15 @@ export const meResponse = object({
     serverSlug: string({ min: 1, max: 100 }),
   }),
   device: nullable(
-    object({ id: ownId, name: string({ min: 1, max: 64 }), online: boolean(), lastSeenAt: nullable(isoDateTime()), connectorVersion: nullable(versionString) }),
+    object({
+      id: ownId,
+      name: string({ min: 1, max: 64 }),
+      online: boolean(),
+      lastSeenAt: nullable(isoDateTime()),
+      connectorVersion: nullable(versionString),
+      /** What the online connector can do (its hello.capabilities, e.g. "attachments.v1"); absent while it is offline. */
+      capabilities: optional(connectorCapabilities),
+    }),
   ),
   pendingApprovals: integer({ min: 0, max: 10_000 }),
 });
@@ -315,9 +332,11 @@ export const liveServerMessage = discriminated("type", {
     connectorVersion: nullable(versionString),
     beeper: nullable(beeperHealth),
     pendingApprovals: integer({ min: 0, max: 10_000 }),
+    /** The online connector's capabilities (added 2026-10-29: the web hides what it cannot do). */
+    capabilities: optional(connectorCapabilities),
   }),
   /** Connector connected or disconnected. On online=true after offline, refetch what is on screen. */
-  presence: object({ type: literal("presence"), online: boolean(), lastSeenAt: nullable(isoDateTime()) }),
+  presence: object({ type: literal("presence"), online: boolean(), lastSeenAt: nullable(isoDateTime()), capabilities: optional(connectorCapabilities) }),
   /** A connector event relayed as-is (metadata only). */
   event: object({ type: literal("event"), event: eventFrame }),
   /** An approval was created or changed. */

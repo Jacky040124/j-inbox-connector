@@ -53,8 +53,10 @@ const JSON_LIMITS = { maxDepth: 32, maxKeys: 50_000 };
  * (ChunkWindow). "gmail.v1": the connector runs Gmail accounts (gmail_connect, compose_email, Gmail chats).
  * "drafts.v1": the connector keeps draft requests' texts (draft_store_put / _get / _set_text / _delete).
  * "delegations.v1": its request store also takes delegation requests (dlg_ ids) in draft_store_put / _get / _delete.
+ * "attachments.v1": it keeps uploads (upload_store_*, discard_upload), sends them (send_message /
+ * compose_email attachmentId) and keeps one with a draft (draft_store_set_text attachmentId).
  */
-export const CAPABILITIES = { media: "media.v1", gmail: "gmail.v1", drafts: "drafts.v1", delegations: "delegations.v1" } as const;
+export const CAPABILITIES = { media: "media.v1", gmail: "gmail.v1", drafts: "drafts.v1", delegations: "delegations.v1", attachments: "attachments.v1" } as const;
 
 export const helloFrame = object({
   type: literal("hello"),

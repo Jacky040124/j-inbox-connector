@@ -46,6 +46,7 @@ import {
   mediaHead,
   messageID,
   messageItem,
+  mimeType,
   networkName,
   versionString,
 } from "./model.ts";
@@ -66,6 +67,7 @@ import {
   storedRequestID,
 } from "./drafts.ts";
 import { MAX_RECENT_CHANNELS, MAX_SHOWN_DELEGATIONS, delegationInstruction, delegationRequestID, delegationView, raftChannel } from "./delegations.ts";
+import { MAX_STORED_UPLOADS, MAX_UPLOAD_BYTES, MAX_UPLOAD_CHUNKS, fileName, uploadChunkData, uploadID, uploadInfo, uploadOwner } from "./uploads.ts";
 
 
 type Shape = Record<string, Schema<any>>;
@@ -98,6 +100,8 @@ export interface ActionDef<P extends Shape, R> {
   readonly rateLimitPerMinute?: number;
   /** The Beeper Client API endpoint(s) the connector calls. */
   readonly beeper: string;
+  /** A check across params (e.g. text or a file), run by parseActionParams: an error message or null. */
+  readonly check?: (p: InferShape<P>) => string | null;
 }
 
 function define<P extends Shape, R, const C extends boolean | undefined = undefined>(def: ActionDef<P, R> & { cloud?: C }): ActionDef<P, R> & (C extends true ? { readonly cloud: true } : {}) {
@@ -132,6 +136,10 @@ export async function scopeIdempotencyKey(caller: { type: "human" | "agent"; sub
 export const failedSource = object({ source: enumOf(["beeper", "gmail"] as const), accountID: optional(accountID), error: errorBody });
 const failedSources = optional(array(failedSource, { max: MAX_ACCOUNTS + 1 }));
 const recipients = (min: number) => array(emailRecipient, { min, max: 50 });
+
+/** send_message and compose_email: a text, a file, or both. */
+const textOrFile = (p: { text?: string; attachmentId?: string }) => (p.text === undefined && p.attachmentId === undefined ? "text is required (or attachmentId)" : null);
+const ATTACHMENT_DOC = `One file to send with it: the uploadId of a finished upload (at most ${MAX_UPLOAD_BYTES / (1024 * 1024)} MiB). Owner only, from the J-Inbox web page; agents attach files to a draft instead (draft_reply attachmentId)`;
 
 const IDEMPOTENCY_DOC = "Optional key (8-64 of A-Z a-z 0-9 _ -). Send the same key when you retry after TIMEOUT or UNKNOWN_OUTCOME so it is not done twice";
 const ARRAY_DOC = " (JSON array: pass it with --data-json, raft --param is text-only)";
@@ -270,9 +278,13 @@ export const ACTIONS = {
 
   draft_reply: define({
     description:
-      "Draft a reply without sending it. For agents it becomes a J-Inbox draft card in that chat (Send / Edit / Discard for the owner, the chat goes to Unread); nothing is written into Beeper or Gmail. If the owner asked you for this chat's draft, it answers that request. Fails with CONFLICT while the chat has an open draft from someone else. The owner decides whether to send.",
-    params: object({ chatID, text: sendText }),
-    paramDocs: { chatID: "Chat ID", text: "Draft text (plain text or Markdown)" },
+      "Draft a reply without sending it. For agents it becomes a J-Inbox draft card in that chat (Send / Edit / Discard for the owner, the chat goes to Unread); nothing is written into Beeper or Gmail. If the owner asked you for this chat's draft, it answers that request. To attach one file, upload it first (upload_file, or upload_begin / upload_chunk / upload_commit) and pass its uploadId as attachmentId. Fails with CONFLICT while the chat has an open draft from someone else. The owner decides whether to send.",
+    params: object({ chatID, text: sendText, attachmentId: optional(uploadID) }),
+    paramDocs: {
+      chatID: "Chat ID",
+      text: "Draft text (plain text or Markdown)",
+      attachmentId: "Optional: one file for the owner to send with the draft, the uploadId from upload_file or upload_commit (your own upload). Kept on the owner's computer with the draft",
+    },
     defaults: {},
     result: object({ chatID, draftSet: literal(true) }),
     write: true,
@@ -284,8 +296,14 @@ export const ACTIONS = {
 
   send_message: define({
     description: "Send a text message, optionally as a reply. In a Gmail chat this is a plain-text reply-all in the thread. Agents need the owner's approval.",
-    params: object({ chatID, text: sendText, replyToMessageID: optional(messageID), idempotencyKey: optional(idempotencyKey) }),
-    paramDocs: { chatID: "Chat ID", text: "Message text (plain text or Markdown)", replyToMessageID: "Message ID to reply to", idempotencyKey: IDEMPOTENCY_DOC },
+    params: object({ chatID, text: optional(sendText), replyToMessageID: optional(messageID), idempotencyKey: optional(idempotencyKey), attachmentId: optional(uploadID) }),
+    paramDocs: {
+      chatID: "Chat ID",
+      text: "Message text (plain text or Markdown); may be left out when attachmentId is given",
+      replyToMessageID: "Message ID to reply to",
+      idempotencyKey: IDEMPOTENCY_DOC,
+      attachmentId: ATTACHMENT_DOC,
+    },
     defaults: {},
     result: object({ chatID, pendingMessageID: messageID }),
     write: true,
@@ -293,7 +311,8 @@ export const ACTIONS = {
     streamed: false,
     timeoutMs: REQUEST_TIMEOUT_MS,
     rateLimitPerMinute: 10,
-    beeper: "POST /v1/chats/{chatID}/messages",
+    beeper: "POST /v1/chats/{chatID}/messages; with attachmentId first POST /v1/assets/upload (multipart), then the message with attachment {uploadID, fileName, mimeType}",
+    check: textOrFile,
   }),
 
   react: define({
@@ -360,16 +379,18 @@ export const ACTIONS = {
       to: recipients(1),
       cc: optional(recipients(0)),
       subject: string({ min: 0, max: 500 }),
-      text: sendText,
+      text: optional(sendText),
       idempotencyKey: optional(idempotencyKey),
+      attachmentId: optional(uploadID),
     }),
     paramDocs: {
       accountID: "The Gmail account to send from: gmail:<address> (from status.accounts)",
       to: "Recipient addresses, 1-50" + ARRAY_DOC,
       cc: "Cc addresses, up to 50" + ARRAY_DOC,
       subject: "Subject line (may be empty)",
-      text: "Body, plain text",
+      text: "Body, plain text; may be left out when attachmentId is given",
       idempotencyKey: IDEMPOTENCY_DOC,
+      attachmentId: ATTACHMENT_DOC,
     },
     defaults: {},
     result: object({ accountID, chatID, pendingMessageID: messageID }),
@@ -378,7 +399,8 @@ export const ACTIONS = {
     streamed: false,
     timeoutMs: REQUEST_TIMEOUT_MS,
     rateLimitPerMinute: 10,
-    beeper: "none (Gmail users.messages.send)",
+    beeper: "none (Gmail users.messages.send; with attachmentId a multipart/mixed message)",
+    check: textOrFile,
   }),
 
   gmail_connect: define({
@@ -661,9 +683,9 @@ export const ACTIONS = {
   }),
 
   draft_store_set_text: define({
-    description: "Internal: keep the agent's draft for a request on the owner's computer (NOT_FOUND if the request is not there).",
-    params: object({ requestId: draftRequestID, text: draftText }),
-    paramDocs: { requestId: "The request id", text: "The draft" },
+    description: "Internal: keep the agent's draft for a request on the owner's computer (NOT_FOUND if the request is not there). With attachmentId the upload goes with the draft (NOT_FOUND unless it is finished and owner's).",
+    params: object({ requestId: draftRequestID, text: draftText, attachmentId: optional(uploadID), owner: optional(uploadOwner) }),
+    paramDocs: { requestId: "The request id", text: "The draft", attachmentId: "A finished upload to keep with the draft", owner: "uploadOwnerTag of the agent: the upload must be its own" },
     defaults: {},
     result: object({ requestId: draftRequestID, stored: literal(true) }),
     write: true,
@@ -673,6 +695,7 @@ export const ACTIONS = {
     streamed: false,
     timeoutMs: REQUEST_TIMEOUT_MS,
     beeper: "none (the connector's local draft store)",
+    check: (p) => ((p.attachmentId === undefined) !== (p.owner === undefined) ? "attachmentId and owner go together" : null),
   }),
 
   draft_store_delete: define({
@@ -688,6 +711,83 @@ export const ACTIONS = {
     streamed: false,
     timeoutMs: REQUEST_TIMEOUT_MS,
     beeper: "none (the connector's local draft store)",
+  }),
+
+  // The connector's upload store (uploads.ts): files the owner or an agent is sending, on the owner's
+  // computer only. Cloud-only: the room sends the chunks it relays, one req per chunk.
+
+  upload_store_begin: define({
+    description: "Internal: start keeping a file on the owner's computer (its name, type and size; the bytes follow in upload_store_chunk).",
+    params: object({ uploadId: uploadID, owner: uploadOwner, fileName, mimeType, size: integer({ min: 0, max: MAX_UPLOAD_BYTES }) }),
+    paramDocs: { uploadId: "The upload id (upl_)", owner: "uploadOwnerTag of the caller", fileName: "The file's name", mimeType: "Its type", size: "Its size in bytes" },
+    defaults: {},
+    result: object({ uploadId: uploadID, stored: literal(true) }),
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    cloudOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    beeper: "none (the connector's local upload store)",
+  }),
+
+  upload_store_chunk: define({
+    description: "Internal: the next piece of an upload's bytes (index 0, 1, 2 ... in order, at most 256 KiB each).",
+    params: object({ uploadId: uploadID, owner: uploadOwner, index: integer({ min: 0, max: MAX_UPLOAD_CHUNKS - 1 }), data: uploadChunkData }),
+    paramDocs: { uploadId: "The upload id", owner: "uploadOwnerTag of the caller", index: "This chunk's number, from 0", data: "The bytes, base64" },
+    defaults: {},
+    result: object({ uploadId: uploadID, index: integer({ min: 0, max: MAX_UPLOAD_CHUNKS - 1 }), received: integer({ min: 0, max: MAX_UPLOAD_BYTES }) }),
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    cloudOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    beeper: "none (the connector's local upload store)",
+  }),
+
+  upload_store_commit: define({
+    description: "Internal: every byte of an upload is there (BAD_PARAMS if not): it may now be sent or attached to a draft.",
+    params: object({ uploadId: uploadID, owner: uploadOwner }),
+    paramDocs: { uploadId: "The upload id", owner: "uploadOwnerTag of the caller" },
+    defaults: {},
+    result: uploadInfo,
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    cloudOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    beeper: "none (the connector's local upload store)",
+  }),
+
+  upload_store_delete: define({
+    description: "Internal: forget uploads (their files) on the owner's computer.",
+    params: object({ uploadIds: array(uploadID, { min: 1, max: MAX_STORED_UPLOADS }) }),
+    paramDocs: { uploadIds: "Upload ids" },
+    defaults: {},
+    result: object({ deleted: integer({ min: 0, max: MAX_STORED_UPLOADS }) }),
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    cloudOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    beeper: "none (the connector's local upload store)",
+  }),
+
+  discard_upload: define({
+    description: "Forget a file the owner attached in the web page and then removed (one on an agent's draft stays with the draft). Owner only.",
+    params: object({ uploadId: uploadID }),
+    paramDocs: { uploadId: "uploadId from POST /api/upload" },
+    defaults: {},
+    result: object({ uploadId: uploadID, deleted: boolean() }),
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    beeper: "none (the connector's local upload store)",
   }),
 
   get_media: define({
@@ -735,6 +835,8 @@ export function parseActionParams<A extends ActionName>(name: A, raw: unknown): 
   // Validate again after merging so a bad default can never reach the connector.
   const merged = parse(def.params, { ...def.defaults, ...r.value });
   if (!merged.ok) return merged;
+  const problem = def.check?.(merged.value as never);
+  if (problem) return { ok: false, issues: [{ path: [], message: problem }] };
   return { ok: true, value: merged.value as ActionParams<A> };
 }
 
@@ -751,9 +853,13 @@ const INT_RE = /^-?(0|[1-9]\d{0,15})$/;
  * strict validation rejects it afterwards.
  */
 export function coerceAgentParams(name: ActionName, raw: unknown): Record<string, unknown> {
+  return coerceParams(isActionName(name) ? (ACTIONS[name].params.shape as Record<string, Schema<unknown>>) : {}, raw);
+}
+
+/** coerceAgentParams for any params shape (the agent meta actions' too). */
+export function coerceParams(shape: Record<string, Schema<unknown>>, raw: unknown): Record<string, unknown> {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
   const out: Record<string, unknown> = {};
-  const shape: Record<string, Schema<unknown>> = isActionName(name) ? (ACTIONS[name].params.shape as Record<string, Schema<unknown>>) : {};
   for (const key of Object.keys(raw)) {
     const v = (raw as Record<string, unknown>)[key];
     const meta = Object.prototype.hasOwnProperty.call(shape, key) ? shape[key]!.meta : undefined;

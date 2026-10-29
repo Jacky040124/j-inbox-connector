@@ -1,10 +1,11 @@
 // Minimal HTTP client for the local Beeper Client API. Encodes every id path segment, never
 // follows redirects (the bearer token must not travel), bounds time and body size, and maps
 // failures to protocol error codes without echoing anything Beeper said.
-import { makeError, type ErrorBody, type ErrorCode } from "@j-inbox/protocol";
+import { makeError, sanitizeLine, type ErrorBody, type ErrorCode } from "@j-inbox/protocol";
 
 export type BeeperClientOptions = { baseURL: string; token: string; timeoutMs?: number; maxBodyBytes?: number; fetchImpl?: typeof fetch };
-export type BeeperCall = { ok: true; status: number; body: any } | { ok: false; error: ErrorBody };
+/** `detail`: on a 4xx, Beeper's own one-line reason (its `message`), for refusals the owner should read (a file a network does not take). */
+export type BeeperCall = { ok: true; status: number; body: any } | { ok: false; error: ErrorBody; detail?: string };
 /** The request's cancel/deadline signal. Already aborted: the call is not made (TIMEOUT). */
 export type CallOptions = { signal?: AbortSignal };
 export type BeeperClient = {
@@ -13,6 +14,11 @@ export type BeeperClient = {
   get(pathAndQuery: string, o?: CallOptions): Promise<BeeperCall>;
   /** A state-changing call: lost answers become UNKNOWN_OUTCOME, never a retryable code. */
   write(method: "POST" | "PATCH" | "PUT" | "DELETE", path: string, body?: unknown, o?: CallOptions): Promise<BeeperCall>;
+  /**
+   * A multipart/form-data POST (POST /v1/assets/upload). Not a write: a temporary upload is seen by
+   * nobody, so a lost answer is BEEPER_DOWN or TIMEOUT and the message was not sent.
+   */
+  upload(path: string, form: FormData, o?: CallOptions): Promise<BeeperCall>;
   /**
    * A GET whose body the caller streams (get_media). The client's timeout covers only the wait
    * for the response head; after that the caller's signal governs. Non-2xx answers are failures.
@@ -54,9 +60,20 @@ const MESSAGES: Partial<Record<ErrorCode, string>> = {
   NOT_FOUND: "Not found in Beeper.",
 };
 
-function fail(f: Failure): BeeperCall {
+function fail(f: Failure, detail?: string): BeeperCall {
   const code = beeperErrorCode(f);
-  return { ok: false, error: makeError(code, MESSAGES[code] ?? (f.status ? `Beeper answered HTTP ${f.status}.` : "Beeper request failed.")) };
+  return { ok: false, error: makeError(code, MESSAGES[code] ?? (f.status ? `Beeper answered HTTP ${f.status}.` : "Beeper request failed.")), ...(detail ? { detail } : {}) };
+}
+
+/** Beeper's error body is {code, message}: the message as one clean line, or undefined. */
+function reasonIn(text: string): string | undefined {
+  try {
+    const j = JSON.parse(text);
+    const m = j && typeof j === "object" ? (j.message ?? j.error) : undefined;
+    return typeof m === "string" ? sanitizeLine(m, 200) || undefined : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function networkKind(e: unknown): "refused" | "timeout" | "other" {
@@ -106,10 +123,12 @@ export function createBeeperClient(o: BeeperClientOptions): BeeperClient {
     if (url.origin !== base.origin) return fail({ network: "other", write });
     if (signal?.aborted) return fail({ network: "not_sent", write });
     const headers: Record<string, string> = { authorization: `Bearer ${o.token}`, accept: "application/json" };
-    if (body !== undefined) headers["content-type"] = "application/json";
+    const form = body instanceof FormData;
+    // FormData sets its own multipart content type with the boundary.
+    if (body !== undefined && !form) headers["content-type"] = "application/json";
     let res: Response;
     try {
-      res = await doFetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), redirect: "manual", signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs) });
+      res = await doFetch(url, { method, headers, body: body === undefined ? undefined : form ? body : JSON.stringify(body), redirect: "manual", signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs) });
     } catch (e) {
       return fail({ network: networkKind(e), write });
     }
@@ -121,7 +140,7 @@ export function createBeeperClient(o: BeeperClientOptions): BeeperClient {
     } catch (e) {
       return fail({ network: networkKind(e), write });
     }
-    if (res.status < 200 || res.status > 299) return fail({ status: res.status, write });
+    if (res.status < 200 || res.status > 299) return fail({ status: res.status, write }, res.status >= 400 && res.status < 500 ? reasonIn(text) : undefined);
     if (res.status === 204 || text === "") return { ok: true, status: res.status, body: null };
     try {
       return { ok: true, status: res.status, body: JSON.parse(text) };
@@ -161,5 +180,6 @@ export function createBeeperClient(o: BeeperClientOptions): BeeperClient {
     chatPath: (chatID, ...rest) => ["/v1/chats", encodeURIComponent(chatID), ...rest.map(encodeURIComponent)].join("/"),
     get: (p, o) => call("GET", p, undefined, false, o?.signal),
     write: (method, p, body, o) => call(method, p, body, true, o?.signal),
+    upload: (p, form, o) => call("POST", p, form, false, o?.signal),
   };
 }

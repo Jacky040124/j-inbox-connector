@@ -155,6 +155,40 @@ describe("Gmail", () => {
     const none = await gmail("messages/send", at, { method: "POST", body: JSON.stringify({ raw: b64urlEncode(new TextEncoder().encode("Subject: x\r\n\r\nhi")) }) });
     expect(none.status).toBe(400);
   });
+  test("a multipart/mixed send keeps its file: the name (RFC 2231) and bytes in sent(), an attachment in the message", async () => {
+    const at = await accessToken();
+    const b = "=_jinbox_test";
+    const pdf64 = btoa(String.fromCharCode(...PDF_BYTES));
+    const raw = [
+      `From: ${OWNER_EMAIL}`,
+      "To: alice@example.com",
+      "Subject: The quote",
+      "MIME-Version: 1.0",
+      `Content-Type: multipart/mixed; boundary="${b}"`,
+      "",
+      `--${b}`,
+      "Content-Type: text/plain; charset=UTF-8",
+      "Content-Transfer-Encoding: base64",
+      "",
+      btoa("Here it is"),
+      `--${b}`,
+      'Content-Type: application/pdf; name="Quote.pdf"',
+      "Content-Disposition: attachment; filename=\"Quote.pdf\"; filename*=UTF-8''%E6%8A%A5%E4%BB%B7%20Quote.pdf",
+      "Content-Transfer-Encoding: base64",
+      "",
+      pdf64,
+      `--${b}--`,
+      "",
+    ].join("\r\n");
+    const sent = await gmail("messages/send", at, { method: "POST", body: JSON.stringify({ raw: b64urlEncode(new TextEncoder().encode(raw)) }) });
+    expect(sent.status).toBe(200);
+    const d = g.sent().at(-1)!;
+    expect(d.text).toBe("Here it is");
+    expect(d.attachments).toEqual([expect.objectContaining({ fileName: "报价 Quote.pdf", mimeType: "application/pdf", bytes: PDF_BYTES })]);
+    const m = await gmail(`messages/${sent.body.id}?format=full`, at);
+    const part = m.body.payload.parts.find((p: any) => p.filename === "报价 Quote.pdf");
+    expect(b64urlDecode((await gmail(`messages/${sent.body.id}/attachments/${part.body.attachmentId}`, at)).body.data)).toEqual(PDF_BYTES);
+  });
   test("modify, drafts and history; a too-old startHistoryId is 404", async () => {
     const at = await accessToken();
     const start = (await gmail("profile", at)).body.historyId;

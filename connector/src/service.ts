@@ -13,6 +13,7 @@ import { createDispatcher } from "./dispatcher.ts";
 import { BeeperEventStream, HealthMonitor, Reconciler } from "./events.ts";
 import { FileIdempotencyJournal } from "./idempotency.ts";
 import { DraftStore } from "./drafts.ts";
+import { UploadStore } from "./uploads.ts";
 import type { SecretStore } from "./secrets.ts";
 import { cloudTokenRefresher } from "./gmail/client.ts";
 import { createGmailService } from "./gmail/service.ts";
@@ -123,7 +124,9 @@ export async function startService(o: ServiceOptions): Promise<Service> {
     log: (m) => log(m),
     onLifecycle: (e) => audit.lifecycle(e),
   });
-  const dispatcher = createDispatcher({ actions, client, assets, gmail, idempotency, drafts: new DraftStore({ path: o.paths.draftsFile }) });
+  const drafts = new DraftStore({ path: o.paths.draftsFile });
+  const uploads = new UploadStore({ dir: o.paths.uploadsDir, draftAlive: (id) => drafts.has(id) });
+  const dispatcher = createDispatcher({ actions, client, assets, gmail, idempotency, drafts, uploads });
 
   let link: CloudLink;
   const send = (f: EventFrame) => link.sendEvent(f);
@@ -211,6 +214,9 @@ export async function startService(o: ServiceOptions): Promise<Service> {
   const flushTimer = setInterval(() => {
     try {
       assets.flush();
+    } catch {}
+    try {
+      uploads.purge();
     } catch {}
   }, 60_000);
 

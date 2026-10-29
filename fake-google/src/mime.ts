@@ -109,7 +109,30 @@ export type ParsedMessage = {
   text: string;
   contentType: string;
   transferEncoding: string;
+  /** Parts sent as attachments (Content-Disposition: attachment), the file name decoded (RFC 2231 or 2047). */
+  attachments?: SentFile[];
 };
+
+export type SentFile = { fileName: string; mimeType: string; bytes: Uint8Array; disposition: string; contentType: string };
+
+/** A parameter of a header (filename="a", filename*=UTF-8''%E4%BD%A0, name=...), decoded. */
+function headerParam(v: string, name: string): string | null {
+  const ext = new RegExp(`(?:^|;)\\s*${name}\\*=([^;]*)`, "i").exec(v)?.[1];
+  if (ext) {
+    const m = /^([^']*)'[^']*'(.*)$/.exec(ext.trim());
+    if (m) {
+      const bytes = Uint8Array.from(m[2]!.replace(/%([0-9A-Fa-f]{2})/g, (_x, h: string) => String.fromCharCode(parseInt(h, 16))), (c) => c.charCodeAt(0));
+      try {
+        return new TextDecoder(m[1] || "utf-8").decode(bytes);
+      } catch {
+        return null;
+      }
+    }
+  }
+  const plain = new RegExp(`(?:^|;)\\s*${name}=("((?:[^"\\\\]|\\\\.)*)"|[^;\\s]*)`, "i").exec(v);
+  if (!plain) return null;
+  return decodeHeader(plain[2] !== undefined ? plain[2].replace(/\\(.)/g, "$1") : plain[1]!);
+}
 
 function unfold(head: string): Header[] {
   const out: Header[] = [];
@@ -154,10 +177,24 @@ export function parseRaw(bytes: Uint8Array): ParsedMessage | null {
   if (/^multipart\//i.test(contentType)) {
     const boundary = /boundary="?([^";]+)"?/i.exec(contentType)?.[1];
     if (!boundary) return null;
-    const first = body.split(`--${boundary}`).find((p) => /content-type:\s*text\/plain/i.test(p));
-    if (!first) return { headers, text: "", contentType, transferEncoding };
+    const parts = body.split(`--${boundary}`).slice(1).filter((p) => !p.startsWith("--"));
+    const attachments: SentFile[] = [];
+    for (const part of parts) {
+      const split2 = part.replace(/^\r\n/, "").indexOf("\r\n\r\n");
+      if (split2 < 0) continue;
+      const ph = unfold(part.replace(/^\r\n/, "").slice(0, split2));
+      const pget = (n: string) => ph.find((h) => h.name.toLowerCase() === n)?.value ?? "";
+      const disposition = pget("content-disposition");
+      if (!/^attachment/i.test(disposition)) continue;
+      const data = b64urlDecode(part.replace(/^\r\n/, "").slice(split2 + 4).replace(/\s+/g, ""));
+      if (!data) return null;
+      const ct = pget("content-type");
+      attachments.push({ fileName: headerParam(disposition, "filename") ?? headerParam(ct, "name") ?? "", mimeType: ct.split(";")[0]!.trim().toLowerCase(), bytes: data, disposition, contentType: ct });
+    }
+    const first = parts.find((p) => /content-type:\s*text\/plain/i.test(p) && !/content-disposition:\s*attachment/i.test(p));
+    if (!first) return { headers, text: "", contentType, transferEncoding, attachments };
     const inner = parseRaw(Uint8Array.from(first.replace(/^\r\n/, ""), (c) => c.charCodeAt(0)));
-    return inner ? { headers, text: inner.text, contentType, transferEncoding } : null;
+    return inner ? { headers, text: inner.text, contentType, transferEncoding, attachments } : null;
   }
   const latinBytes = (s: string) => Uint8Array.from(s, (c) => c.charCodeAt(0) & 0xff);
   let data: Uint8Array;

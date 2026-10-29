@@ -11,6 +11,7 @@ import { errorBody } from "./error-schema.ts";
 import { MAX_NAME_LENGTH, MAX_SEND_TEXT_LENGTH } from "./limits.ts";
 import { chatID } from "./model.ts";
 import { sanitizeLine } from "./textutil.ts";
+import { uploadInfo } from "./uploads.ts";
 
 /** An agent that was asked has this long to submit its draft; then the request expires. */
 export const DRAFT_DEADLINE_MS = 30 * 60_000;
@@ -117,6 +118,8 @@ export const draftView = object({
   instruction: optional(draftInstruction),
   /** drafted: the agent's text, read from the owner's computer. */
   text: optional(draftText),
+  /** drafted: the file the agent attached (since "attachments.v1"), its name and size read from the owner's computer. */
+  attachment: optional(uploadInfo),
 });
 export type DraftView = Infer<typeof draftView>;
 
@@ -127,8 +130,8 @@ export type DraftView = Infer<typeof draftView>;
  */
 export const storedRequestID = string({ min: 8, max: 64, pattern: /^(?:drq|dlg)_[A-Za-z0-9_-]+$/, format: "stored-request-id" });
 
-/** One request in the connector's request store (draft_store_get). `text` is a draft's only. */
-export const storedDraft = object({ requestId: storedRequestID, chatID, instruction: draftInstruction, text: optional(draftText) });
+/** One request in the connector's request store (draft_store_get). `text` and `attachment` are a draft's only. */
+export const storedDraft = object({ requestId: storedRequestID, chatID, instruction: draftInstruction, text: optional(draftText), attachment: optional(uploadInfo) });
 export type StoredDraft = Infer<typeof storedDraft>;
 
 /** The Raft agent event's payload: the request id and nothing else (the agent CLI does not even show it). */

@@ -15,20 +15,23 @@ import { MAX_PAGE_LIMIT, MAX_SEND_TEXT_LENGTH } from "../src/limits.ts";
 import { account, chat, chatID, message } from "./fixtures/examples.ts";
 import { parse } from "../src/schema.ts";
 
-const EXPECTED = ["status", "list_chats", "unread_summary", "read_chat", "search_messages", "draft_reply", "send_message", "react", "mark_read", "archive", "remove_account", "compose_email", "gmail_connect", "snooze_chat", "unsnooze_chat", "list_snoozed", "request_draft", "cancel_draft", "discard_draft", "mark_draft_sent", "list_drafts", "list_raft_agents", "set_draft_agents", "request_delegation", "cancel_delegation", "dismiss_delegation", "list_delegations", "draft_store_put", "draft_store_get", "draft_store_set_text", "draft_store_delete", "get_media"];
+const EXPECTED = ["status", "list_chats", "unread_summary", "read_chat", "search_messages", "draft_reply", "send_message", "react", "mark_read", "archive", "remove_account", "compose_email", "gmail_connect", "snooze_chat", "unsnooze_chat", "list_snoozed", "request_draft", "cancel_draft", "discard_draft", "mark_draft_sent", "list_drafts", "list_raft_agents", "set_draft_agents", "request_delegation", "cancel_delegation", "dismiss_delegation", "list_delegations", "draft_store_put", "draft_store_get", "draft_store_set_text", "draft_store_delete", "upload_store_begin", "upload_store_chunk", "upload_store_commit", "upload_store_delete", "discard_upload", "get_media"];
 const DRAFT_OWNER: string[] = ["request_draft", "cancel_draft", "discard_draft", "mark_draft_sent", "list_drafts", "list_raft_agents", "set_draft_agents"];
 const DELEGATION_OWNER: string[] = ["request_delegation", "cancel_delegation", "dismiss_delegation", "list_delegations"];
 const DRAFT_STORE: string[] = ["draft_store_put", "draft_store_get", "draft_store_set_text", "draft_store_delete"];
+const UPLOAD_STORE: string[] = ["upload_store_begin", "upload_store_chunk", "upload_store_commit", "upload_store_delete"];
+const UPL = "upl_0123456789abcdef";
+const OWNER = "o_0123456789abcdefABCDEF_-";
 
 describe("catalogue", () => {
   test("has exactly the agreed actions", () => expect([...ACTION_NAMES].sort() as string[]).toEqual([...EXPECTED].sort()));
   test("write flags", () => {
-    const writes = ACTION_NAMES.filter((n) => ACTIONS[n].write).sort();
-    expect(writes).toEqual(["archive", "cancel_delegation", "cancel_draft", "compose_email", "discard_draft", "dismiss_delegation", "draft_reply", "draft_store_delete", "draft_store_put", "draft_store_set_text", "gmail_connect", "mark_draft_sent", "mark_read", "react", "remove_account", "request_delegation", "request_draft", "send_message", "set_draft_agents", "snooze_chat", "unsnooze_chat"]);
+    const writes = ACTION_NAMES.filter((n) => ACTIONS[n].write).sort() as string[];
+    expect(writes).toEqual(["archive", "cancel_delegation", "cancel_draft", "compose_email", "discard_draft", "discard_upload", "dismiss_delegation", "draft_reply", "draft_store_delete", "draft_store_put", "draft_store_set_text", "gmail_connect", "mark_draft_sent", "mark_read", "react", "remove_account", "request_delegation", "request_draft", "send_message", "set_draft_agents", "snooze_chat", "unsnooze_chat", "upload_store_begin", "upload_store_chunk", "upload_store_commit", "upload_store_delete"].sort());
   });
   test("human-only actions: remove_account, the draft and delegation actions and the cloud-only gmail_connect and draft store, and never one that agents could get approved", () => {
-    expect(ACTION_NAMES.filter((n) => ACTIONS[n].humanOnly === true) as string[]).toEqual(["remove_account", "gmail_connect", ...DRAFT_OWNER, ...DELEGATION_OWNER, ...DRAFT_STORE]);
-    expect(ACTION_NAMES.filter((n) => (ACTIONS[n] as { cloudOnly?: boolean }).cloudOnly === true) as string[]).toEqual(["gmail_connect", ...DRAFT_STORE]);
+    expect(ACTION_NAMES.filter((n) => ACTIONS[n].humanOnly === true) as string[]).toEqual(["remove_account", "gmail_connect", ...DRAFT_OWNER, ...DELEGATION_OWNER, ...DRAFT_STORE, ...UPLOAD_STORE, "discard_upload"]);
+    expect(ACTION_NAMES.filter((n) => (ACTIONS[n] as { cloudOnly?: boolean }).cloudOnly === true) as string[]).toEqual(["gmail_connect", ...DRAFT_STORE, ...UPLOAD_STORE]);
     for (const n of ACTION_NAMES) if (ACTIONS[n].humanOnly) expect(ACTIONS[n].needsApprovalForAgents).toBe(false);
     for (const n of ACTION_NAMES) if ((ACTIONS[n] as { cloudOnly?: boolean }).cloudOnly) expect(ACTIONS[n].humanOnly).toBe(true);
   });
@@ -91,8 +94,8 @@ const VALID: Record<ActionName, unknown[]> = {
   unread_summary: [{}, { limit: 50 }],
   read_chat: [{ chatID }, { chatID, cursor: "1725489123456|c29tZQ", limit: MAX_PAGE_LIMIT }],
   search_messages: [{ query: "dinner" }, { query: "x", chatIDs: [chatID], sender: "me", dateAfter: "2026-01-01T00:00:00Z", limit: 20 }],
-  draft_reply: [{ chatID, text: "draft" }],
-  send_message: [{ chatID, text: "hello\nworld 👋" }, { chatID, text: "re", replyToMessageID: "m-1" }, { chatID, text: "x".repeat(MAX_SEND_TEXT_LENGTH) }],
+  draft_reply: [{ chatID, text: "draft" }, { chatID, text: "here is the quote", attachmentId: UPL }],
+  send_message: [{ chatID, text: "hello\nworld 👋" }, { chatID, text: "re", replyToMessageID: "m-1" }, { chatID, text: "x".repeat(MAX_SEND_TEXT_LENGTH) }, { chatID, attachmentId: UPL }, { chatID, text: "the file", attachmentId: UPL, idempotencyKey: "idem-key-0001" }],
   react: [{ chatID, messageID: "m-1", reactionKey: "👍" }, { chatID, messageID: "m-1", reactionKey: "👍", remove: true }, { chatID, messageID: "m-1", reactionKey: "❤️", remove: false }],
   mark_read: [{ chatID }, { chatID, messageID: "m-1" }, { chatID, read: false }],
   archive: [{ chatID }, { chatID, archived: false }],
@@ -100,6 +103,7 @@ const VALID: Record<ActionName, unknown[]> = {
   compose_email: [
     { accountID: "gmail:jacky@example.com", to: ["a@example.com"], subject: "", text: "hi" },
     { accountID: "gmail:jacky@example.com", to: ["a@example.com", "b.c+d@sub.example.org"], cc: [], subject: "Lunch? 🍜", text: "hello\nthere", idempotencyKey: "idem-key-0001" },
+    { accountID: "gmail:jacky@example.com", to: ["a@example.com"], subject: "The report", attachmentId: UPL },
   ],
   gmail_connect: [{ email: "jacky@example.com", refreshToken: "1//0gFAKE-refresh_token.xyz" }],
   snooze_chat: [{ chatID, until: "2026-10-30T09:00:00.000Z" }, { chatID: "gmail:jacky@example.com:18c2f0a1b2c3d4e5", until: "2026-10-30T09:00:00+02:00" }],
@@ -121,8 +125,13 @@ const VALID: Record<ActionName, unknown[]> = {
   list_delegations: [{}, { chatID }],
   draft_store_put: [{ requestId: "drq_0123456789abcdef", chatID, instruction: "Say yes", deadline: "2026-10-28T10:30:00.000Z" }, { requestId: "dlg_0123456789abcdef", chatID, instruction: "Get quotes", deadline: "2026-10-28T10:30:00.000Z" }],
   draft_store_get: [{ requestIds: ["drq_0123456789abcdef", "dlg_0123456789abcdef"] }],
-  draft_store_set_text: [{ requestId: "drq_0123456789abcdef", text: "Yes, Friday works!" }],
+  draft_store_set_text: [{ requestId: "drq_0123456789abcdef", text: "Yes, Friday works!" }, { requestId: "drq_0123456789abcdef", text: "The quote", attachmentId: UPL, owner: OWNER }],
   draft_store_delete: [{ requestIds: ["drq_0123456789abcdef", "drq_fedcba9876543210", "dlg_0123456789abcdef"] }],
+  upload_store_begin: [{ uploadId: UPL, owner: OWNER, fileName: "Quote 2026 (final) – 报价.pdf", mimeType: "application/pdf", size: 25 * 1024 * 1024 }, { uploadId: UPL, owner: OWNER, fileName: "empty", mimeType: "application/octet-stream", size: 0 }],
+  upload_store_chunk: [{ uploadId: UPL, owner: OWNER, index: 0, data: "" }, { uploadId: UPL, owner: OWNER, index: 99, data: "AAEC" }],
+  upload_store_commit: [{ uploadId: UPL, owner: OWNER }],
+  upload_store_delete: [{ uploadIds: [UPL, "upl_fedcba9876543210"] }],
+  discard_upload: [{ uploadId: UPL }],
   get_media: [{ url: "mxc://beeper.local/abc" }, { url: "localmxc://local-whatsapp/xyz" }, { url: "gmail://jacky%40example.com/18c2f0a1b2c3d4e5/ANGjdJ8-abc_DEF" }],
 };
 
@@ -133,7 +142,7 @@ const INVALID: Record<ActionName, unknown[]> = {
   read_chat: [{}, { chatID: "" }, { chatID: "a b" }, { chatID: "x".repeat(513) }, { chatID: 42 }, { chatID, limit: 1000 }, { chatID, direction: "after" }],
   search_messages: [{}, { query: "" }, { query: "   " }, { query: "x", limit: 21 }, { query: "x", sender: "someone" }, { query: "x", dateAfter: "yesterday" }, { query: "x", chatIDs: "abc" }],
   draft_reply: [{ chatID }, { chatID, text: "" }, { text: "x" }, { chatID, text: "x".repeat(MAX_SEND_TEXT_LENGTH + 1) }],
-  send_message: [{ chatID }, { chatID, text: "" }, { chatID, text: "  \n " }, { chatID, text: "a\u0000b" }, { chatID, text: "x".repeat(MAX_SEND_TEXT_LENGTH + 1) }, { chatID, text: 5 }, { chatID, text: "x", attachment: {} }, { chatID, text: "x", replyToMessageID: "" }],
+  send_message: [{ chatID }, { chatID, replyToMessageID: "m-1" }, { chatID, attachmentId: "drq_0123456789abcdef" }, { chatID, attachmentId: "upl_x" }, { chatID, text: "" }, { chatID, text: "  \n " }, { chatID, text: "a\u0000b" }, { chatID, text: "x".repeat(MAX_SEND_TEXT_LENGTH + 1) }, { chatID, text: 5 }, { chatID, text: "x", attachment: {} }, { chatID, text: "x", replyToMessageID: "" }],
   react: [{ chatID, messageID: "m-1" }, { chatID, messageID: "m-1", reactionKey: "" }, { chatID, messageID: "m-1", reactionKey: "x".repeat(257) }, { chatID, reactionKey: "👍" }, { chatID, messageID: "m-1", reactionKey: "👍", remove: "yes" }],
   mark_read: [{}, { chatID, read: "false" }, { chatID, messageID: "" }],
   archive: [{}, { chatID, archived: 1 }],
@@ -149,6 +158,7 @@ const INVALID: Record<ActionName, unknown[]> = {
     { accountID: "gmail:jacky@example.com", to: ["a@example.com"], text: "hi" },
     { accountID: "gmail:jacky@example.com", to: Array.from({ length: 51 }, (_, i) => `a${i}@example.com`), subject: "x", text: "hi" },
     { accountID: "gmail:jacky@example.com", to: ["a@example.com"], subject: "x", text: "hi", bcc: ["b@example.com"] },
+    { accountID: "gmail:jacky@example.com", to: ["a@example.com"], subject: "x" },
   ],
   gmail_connect: [{}, { email: "jacky@example.com" }, { email: "jacky@example.com", refreshToken: "has space in it" }, { email: "nope", refreshToken: "1//0gFAKE-refresh" }],
   snooze_chat: [{}, { chatID }, { until: "2026-10-30T09:00:00.000Z" }, { chatID: "", until: "2026-10-30T09:00:00.000Z" }, { chatID: "a b", until: "2026-10-30T09:00:00.000Z" }, { chatID: "x".repeat(513), until: "2026-10-30T09:00:00.000Z" }, { chatID, until: "tomorrow" }, { chatID, until: "2026-10-30T09:00:00" }, { chatID, until: "2026-13-30T09:00:00Z" }, { chatID, until: 1793350800000 }, { chatID, until: "2026-10-30T09:00:00Z", archived: true }],
@@ -182,8 +192,22 @@ const INVALID: Record<ActionName, unknown[]> = {
   list_delegations: [{ chatID: "" }, { chatID, status: "pending" }, null],
   draft_store_put: [{ requestId: "drq_0123456789abcdef", chatID, instruction: "x" }, { requestId: "drq_0123456789abcdef", chatID, instruction: "", deadline: "2026-10-28T10:30:00.000Z" }, { requestId: "apr_0123456789abcdef", chatID, instruction: "x", deadline: "2026-10-28T10:30:00.000Z" }],
   draft_store_get: [{ requestIds: [] }, { requestIds: Array.from({ length: 11 }, (_, i) => `drq_0123456789abcd${i}x`) }],
-  draft_store_set_text: [{ requestId: "drq_0123456789abcdef", text: "" }, { requestId: "drq_0123456789abcdef", text: "x".repeat(MAX_SEND_TEXT_LENGTH + 1) }, { requestId: "dlg_0123456789abcdef", text: "a delegation has no draft" }],
+  draft_store_set_text: [{ requestId: "drq_0123456789abcdef", text: "" }, { requestId: "drq_0123456789abcdef", text: "x".repeat(MAX_SEND_TEXT_LENGTH + 1) }, { requestId: "dlg_0123456789abcdef", text: "a delegation has no draft" }, { requestId: "drq_0123456789abcdef", text: "x", attachmentId: UPL }, { requestId: "drq_0123456789abcdef", text: "x", owner: OWNER }],
   draft_store_delete: [{ requestIds: [] }, {}],
+  upload_store_begin: [
+    { uploadId: UPL, owner: OWNER, fileName: "../etc/passwd", mimeType: "text/plain", size: 1 },
+    { uploadId: UPL, owner: OWNER, fileName: "a/b.pdf", mimeType: "application/pdf", size: 1 },
+    { uploadId: UPL, owner: OWNER, fileName: "invoice\u202efdp.exe", mimeType: "application/pdf", size: 1 },
+    { uploadId: UPL, owner: OWNER, fileName: ".hidden", mimeType: "text/plain", size: 1 },
+    { uploadId: UPL, owner: OWNER, fileName: "x.pdf", mimeType: "application/pdf; charset=x", size: 1 },
+    { uploadId: UPL, owner: OWNER, fileName: "x.pdf", mimeType: "application/pdf", size: 25 * 1024 * 1024 + 1 },
+    { uploadId: UPL, owner: "agent-sub", fileName: "x.pdf", mimeType: "application/pdf", size: 1 },
+    { uploadId: "drq_0123456789abcdef", owner: OWNER, fileName: "x.pdf", mimeType: "application/pdf", size: 1 },
+  ],
+  upload_store_chunk: [{ uploadId: UPL, owner: OWNER, index: -1, data: "" }, { uploadId: UPL, owner: OWNER, index: 100, data: "" }, { uploadId: UPL, owner: OWNER, index: 0, data: "not base64!" }, { uploadId: UPL, owner: OWNER, index: 0, data: "A".repeat(349_532) }, { uploadId: UPL, index: 0, data: "" }],
+  upload_store_commit: [{ uploadId: UPL }, { owner: OWNER }],
+  upload_store_delete: [{ uploadIds: [] }, { uploadIds: ["x"] }],
+  discard_upload: [{}, { uploadId: "upl_" }, { uploadId: UPL, owner: OWNER }],
   get_media: [{ url: "gmail://jacky%40example.com/../ANG" }, { url: "gmail://jacky%40example.com/18c2/a/b" }, {}, { url: "https://evil.example/a.png" }, { url: "file:///etc/../etc/passwd" }, { url: "javascript:alert(1)" }, { url: "mxc://" + "a".repeat(3000) }],
 };
 
@@ -245,7 +269,7 @@ const RESULTS: Record<ActionName, unknown> = {
   cancel_draft: { ...DRAFT, status: "cancelled" },
   discard_draft: { ...DRAFT, status: "discarded" },
   mark_draft_sent: { ...DRAFT, status: "sent" },
-  list_drafts: { items: [{ ...DRAFT, status: "drafted", instruction: "Say yes", text: "Yes!" }, { ...DRAFT, status: "failed", error: { code: "NOT_FOUND", message: "That agent is not on your Raft server." } }] },
+  list_drafts: { items: [{ ...DRAFT, status: "drafted", instruction: "Say yes", text: "Yes!", attachment: { uploadId: UPL, fileName: "quote.pdf", mimeType: "application/pdf", size: 12 } }, { ...DRAFT, status: "failed", error: { code: "NOT_FOUND", message: "That agent is not on your Raft server." } }] },
   list_raft_agents: { agents: [{ id: "bbbbbbbb-0000-4000-8000-000000000001", name: "龙虾", handle: "longxia", avatarURL: "https://api.raft.test/a.svg" }], allowedAgentIDs: ["bbbbbbbb-0000-4000-8000-000000000001"], fetchedAt: "2026-10-28T09:00:00.000Z", signInNeeded: false },
   set_draft_agents: { allowedAgentIDs: [] },
   request_delegation: { ...DELEGATION, instruction: "Get three quotes" },
@@ -260,9 +284,14 @@ const RESULTS: Record<ActionName, unknown> = {
     channels: ["#GARAGE", "#ops"],
   },
   draft_store_put: { requestId: "drq_0123456789abcdef", stored: true },
-  draft_store_get: { items: [{ requestId: "drq_0123456789abcdef", chatID, instruction: "Say yes", text: "Yes!" }, { requestId: "dlg_0123456789abcdef", chatID, instruction: "Get quotes" }] },
+  draft_store_get: { items: [{ requestId: "drq_0123456789abcdef", chatID, instruction: "Say yes", text: "Yes!", attachment: { uploadId: UPL, fileName: "quote.pdf", mimeType: "application/pdf", size: 12 } }, { requestId: "dlg_0123456789abcdef", chatID, instruction: "Get quotes" }] },
   draft_store_set_text: { requestId: "drq_0123456789abcdef", stored: true },
   draft_store_delete: { deleted: 2 },
+  upload_store_begin: { uploadId: UPL, stored: true },
+  upload_store_chunk: { uploadId: UPL, index: 3, received: 1024 * 1024 },
+  upload_store_commit: { uploadId: UPL, fileName: "报价 – Quote.pdf", mimeType: "application/pdf", size: 1234 },
+  upload_store_delete: { deleted: 1 },
+  discard_upload: { uploadId: UPL, deleted: true },
   get_media: { mimeType: "image/png", size: 1234, fileName: "a.png" },
 };
 

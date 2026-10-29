@@ -21,7 +21,8 @@ import {
   type ErrorBody,
   type MessageItem,
 } from "@j-inbox/protocol";
-import { createWriteDedupe, type BeeperActions, type Outcome, type RequestContext } from "./actions.ts";
+import { createWriteDedupe, fileRefused, sendFingerprint, type BeeperActions, type Outcome, type RequestContext, type UploadSource } from "./actions.ts";
+import { UploadError } from "./uploads.ts";
 import type { AssetAllowlist } from "./assets.ts";
 import { hashKey, type IdempotencyCache } from "./idempotency.ts";
 import { SourceFailure, mergeCollect, type FailedSource, type MergeItem, type MergeSource, type Merged } from "./merge.ts";
@@ -42,6 +43,8 @@ export type RouterOptions = {
   assets?: AssetAllowlist;
   /** The same write-dedupe the Beeper actions use (createWriteDedupe with the on-disk journal). */
   idempotency?: IdempotencyCache<Outcome<unknown>>;
+  /** The upload store: the file of an email (attachmentId), gone once sent. */
+  uploads?: UploadSource;
 };
 
 async function guarded<T>(fn: () => Promise<Outcome<T>>): Promise<Outcome<T>> {
@@ -49,6 +52,7 @@ async function guarded<T>(fn: () => Promise<Outcome<T>>): Promise<Outcome<T>> {
     return await fn();
   } catch (e) {
     if (e instanceof SourceFailure) return { ok: false, error: e.body };
+    if (e instanceof UploadError) return { ok: false, error: e.body };
     if (e instanceof CursorTooLong) return err("TOO_LARGE", "A page cursor is too long to continue paging. Start again without a cursor.");
     if (e instanceof CursorExpired) return err("BAD_PARAMS", "The cursor expired because the list changed. Reload from the first page.");
     if (e instanceof RequestAborted) return err("TIMEOUT", "The request ran out of time or was cancelled.");
@@ -258,6 +262,14 @@ export function createRouter(o: RouterOptions) {
 
   // ---------------------------------------------------------------- one Gmail chat
 
+  /** An email's file from the upload store (read() throws NOT_FOUND when it is gone). */
+  function emailFile(id: string | undefined): Outcome<{ fileName: string; mimeType: string; bytes: Uint8Array }> | null {
+    if (!id) return null;
+    if (!o.uploads) return err("NOT_SUPPORTED", "This connector cannot send files.");
+    const f = o.uploads.read(id);
+    return { ok: true, data: { fileName: f.fileName, mimeType: f.mimeType, bytes: f.bytes } };
+  }
+
   /** The Gmail account and thread of a chatID, or an error (unknown account: NOT_FOUND). */
   function gmailChat(chatID: string): { s: GmailSource; threadId: string } | Outcome<never> {
     const g = parseGmailChatID(chatID);
@@ -323,17 +335,21 @@ export function createRouter(o: RouterOptions) {
   }
 
   async function send_message(p: ActionParams<"send_message">, ctx: RequestContext = {}): Promise<Outcome<ActionResult<"send_message">>> {
-    if (!p.chatID.startsWith("gmail:")) return b.send_message(p, ctx);
+    if (!p.chatID.startsWith("gmail:")) return b.send_message(p, ctx, o.uploads);
     const g = gmailChat(p.chatID);
     if ("ok" in g) return g;
     const run = () =>
       guarded(async (): Promise<Outcome<ActionResult<"send_message">>> => {
-        const r = await g.s.sendReply(g.threadId, p.text, p.replyToMessageID, ctx);
-        return r.ok ? { ok: true, data: { chatID: p.chatID, pendingMessageID: r.data.id } } : r;
+        const file = emailFile(p.attachmentId);
+        if (file && !file.ok) return file;
+        const r = await g.s.sendReply(g.threadId, p.text ?? "", p.replyToMessageID, ctx, file?.data);
+        if (!r.ok) return file ? fileRefused(r, "Gmail") : r;
+        if (p.attachmentId) o.uploads?.delete([p.attachmentId]);
+        return { ok: true, data: { chatID: p.chatID, pendingMessageID: r.data.id } };
       });
     if (!p.idempotencyKey) return run();
     const key = `send_message\u0000${p.chatID}\u0000${p.idempotencyKey}`;
-    return (dedupe.run(key, run, { fingerprint: hashKey(JSON.stringify([p.text, p.replyToMessageID ?? null])) }) as Promise<Outcome<ActionResult<"send_message">>>)
+    return (dedupe.run(key, run, { fingerprint: sendFingerprint([p.text, p.replyToMessageID ?? null], p.attachmentId) }) as Promise<Outcome<ActionResult<"send_message">>>)
       .then((r) => (r.ok && (r.data as { chatID?: string }).chatID === undefined ? { ok: true as const, data: { ...r.data, chatID: p.chatID } } : r))
       .catch(() => err("INTERNAL", "The connector could not record this write, so it was not sent."));
   }
@@ -349,12 +365,16 @@ export function createRouter(o: RouterOptions) {
     if (!email || !s) return err("NOT_FOUND", "No such Gmail account on this computer. Use an accountID from status.accounts (gmail:<address>).");
     const run = () =>
       guarded(async (): Promise<Outcome<ActionResult<"compose_email">>> => {
-        const r = await s.compose(p, ctx);
-        return r.ok ? { ok: true, data: { accountID: p.accountID, chatID: gmailChatID(email, r.data.threadId), pendingMessageID: r.data.id } } : r;
+        const file = emailFile(p.attachmentId);
+        if (file && !file.ok) return file;
+        const r = await s.compose(p, ctx, file?.data);
+        if (!r.ok) return file ? fileRefused(r, "Gmail") : r;
+        if (p.attachmentId) o.uploads?.delete([p.attachmentId]);
+        return { ok: true, data: { accountID: p.accountID, chatID: gmailChatID(email, r.data.threadId), pendingMessageID: r.data.id } };
       });
     if (!p.idempotencyKey) return run();
     const key = `compose_email\u0000${p.accountID}\u0000${p.idempotencyKey}`;
-    return (dedupe.run(key, run, { fingerprint: hashKey(JSON.stringify([p.to, p.cc ?? [], p.subject, p.text])) }) as Promise<Outcome<ActionResult<"compose_email">>>)
+    return (dedupe.run(key, run, { fingerprint: sendFingerprint([p.to, p.cc ?? [], p.subject, p.text], p.attachmentId) }) as Promise<Outcome<ActionResult<"compose_email">>>)
       .then((r) => {
         // Replayed from the on-disk journal (ids only): a new thread's id is its first message's id.
         if (!r.ok || (r.data as { chatID?: string }).chatID !== undefined) return r;

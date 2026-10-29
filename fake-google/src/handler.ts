@@ -207,7 +207,7 @@ export class FakeGoogle {
   }
   private describe(m: FMessage) {
     const parsed = parseRaw(b64urlDecode(m.raw!)!)!;
-    return { id: m.id, threadId: m.threadId, labelIds: m.labelIds, raw: m.raw!, headers: parsed.headers, text: parsed.text, contentType: parsed.contentType, transferEncoding: parsed.transferEncoding };
+    return { id: m.id, threadId: m.threadId, labelIds: m.labelIds, raw: m.raw!, headers: parsed.headers, text: parsed.text, contentType: parsed.contentType, transferEncoding: parsed.transferEncoding, attachments: parsed.attachments ?? [] };
   }
 
   /** A new incoming email (in an existing thread when threadId is given). Returns the message. */
@@ -590,8 +590,14 @@ export class FakeGoogle {
       if (strip(get("subject")) === strip(header(prev[0]!.payload, "Subject")) && refs.some((r) => ids.has(r))) threadId = b.threadId;
     }
     const id = box.newId();
-    const payload: Part = { mimeType: parsed.contentType.split(";")[0]!.trim(), headers: parsed.headers, data: new TextEncoder().encode(parsed.text) };
+    let payload: Part = { mimeType: parsed.contentType.split(";")[0]!.trim(), headers: parsed.headers, data: new TextEncoder().encode(parsed.text) };
     payload.headers = [...payload.headers.filter((h) => !/^content-type$/i.test(h.name)), { name: "Content-Type", value: "text/plain; charset=UTF-8" }];
+    // A sent file comes back as Gmail keeps it: multipart/mixed, the file fetched by attachmentId.
+    if (parsed.attachments?.length) {
+      const text: Part = { mimeType: "text/plain", headers: [{ name: "Content-Type", value: "text/plain; charset=UTF-8" }], data: new TextEncoder().encode(parsed.text) };
+      const files: Part[] = parsed.attachments.map((a, i) => ({ mimeType: a.mimeType, filename: a.fileName, headers: [{ name: "Content-Type", value: a.contentType }, { name: "Content-Disposition", value: a.disposition }], data: a.bytes, attachmentId: `ANGjdJ_sent_${id}_${i}` }));
+      payload = { mimeType: "multipart/mixed", headers: [...payload.headers.filter((h) => !/^content-type$/i.test(h.name)), { name: "Content-Type", value: parsed.contentType }], parts: [text, ...files] };
+    }
     if (!payload.headers.some((h) => h.name.toLowerCase() === "message-id")) payload.headers.push({ name: "Message-ID", value: `<${id}@mail.gmail.example>` });
     const msg: FMessage = { id, threadId: threadId ?? id, labelIds: draft ? ["DRAFT"] : ["SENT"], internalDate: this.now(), payload, raw: b.raw, ...(draft ? { draftId: `r-${id}` } : {}) };
     box.add(msg);

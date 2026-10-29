@@ -363,9 +363,49 @@ export type OutgoingEmail = {
   inReplyTo?: string;
   references?: string;
   date?: Date;
+  /** One file: the message becomes multipart/mixed (the text, then the file as an attachment). */
+  attachment?: OutgoingFile;
+  /** The multipart boundary (tests); random otherwise. */
+  boundary?: string;
 };
 
-/** An RFC 5322 plain-text message (CRLF), UTF-8, base64 body. Throws on an invalid address. */
+/** A file to attach: a cleaned name (protocol fileName) and a validated MIME type (MIME_RE: no quotes, spaces or ;). */
+export type OutgoingFile = { fileName: string; mimeType: string; bytes: Uint8Array };
+
+/** `value` as a quoted MIME parameter: ASCII only, quotes and backslashes escaped. */
+function quotedParam(value: string): string {
+  return `"${value.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "\\$&")}"`;
+}
+
+/** RFC 2231 / 5987 ext-value: UTF-8, every byte outside attr-char percent-encoded. */
+export function rfc2231(value: string): string {
+  let out = "";
+  for (const b of new TextEncoder().encode(value)) {
+    const c = String.fromCharCode(b);
+    out += /[A-Za-z0-9!#$&+.^_`|~-]/.test(c) ? c : `%${b.toString(16).toUpperCase().padStart(2, "0")}`;
+  }
+  return `UTF-8''${out}`;
+}
+
+/**
+ * Content-Type and Content-Disposition for an attached file. ASCII names go as a quoted filename;
+ * others as an ASCII fallback plus filename* (RFC 2231), which Gmail and every current client read.
+ */
+export function attachmentHeaders(f: Pick<OutgoingFile, "fileName" | "mimeType">): string[] {
+  const name = sanitizeLine(f.fileName, 255) || "file";
+  const ascii = /^[\x20-\x7e]*$/.test(name);
+  const fallback = quotedParam(name);
+  const ext = ascii ? "" : `; filename*=${rfc2231(name)}`;
+  return [`Content-Type: ${f.mimeType}; name=${fallback}`, `Content-Disposition: attachment; filename=${fallback}${ext}`, "Content-Transfer-Encoding: base64"];
+}
+
+function randomBoundary(): string {
+  const b = crypto.getRandomValues(new Uint8Array(18));
+  // "=_" never occurs in base64 lines, so the boundary cannot appear in a part.
+  return `=_jinbox_${bytesToB64url(b)}`;
+}
+
+/** An RFC 5322 plain-text message (CRLF), UTF-8, base64 body; with a file, multipart/mixed. Throws on an invalid address. */
 export function buildMessage(m: OutgoingEmail): string {
   if (!isAddress(m.from)) throw new Error("invalid from");
   if (!m.to.length) throw new Error("no recipients");
@@ -378,11 +418,21 @@ export function buildMessage(m: OutgoingEmail): string {
     ...(m.inReplyTo && /^<[^<>\s]+>$/.test(m.inReplyTo) ? [`In-Reply-To: ${m.inReplyTo}`] : []),
     ...(m.references && /^(<[^<>\s]+>)( <[^<>\s]+>)*$/.test(m.references) ? [`References: ${m.references}`] : []),
     "MIME-Version: 1.0",
-    "Content-Type: text/plain; charset=UTF-8",
-    "Content-Transfer-Encoding: base64",
   ];
-  const body = m.text.replace(/\r\n?/g, "\n").replace(/\n/g, "\r\n");
-  return `${lines.join("\r\n")}\r\n\r\n${foldBase64(new TextEncoder().encode(body))}`;
+  const body = foldBase64(new TextEncoder().encode(m.text.replace(/\r\n?/g, "\n").replace(/\n/g, "\r\n")));
+  const textHead = ["Content-Type: text/plain; charset=UTF-8", "Content-Transfer-Encoding: base64"];
+  if (!m.attachment) return `${[...lines, ...textHead].join("\r\n")}\r\n\r\n${body}`;
+  const b = m.boundary ?? randomBoundary();
+  return [
+    `${[...lines, `Content-Type: multipart/mixed; boundary="${b}"`].join("\r\n")}\r\n`,
+    `--${b}`,
+    `${textHead.join("\r\n")}\r\n`,
+    body,
+    `--${b}`,
+    `${attachmentHeaders(m.attachment).join("\r\n")}\r\n`,
+    foldBase64(m.attachment.bytes),
+    `--${b}--\r\n`,
+  ].join("\r\n");
 }
 
 /** users.messages.send `raw`: the message as UTF-8 bytes (headers are ASCII except internationalized addresses), base64url. */
