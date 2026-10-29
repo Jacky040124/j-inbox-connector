@@ -1,5 +1,5 @@
-// Where the tokens live: the Beeper API token, the J-Inbox device token and one Google refresh
-// token per Gmail account (`gmail:<address>`). On macOS they go to the login Keychain through
+// Where the tokens live: the Beeper API token, the J-Inbox device token, one Google refresh
+// token per Gmail account (`gmail:<address>`) and the TypeSafe (Jev) API key for noise. On macOS they go to the login Keychain through
 // /usr/bin/security; the value is written via `security -i` on stdin so it never shows up in a
 // process list. Never in config files or logs.
 import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
@@ -7,9 +7,9 @@ import { dirname } from "node:path";
 import { normalizeGmailAddress } from "@j-inbox/protocol";
 import type { Runner } from "./runner.ts";
 
-export type SecretName = "beeper-token" | "device-token" | `gmail:${string}`;
-/** The fixed names; Gmail accounts add `gmail:<address>` (gmailSecretName). */
-export const SECRET_NAMES: readonly SecretName[] = ["beeper-token", "device-token"];
+export type SecretName = "beeper-token" | "device-token" | "typesafe-api-key" | `gmail:${string}`;
+/** The fixed names; Gmail accounts add `gmail:<address>` (gmailSecretName). `typesafe-api-key`: Jev, for noise (`j-inbox jev-key`). */
+export const SECRET_NAMES: readonly SecretName[] = ["beeper-token", "device-token", "typesafe-api-key"];
 
 /** Keychain account for a Gmail account's refresh token. */
 export function gmailSecretName(email: string): SecretName {

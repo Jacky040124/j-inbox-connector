@@ -3,8 +3,25 @@
 // checked with parseActionResult before it may leave the Mac. Anything else (the cloud's own
 // actions included: the snooze store and the draft requests live in the cloud) is NOT_ALLOWED.
 // The draft_store_* actions never reach Beeper: they keep draft texts in this computer's draft store;
-// the upload_store_* actions and discard_upload keep files being sent in its upload store.
-import { ACTIONS, isActionName, isCloudAction, makeError, parseActionParams, parseActionResult, parseGmailAssetURL, type ConnectorActionName, type ErrorBody, type MediaHead } from "@j-inbox/protocol";
+// the upload_store_* actions and discard_upload keep files being sent in its upload store; the noise
+// actions keep the owner's definition and verdicts in its noise store. Chats in every result carry
+// their noise mark (noise/store.ts decorate).
+import {
+  ACTIONS,
+  encodeFrame,
+  isActionName,
+  isCloudAction,
+  makeError,
+  parseActionParams,
+  parseActionResult,
+  parseGmailAssetURL,
+  type ActionResult,
+  type ChatSummary,
+  type ConnectorActionName,
+  type ErrorBody,
+  type MediaHead,
+  type NoiseProblem,
+} from "@j-inbox/protocol";
 import type { BeeperClient } from "./beeper-client.ts";
 import type { AssetAllowlist } from "./assets.ts";
 import type { BeeperActions, Outcome, RequestContext } from "./actions.ts";
@@ -14,6 +31,8 @@ import { createRouter } from "./sources.ts";
 import type { GmailService } from "./gmail/service.ts";
 import { DraftStore } from "./drafts.ts";
 import { UploadError, UploadStore } from "./uploads.ts";
+import { NoiseStore } from "./noise/store.ts";
+import { conversationOf, exampleOf } from "./noise/jev.ts";
 
 export type DispatchResult =
   | { kind: "res"; ok: true; data: unknown; error?: undefined }
@@ -52,22 +71,53 @@ async function openGmailMedia(gmail: GmailService | null, assets: AssetAllowlist
   return { kind: "media", head: { mimeType: r.data.mimeType, size: bytes.length, fileName: r.data.fileName }, body, cancel: () => void body.cancel().catch(() => {}) };
 }
 
-export function createDispatcher(o: { actions: BeeperActions; client: BeeperClient; assets: AssetAllowlist; gmail?: GmailService | null; idempotency?: IdempotencyCache<Outcome<unknown>>; drafts?: DraftStore; uploads?: UploadStore }) {
+/** What the dispatcher needs of the noise judge (noise/judge.ts) for Settings > Noise. */
+export type NoiseStatus = { keySet(): Promise<boolean>; readonly problem: Exclude<NoiseProblem, "no_key"> | null; definitionChanged(): void };
+
+/** Every chat a result carries, with its noise mark. */
+function decorated(name: ConnectorActionName, data: unknown, noise: NoiseStore): unknown {
+  const d = data as Record<string, any>;
+  const dec = (c: ChatSummary) => noise.decorate(c);
+  if (name === "list_chats" || name === "unread_summary") return { ...d, items: (d.items as ChatSummary[]).map(dec) };
+  if (name === "read_chat") return { ...d, chat: dec(d.chat) };
+  if (name === "search_messages") return { ...d, chats: Object.fromEntries(Object.entries(d.chats as Record<string, ChatSummary>).map(([k, c]) => [k, dec(c)])) };
+  return data;
+}
+
+export function createDispatcher(o: {
+  actions: BeeperActions;
+  client: BeeperClient;
+  assets: AssetAllowlist;
+  gmail?: GmailService | null;
+  idempotency?: IdempotencyCache<Outcome<unknown>>;
+  drafts?: DraftStore;
+  uploads?: UploadStore;
+  noise?: NoiseStore;
+  judge?: NoiseStatus;
+}) {
   // Without a file (tests): in memory.
   const drafts = o.drafts ?? new DraftStore();
   const uploads = o.uploads ?? new UploadStore({ draftAlive: (id) => drafts.has(id) });
-  const router = createRouter({ beeper: o.actions, gmail: o.gmail ?? null, assets: o.assets, idempotency: o.idempotency, uploads });
+  const noise = o.noise ?? new NoiseStore();
+  const router = createRouter({ beeper: o.actions, gmail: o.gmail ?? null, assets: o.assets, idempotency: o.idempotency, uploads, noise });
   const checked = (name: ConnectorActionName, data: unknown): DispatchResult => {
     const r = parseActionResult(name, data);
     return r.ok ? { kind: "res", ok: true, data: r.value } : fail("INTERNAL", "The connector produced an invalid result.");
   };
   const via =
-    (name: Exclude<ConnectorActionName, "get_media" | "discard_upload" | `draft_store_${string}` | `upload_store_${string}`>): Handler =>
+    (name: Exclude<ConnectorActionName, "get_media" | "discard_upload" | `draft_store_${string}` | `upload_store_${string}` | "get_noise_settings" | "set_noise_definition" | "set_noise">): Handler =>
     async (p, ctx) => {
       const r = await (router[name] as (p: unknown, ctx: RequestContext) => Promise<{ ok: boolean; data?: unknown; error?: ErrorBody }>)(p, ctx);
       if (!r.ok) return { kind: "res", ok: false, error: r.error! };
-      return checked(name, r.data);
+      if (!noise.active()) return checked(name, r.data);
+      // The page was fitted to a frame without the marks; in the rare case they push it over, it goes unmarked.
+      const marked = decorated(name, r.data, noise);
+      return checked(name, marked !== r.data && !encodeFrame({ type: "res", id: "x".repeat(64), ok: true, data: marked } as never).ok ? r.data : marked);
     };
+  const noiseSettings = async () => {
+    const keySet = o.judge ? await o.judge.keySet() : false;
+    return { definition: noise.definition, enabled: noise.active(), keySet, problem: keySet ? (o.judge?.problem ?? null) : ("no_key" as const), noiseCount: noise.noiseCount(), decisions: noise.decisions() };
+  };
 
   const handlers = {
     status: via("status"),
@@ -117,6 +167,20 @@ export function createDispatcher(o: { actions: BeeperActions; client: BeeperClie
     upload_store_commit: async (p: { uploadId: string; owner: string }) => upload(() => checked("upload_store_commit", uploads.commit(p))),
     upload_store_delete: async (p: { uploadIds: string[] }) => checked("upload_store_delete", { deleted: uploads.delete(p.uploadIds) }),
     discard_upload: async (p: { uploadId: string }) => checked("discard_upload", { uploadId: p.uploadId, deleted: uploads.discard(p.uploadId) }),
+    get_noise_settings: async () => checked("get_noise_settings", await noiseSettings()),
+    set_noise_definition: async (p: { definition: string }) => {
+      noise.setDefinition(p.definition);
+      o.judge?.definitionChanged();
+      return checked("set_noise_definition", await noiseSettings());
+    },
+    set_noise: async (p: { chatID: string; noise: boolean }, ctx) => {
+      // The conversation as it is now: its name for Recent decisions, and the example Jev learns from.
+      const r = await router.read_chat({ chatID: p.chatID, limit: 5 }, ctx).catch(() => null);
+      if (r && !r.ok && r.error.code === "NOT_FOUND") return { kind: "res", ok: false, error: r.error };
+      const about = r?.ok ? { title: r.data.chat.title, network: r.data.chat.network, example: exampleOf(conversationOf(r.data).conversation) } : {};
+      noise.setOwner(p.chatID, p.noise, about);
+      return checked("set_noise", { chatID: p.chatID, noise: p.noise });
+    },
     get_media: async (p: { url: string }, ctx) => {
       if (p.url.startsWith("gmail://")) return openGmailMedia(o.gmail ?? null, o.assets, p.url, ctx);
       const r = await openMedia(o.client, o.assets, p.url, ctx.signal);
@@ -125,6 +189,8 @@ export function createDispatcher(o: { actions: BeeperActions; client: BeeperClie
   } satisfies Record<ConnectorActionName, Handler>;
 
   return {
+    /** read_chat as Beeper and Gmail have it (no noise marks): what the noise judge reads. */
+    readChat: (p: { chatID: string; limit: number }, ctx: RequestContext): Promise<Outcome<ActionResult<"read_chat">>> => router.read_chat(p, ctx),
     isWrite: (action: string): boolean => !isActionName(action) || ACTIONS[action].write,
     async dispatch(action: string, raw: unknown, ctx: RequestContext = {}): Promise<DispatchResult> {
       if (!isActionName(action) || isCloudAction(action)) return fail("NOT_ALLOWED", "This action is not allowed.");

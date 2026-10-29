@@ -25,6 +25,7 @@ Changes must be **additive** and recorded in the root README changelog (see "Rul
 | `drafts.ts` | Drafts by agents: `draftMeta` (what the cloud keeps), `draftView` (+ the texts from the computer), `storedDraft`, `raftAgent`, `raftAgentsResult`, ids (`draftRequestID`, `raftAgentID`), `DRAFT_STATUSES`, `ACTIVE_DRAFT_STATUSES`, `DRAFT_DELIVERIES`, limits (`DRAFT_DEADLINE_MS` 30 min, `MAX_DRAFT_INSTRUCTION_LENGTH` 2000, `MAX_ACTIVE_DRAFTS` 50, `MAX_DRAFT_READ` 10, `DRAFT_KEEP_MS` 7 days), the Raft event (`draftEventSummary`, `draftEventPayload`). |
 | `delegations.ts` | Delegations to agents as Raft tasks: `delegationMeta` (what the cloud keeps), `delegationView` (+ the instruction from the computer), `delegationRequestForAgent`, `delegationRequestID` (`dlg_`), channels (`raftChannel`, `CHANNEL_PATTERN`, `normalizeChannel`, `sameChannel`), `delegationTask`, `cleanDelegationReason`, `coerceReportParams`, `DELEGATION_STATUSES` / `SHOWN_` / `OPEN_`, limits (`DELEGATION_DEADLINE_MS` 30 min, `MAX_ACTIVE_DELEGATIONS` 50, `MAX_SHOWN_DELEGATIONS` 200, `MAX_RECENT_CHANNELS` 20, `MAX_DELEGATION_REASON_LENGTH` 200), the Raft event (`delegationEventSummary`, `delegationEventPayload`). `drafts.ts` adds `storedRequestID` (`drq_` or `dlg_`: the connector's one request store). |
 | `uploads.ts` | Files sent from J-Inbox (since 2026-10-29): `uploadID` (`upl_`), `uploadOwner` / `uploadOwnerTag(caller)`, `fileName` / `sanitizeFileName`, `cleanMimeType`, `uploadInfo`, `uploadHead` (POST /api/upload's first line), `uploadBeginParams`, `fileSizeLabel`, limits (`MAX_UPLOAD_BYTES` = `MAX_MEDIA_BYTES` 25 MiB, `UPLOAD_CHUNK_BYTES` 256 KiB, `MAX_UPLOAD_CHUNKS` 100, `AGENT_UPLOAD_FILE_MAX_BYTES` 512 KiB, `UPLOAD_TTL_MS` 1 h, `MAX_STORED_UPLOADS` 60, `MAX_UPLOAD_STORE_BYTES` 256 MiB, `UPLOAD_BEGIN_PER_MINUTE` 10, `UPLOAD_CHUNK_PER_MINUTE` 240, `SEND_WITH_FILE_TIMEOUT_MS` 2 min). See "Files". |
+| `noise.ts` | Noise (since 2026-10-29): `noiseDefinition`, `noiseLines` (the definition's lines as Jev gets them), `noiseDecision`, `noiseSettings`, `NOISE_PROBLEMS`, limits (`MAX_NOISE_DEFINITION_LENGTH` 4000, `MAX_NOISE_LINES` 50, `MAX_NOISE_DECISIONS` 20), `NOISE_CONFIDENCE_THRESHOLD` (0.7), `OWNER_NOISE_REASON`. `model.ts` has `chatNoise` (`ChatSummary.noise`), `NOISE_SOURCES`, `MAX_NOISE_LINE_LENGTH`. See "Noise". |
 | `web.ts` | Browser API routes and shapes, CSRF header, `mediaResponseHeaders`, `WEB_HTML_HEADERS`, human and agent session cookies, logout, local-cache rules, upgrade `Origin` checks, `/live` messages. |
 | `auth.ts` | Login with Raft (`startHumanLogin`, `handleRaftCallback`: state + nonce + PKCE for humans, stateless only for proven agents), session lifetimes (`sessionExpired`, `agentSessionMaxAge`), surfaces (`surfaceForPath`, `sessionKindForSurface`, `authorizeSurface`). |
 | `pairing.ts` | Device-code pairing flow, user/device codes, device tokens, `hashToken`, `checkPairConfirm`, `approximateIP`, `PairingGuard` attempt limits. |
@@ -113,6 +114,9 @@ camelCase (like Beeper). Agent writes marked "approval" go through the approval 
 | `draft_store_put` / `_get` / `_set_text` / `_delete` | see `actions.ts` | | (cloud-only, `humanOnly`) | n/a | the connector's local request store (draft texts and, by `dlg_` id, delegation instructions; `_set_text` drafts only, with `attachmentId` + `owner` the agent's upload goes with the draft; `_get` answers it as `attachment`; `_delete` forgets it too) |
 | `upload_store_begin` / `_chunk` / `_commit` / `_delete` | `uploadId owner fileName mimeType size` / `uploadId owner index data(base64, 256 KiB raw)` / `uploadId owner` / `uploadIds[1-60]` | `{uploadId, stored}` / `{uploadId, index, received}` / `uploadInfo` / `{deleted}` | yes (cloud-only, `humanOnly`) | n/a | the connector's upload store (see "Files") |
 | `discard_upload` | `uploadId` | `{uploadId, deleted}` (false: not there, or on an agent's draft) | yes (`humanOnly`) | n/a | the connector's upload store |
+| `get_noise_settings` | – | `noiseSettings {definition, enabled, keySet, problem, noiseCount, decisions[]}` | (`humanOnly`) | n/a | the connector's noise store (see "Noise") |
+| `set_noise_definition` | `definition(0-4000, multi-line)` | `noiseSettings` | yes (`humanOnly`) | n/a | the connector's noise store; empty turns noise off |
+| `set_noise` | `chatID noise` | `{chatID, noise}` | yes (`humanOnly`) | n/a | the connector's noise store (`read_chat` limit 5 for the owner's example); never Beeper or Gmail |
 | `get_media` | `url` (an attachment `url` or chat `avatarURL` from another result) | `res` = `{mimeType, size (null if unknown), fileName?}` then `chunk` frames | | | `GET /v1/assets/serve?url=`; `gmail://` URLs: Gmail `messages.attachments.get` |
 
 Notes for implementers:
@@ -333,6 +337,52 @@ Object storage, logs or the audit log (`upload.begin` / `upload.commit` as metad
   capabilities` and `/live` `snapshot` / `presence` `capabilities` tell the page, which then shows no
   paperclip.
 
+### Noise (`noise.ts`; added 2026-10-29, `"noise.v1"`)
+
+The owner says what counts as noise (Settings > Noise, one idea per line: "Newsletters, ads, app
+notifications", "Cold emails I sent that nobody has replied to yet"); the owner's computer asks
+**Jev** (TypeSafe's System One) about every conversation with new activity and puts the noise ones in
+Low priority. Nothing changes in Beeper or Gmail: never read, never archived.
+
+- **Where it lives.** The definition, every verdict (5000 at most, least recently judged go first),
+  the owner's corrections and the latest decisions are in the connector's noise store (`noise.json`,
+  0600) on the owner's computer; the Jev key in its Keychain (`typesafe-api-key`, `j-inbox jev-key`).
+  The cloud keeps none of it: `get_noise_settings`, `set_noise_definition`, `set_noise` and
+  `ChatSummary.noise` only pass through it. Conversation excerpts go from the owner's computer to
+  TypeSafe (`https://api.typesafe.ai/v1/systemone`), never through the cloud.
+- **When.** A `message` upserted event (Beeper `/v1/ws`, Gmail history polling; incoming and the
+  owner's own) queues that conversation while the definition is not empty: no backfill. The
+  connector collects for 5 s, then asks about at most 40 conversations per Jev call (fewer when the
+  request would pass its size budget), at most 6 calls a minute. A conversation whose newest message
+  is the one already judged is not asked again.
+- **What Jev gets** per conversation (one `choice` question each): network, title, group or not,
+  whether Beeper or Gmail already put it in low priority, whether the owner started it and whether
+  anyone else wrote, and the last 5 messages (`me` / `other`, the other's name, the text cut to 300
+  characters). The criteria: `"Not noise"` (anything a person would want to see: real people writing
+  to the owner, replies to the owner's emails, ...) plus one choice per definition line (name
+  `"Noise: <first words>"`, description = the line). `state` says what J-Inbox is and lists the
+  owner's last 20 corrections as examples (a compact summary -> noise or not noise).
+- **Verdict.** Noise only when Jev chose a definition line with confidence at least
+  `NOISE_CONFIDENCE_THRESHOLD` (0.7); anything else, a missing or unknown answer included, is not
+  noise. The chosen line is the reason. A later not-noise verdict (the cold email got a reply) brings
+  the conversation back.
+- **Effect.** A noise conversation answers with `isLowPriority: true` and `noise {reason, confidence,
+  source}` in every result (`list_chats`, `unread_summary`, `read_chat`, `search_messages`), so it
+  leaves All chats (`inbox: "primary"`), Unread and `unread_summary` (agents included) and shows
+  under `inbox: "low-priority"` (with Beeper's and Gmail's own low-priority chats, newest first).
+  While the definition is empty no verdict is applied.
+- **The owner's corrections** (`set_noise {chatID, noise}`): they stick. Jev never judges that
+  conversation again until the owner changes it (also when someone writes later: the owner said so),
+  and the last 20 are examples for Jev's next calls. `noise: true` has the reason
+  `OWNER_NOISE_REASON` and confidence 1, `source: "owner"`.
+- **Failures** (no key, network, timeout 20 s, 4xx/5xx): previous verdicts stay, the conversations
+  are asked again later (5 s doubling to 10 min), the inbox never waits for Jev. `noiseSettings.problem`
+  says `no_key`, `jev_unreachable` or `jev_refused`. Logs and the audit log carry counts only.
+- **Changing the definition** keeps the owner's corrections and Jev's verdicts whose line is still
+  there; a Jev verdict whose line was removed is forgotten.
+- **Capability** `"noise.v1"`: without it the cloud answers the three actions `NOT_SUPPORTED` and the
+  web shows no Noise UI. Agents never see the actions (`humanOnly`).
+
 ### Gmail (`gmail.ts`, design/gmail-plan.md)
 
 The connector runs Gmail accounts next to Beeper. Rules every peer relies on:
@@ -436,7 +486,8 @@ both                 ping {t} / pong {t}                    every 25 s; 60 s sil
   `compose_email`, Gmail chats). The cloud gates Sign in with Google on `"gmail.v1"`; `"drafts.v1"` =
   the connector keeps draft requests' texts (`draft_store_*`); `"delegations.v1"` = its store also
   takes delegation requests (`dlg_` ids). The cloud gates `request_draft` / `request_delegation` on them;
-  `"attachments.v1"` = it keeps and sends files (`upload_store_*`, `discard_upload`, `attachmentId`; see "Files").
+  `"attachments.v1"` = it keeps and sends files (`upload_store_*`, `discard_upload`, `attachmentId`; see "Files");
+  `"noise.v1"` = it judges conversations with Jev and keeps the noise store (see "Noise").
 - Connector behaviour the cloud may rely on: a duplicate in-flight `req` id is ignored; a `req`
   that arrives while the connector shuts down gets `OFFLINE` and is not dispatched; a queued `req`
   whose deadline has (nearly) passed gets `TIMEOUT` without being dispatched; a `get_media` stream
@@ -533,7 +584,8 @@ unknown) is `application/octet-stream` with `Content-Disposition: attachment`. N
 headers. A contact can send any file, so nothing they send may run on the app origin.
 
 Pages (`WEB_PAGES`, `webPagePath`, `webPageURL`): `/`, `/pair`, `/approvals`, `/approvals/{id}`,
-`/settings/devices`, `/settings/activity`. The cloud serves `index.html` for each and builds every
+`/settings/accounts`, `/settings/devices`, `/settings/agents`, `/settings/noise`, `/settings/activity`,
+`/settings/general`. The cloud serves `index.html` for each and builds every
 link from them (`approveURL` = `webPageURL(APP_ORIGIN, "approval", id)`, `approvals_pending` ->
 `approvals`, `connector_replaced` -> `devices`); the UI routes on the same paths.
 

@@ -81,6 +81,12 @@ export const raftAgent = object({
   handle: nullable(string({ min: 1, max: 64, pattern: /^[A-Za-z0-9_.-]+$/ })),
   /** https only; the web shows it through GET /api/agent-avatar/<id>. */
   avatarURL: nullable(httpUrl()),
+  /**
+   * Raft's own pixel avatar (its directory says avatarUrl "pixel:<key>"; no picture at all is
+   * Raft's default "robot"), drawn by the web from Raft's published definitions. Absent: unknown
+   * (a directory read before 2026-10-29), the web shows initials.
+   */
+  pixelAvatar: optional(string({ min: 1, max: 140, pattern: /^(?:random:[A-Za-z0-9_.:-]{1,128}|[a-z]{1,32})$/ })),
 });
 export type RaftAgent = Infer<typeof raftAgent>;
 

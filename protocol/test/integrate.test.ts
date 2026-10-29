@@ -100,7 +100,7 @@ describe("settings route", () => {
 
 describe("web page paths (shared by the cloud's links and the UI router)", () => {
   test("constants", () => {
-    expect(WEB_PAGES).toEqual({ inbox: "/", pair: "/pair", approvals: "/approvals", approval: "/approvals/{id}", accounts: "/settings/accounts", devices: "/settings/devices", agents: "/settings/agents", activity: "/settings/activity", general: "/settings/general" });
+    expect(WEB_PAGES).toEqual({ inbox: "/", pair: "/pair", approvals: "/approvals", approval: "/approvals/{id}", accounts: "/settings/accounts", devices: "/settings/devices", agents: "/settings/agents", noise: "/settings/noise", activity: "/settings/activity", general: "/settings/general" });
   });
   test("webPagePath fills only J-Inbox's own ids", () => {
     expect(webPagePath("approval", "apr_1-x")).toBe("/approvals/apr_1-x");

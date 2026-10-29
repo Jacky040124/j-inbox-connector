@@ -20,6 +20,8 @@ export const LIFECYCLE_EVENTS = [
   "gmail.connected",
   "gmail.removed",
   "gmail.reauth",
+  "jev.key_set",
+  "jev.key_removed",
 ] as const;
 export type LifecycleEvent = (typeof LIFECYCLE_EVENTS)[number];
 

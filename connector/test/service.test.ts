@@ -1,7 +1,7 @@
 // The whole background service against fake Beeper and a fake cloud: requests, media allowlist,
 // events, re-sync, Beeper down, revocation, audit and state files (metadata only).
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ASSET_URLS, CHAT_IDS, startFakeBeeper, type FakeBeeper } from "@j-inbox/fake-beeper";
@@ -10,6 +10,7 @@ import { resolvePaths, saveConfig } from "../src/config.ts";
 import { MemorySecretStore } from "../src/secrets.ts";
 import { readState, startService, type Service } from "../src/service.ts";
 import { startFakeCloud, type FakeCloud } from "./helpers/fake-cloud.ts";
+import { fakeJev, pickLine, TEST_JEV_KEY } from "./helpers/fake-jev.ts";
 
 const TOKEN = "jid_" + "S".repeat(43);
 let fb: FakeBeeper;
@@ -23,7 +24,7 @@ afterEach(async () => {
   fb.reset();
 });
 
-async function boot(o: { paired?: boolean; beeperToken?: string | null; healthIntervalMs?: number } = {}) {
+async function boot(o: { paired?: boolean; beeperToken?: string | null; healthIntervalMs?: number; env?: Record<string, string>; log?: (l: string) => void } = {}) {
   const cloud = await startFakeCloud({ token: TOKEN });
   cleanup.push(() => cloud.stop());
   const paths = resolvePaths({ HOME: "/nonexistent", J_INBOX_CONFIG_DIR: mkdtempSync(join(tmpdir(), "jinbox-svc-")) });
@@ -31,7 +32,7 @@ async function boot(o: { paired?: boolean; beeperToken?: string | null; healthIn
   const secrets = new MemorySecretStore();
   if (o.beeperToken !== null) await secrets.set("beeper-token", o.beeperToken ?? fb.token);
   if (o.paired !== false) await secrets.set("device-token", TOKEN);
-  const svc = await startService({ paths, secrets, version: "0.1.0", healthIntervalMs: o.healthIntervalMs ?? 60_000, backoff: () => 30 });
+  const svc = await startService({ paths, secrets, version: "0.1.0", healthIntervalMs: o.healthIntervalMs ?? 60_000, backoff: () => 30, env: o.env, noiseDebounceMs: 50, ...(o.log ? { log: o.log } : {}) });
   cleanup.push(() => svc.stop(0));
   return { cloud, paths, svc, secrets };
 }
@@ -143,5 +144,31 @@ describe("service", () => {
     const again = await first.cloud.req("send_message", p);
     expect(again.res.ok).toBe(true);
     expect(fb.writes().filter((w) => w.route === "POST /v1/chats/{chatID}/messages").length).toBe(1);
+  });
+  test("noise: a new message is judged by Jev (J_INBOX_TYPESAFE_URL, test mode) and a newsletter leaves the main inbox; noise.json is 0600; no text in logs", async () => {
+    const jev = fakeJev((c, criteria) => (/unsubscribe/i.test(String(c.messages?.at(-1)?.text)) ? pickLine(criteria, /newsletter/i) : { choice: "Not noise", confidence: 0.9 }));
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: (req) => jev.fetchImpl(req) });
+    cleanup.push(() => server.stop(true));
+    const lines: string[] = [];
+    const { cloud, svc, secrets, paths } = await boot({ env: { J_INBOX_TYPESAFE_URL: `http://127.0.0.1:${server.port}` }, log: (l) => lines.push(l) });
+    await connected(cloud, svc);
+    expect((cloud.hello() as any).capabilities).toContain("noise.v1");
+    expect((await cloud.req("get_noise_settings", {})).res.data).toMatchObject({ enabled: false, keySet: false, problem: "no_key" });
+    await secrets.set("typesafe-api-key", TEST_JEV_KEY);
+    expect((await cloud.req("set_noise_definition", { definition: "Newsletters and ads" })).res.data).toMatchObject({ enabled: true, keySet: true, problem: null });
+    await cloud.waitFor(() => fb.wsClientCount() === 1, 3000, "beeper ws");
+    await Bun.sleep(50);
+    fb.state.receive(CHAT_IDS.imessageAlice, { text: "PRIVATE weekly digest. Unsubscribe here" });
+    const primary = async () => ((await cloud.req("list_chats", { inbox: "primary", limit: 50 })).res.data as any).items.map((c: any) => c.id);
+    for (let i = 0; i < 100 && (await primary()).includes(CHAT_IDS.imessageAlice); i++) await Bun.sleep(50);
+    expect(await primary()).not.toContain(CHAT_IDS.imessageAlice);
+    // Open pages are told with a metadata-only chat event.
+    await cloud.waitFor(() => cloud.events().filter((e: any) => e.kind === "chat" && e.chatID === CHAT_IDS.imessageAlice && e.unreadCount === undefined).length > 0, 3000, "chat event");
+    expect(jev.requests[0]!.url).toBe(`http://127.0.0.1:${server.port}/v1/systemone`);
+    expect(statSync(paths.noiseFile).mode & 0o777).toBe(0o600);
+    await svc.stop(500);
+    expect(lines.join("\n")).not.toContain("PRIVATE");
+    expect(lines.join("\n")).not.toContain(TEST_JEV_KEY);
+    expect(readFileSync(paths.auditFile, "utf8")).not.toContain("digest");
   });
 });

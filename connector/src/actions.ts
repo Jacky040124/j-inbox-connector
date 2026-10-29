@@ -19,6 +19,7 @@ import { mapAccount, mapChat, mapMessage, selfIDsIn, type MapOptions } from "./b
 import type { AssetAllowlist } from "./assets.ts";
 import { IdempotencyCache, hashKey, type IdempotencyJournal } from "./idempotency.ts";
 import { CursorExpired, CursorTooLong, RequestAborted, collect, decodePagerCursor, finishPage, fitToFrame, type BeeperPage, type PagerCursor } from "./pager.ts";
+import type { NoiseView } from "./noise/store.ts";
 
 export type Outcome<T> = { ok: true; data: T; error?: undefined } | { ok: false; error: ErrorBody; data?: undefined };
 
@@ -163,6 +164,8 @@ export type ActionsOptions = {
   assets?: AssetAllowlist;
   /** The upload store: files send_message sends (attachmentId), gone once sent. */
   uploads?: UploadSource;
+  /** Noise verdicts (noise/store.ts): noise chats leave the main inbox and unread_summary, and join Low priority. */
+  noise?: NoiseView;
 };
 
 /** A mapped value plus the asset URLs it carries, so only URLs that are actually returned get allowed. */
@@ -199,9 +202,13 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
     // GET /v1/chats returns ChatWithPreview; /v1/chats/search returns Chat without `preview`. The
     // primary inbox (with or without unreadOnly) is read from /v1/chats and filtered here, so the
     // default lists show the last message. Text queries, chat types and the other inboxes need search.
-    const primary = p.inbox === "primary" && p.query === undefined && (p.type === undefined || p.type === "any");
+    // With noise on, Low priority is Beeper's own low-priority chats plus the noise ones of the main
+    // inbox: one walk over every chat (no `inbox` for search), filtered here.
+    const noise = opts.noise?.active() ? opts.noise : null;
+    const lowNoise = !!noise && p.inbox === "low-priority";
+    const primary = (p.inbox === "primary" || lowNoise) && p.query === undefined && (p.type === undefined || p.type === "any");
     // The endpoint is part of the scope: a cursor from the other endpoint is not resumable here.
-    const scope = `list_chats\u0000${JSON.stringify([p.network?.toLowerCase() ?? null, p.accountIDs ?? null, p.unreadOnly ?? null, p.pinnedOnly ?? null, p.inbox ?? null, p.type ?? null, p.query ?? null])}${primary ? "\u0000chats" : ""}`;
+    const scope = `list_chats\u0000${JSON.stringify([p.network?.toLowerCase() ?? null, p.accountIDs ?? null, p.unreadOnly ?? null, p.pinnedOnly ?? null, p.inbox ?? null, p.type ?? null, p.query ?? null])}${primary ? "\u0000chats" : ""}${lowNoise ? "\u0000noise" : ""}`;
     const cursor = cursorParam(p.cursor, scope);
     if (cursor === "bad") throw new BeeperFailure(makeError("BAD_PARAMS", "cursor is not from this list (other filters or another action)."));
     const limit = p.limit ?? 25;
@@ -215,7 +222,7 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
         const q = chatsQuery({
           limit: "50",
           accountIDs: p.accountIDs,
-          ...(search ? { query: p.query, inbox: p.inbox, type: p.type, unreadOnly: p.unreadOnly ? "true" : undefined } : {}),
+          ...(search ? { query: p.query, inbox: lowNoise ? undefined : p.inbox, type: p.type, unreadOnly: p.unreadOnly ? "true" : undefined } : {}),
           ...(b ? { cursor: b, direction: "before" } : {}),
         });
         return beeperPage(must(await client.get(`/v1/chats${search ? "/search" : ""}?${q}`, callOpts(ctx))));
@@ -223,7 +230,9 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
       keep: (c) =>
         (!network || String(c.network ?? "").toLowerCase() === network) &&
         (!p.pinnedOnly || c.isPinned === true) &&
-        (!primary || (c.isArchived !== true && c.isLowPriority !== true)) &&
+        (!primary || lowNoise || (c.isArchived !== true && c.isLowPriority !== true)) &&
+        (p.inbox !== "primary" || !noise?.isNoise(String(c.id))) &&
+        (!lowNoise || (c.isArchived !== true && (c.isLowPriority === true || noise!.isNoise(String(c.id))))) &&
         (!unreadOnly || Number(c.unreadCount) > 0 || c.isMarkedUnread === true) &&
         mapChat(c) !== null,
       keyOf: (c) => String(c.id),
@@ -255,8 +264,8 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
       cursor: null,
       limit: Number.MAX_SAFE_INTEGER,
       fetchPage: async (b) => beeperPage(must(await client.get(`/v1/chats?${chatsQuery({ limit: "50", ...(b ? { cursor: b, direction: "before" } : {}) })}`, callOpts(ctx)))),
-      // Beeper's inbox view: archived and low-priority chats are not "unread" for the owner.
-      keep: (c) => (Number(c.unreadCount) > 0 || c.isMarkedUnread === true) && c.isArchived !== true && c.isLowPriority !== true && mapChat(c) !== null,
+      // Beeper's inbox view: archived and low-priority chats (noise too) are not "unread" for the owner.
+      keep: (c) => (Number(c.unreadCount) > 0 || c.isMarkedUnread === true) && c.isArchived !== true && c.isLowPriority !== true && !opts.noise?.isNoise(String(c.id)) && mapChat(c) !== null,
       keyOf: (c) => String(c.id),
       ...scan,
       ...ctx,

@@ -164,6 +164,22 @@ export type MessageItem = Infer<typeof messageItem>;
 export const CHAT_TYPES = ["single", "group"] as const;
 const count = integer({ min: 0, max: 1_000_000_000 });
 
+/** Who decided a conversation is noise (noise.ts): Jev (TypeSafe's System One) or the owner by hand. */
+export const NOISE_SOURCES = ["jev", "owner"] as const;
+/** A line of the owner's noise definition, and so a noise verdict's reason. */
+export const MAX_NOISE_LINE_LENGTH = 300;
+/**
+ * Why a conversation is in Low priority as noise (since 2026-10-29, "noise.v1"): the line of the
+ * owner's definition Jev chose (or the owner's own words for a hand-made verdict), how sure Jev was,
+ * and who decided. Content-ish: it comes from the owner's computer and only passes through the cloud.
+ */
+export const chatNoise = object({
+  reason: string({ min: 1, max: MAX_NOISE_LINE_LENGTH }),
+  confidence: number({ min: 0, max: 1 }),
+  source: enumOf(NOISE_SOURCES),
+});
+export type ChatNoise = Infer<typeof chatNoise>;
+
 export const chatSummary = object({
   id: chatID,
   accountID,
@@ -176,7 +192,7 @@ export const chatSummary = object({
   isPinned: boolean(),
   isMuted: boolean(),
   isArchived: boolean(),
-  /** Beeper's low-priority inbox. Not in Beeper's main inbox, so not in unread_summary. */
+  /** Beeper's low-priority inbox (Gmail: not the Primary tab; or noise). Not in the main inbox, so not in unread_summary. */
   isLowPriority: optional(boolean()),
   isReadOnly: optional(boolean()),
   isMarkedUnread: optional(boolean()),
@@ -187,6 +203,8 @@ export const chatSummary = object({
   /** The owner has unsent text in the composer. The text itself never leaves the Mac. */
   hasDraft: optional(boolean()),
   preview: optional(nullable(messageItem)),
+  /** Noise (noise.ts): set when the owner's computer put this chat in Low priority as noise; isLowPriority is then true. */
+  noise: optional(chatNoise),
 });
 export type ChatSummary = Infer<typeof chatSummary>;
 

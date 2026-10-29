@@ -118,6 +118,8 @@ export const WEB_PAGES = {
   devices: "/settings/devices",
   /** The Raft server's agents that may draft replies (added 2026-10-28). */
   agents: "/settings/agents",
+  /** The owner's definition of noise and Jev's latest decisions (added 2026-10-29). */
+  noise: "/settings/noise",
   activity: "/settings/activity",
   general: "/settings/general",
 } as const;

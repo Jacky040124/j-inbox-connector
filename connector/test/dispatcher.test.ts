@@ -50,6 +50,10 @@ const CASES: Record<ConnectorActionName, { params: () => Record<string, unknown>
   upload_store_commit: { params: () => ({ uploadId: "upl_0123456789abcdef", owner: "o_0123456789abcdef" }), routes: [], error: "NOT_FOUND" },
   upload_store_delete: { params: () => ({ uploadIds: ["upl_0123456789abcdef"] }), routes: [] },
   discard_upload: { params: () => ({ uploadId: "upl_0123456789abcdef" }), routes: [] },
+  // The noise store is local; set_noise reads the chat for the owner's example (noise.test.ts runs Jev).
+  get_noise_settings: { params: () => ({}), routes: [] },
+  set_noise_definition: { params: () => ({ definition: "Newsletters" }), routes: [] },
+  set_noise: { params: () => ({ chatID: CHAT_IDS.imessageAlice, noise: true }), routes: ["GET /v1/chats/{chatID}", "GET /v1/chats/{chatID}/messages"] },
 };
 
 describe("dispatcher whitelist", () => {

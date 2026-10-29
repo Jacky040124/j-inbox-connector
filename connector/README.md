@@ -20,7 +20,8 @@ j-inbox logs         # recent operations, metadata only (-n N, --json, --service
 j-inbox pair         # pair (or with --force re-pair) this computer: shows a code to type in the web page
 j-inbox unpair       # revoke this computer in the cloud (POST /pair/revoke), then forget the device token here
 j-inbox doctor       # finds common problems and prints a fix for each (--json; exit 1 on failures)
-j-inbox uninstall    # launchd agent, both tokens, J-Inbox's own files (--yes, --keep-config); Beeper is left alone
+j-inbox jev-key      # the Jev (TypeSafe) API key for noise into the Keychain, from stdin (--delete removes it)
+j-inbox uninstall    # launchd agent, the tokens and the Jev key, J-Inbox's own files (--yes, --keep-config); Beeper is left alone
 j-inbox run          # the service in the foreground (what launchd runs)
 ```
 
@@ -36,17 +37,23 @@ j-inbox run          # the service in the foreground (what launchd runs)
   is a TCP connect only. The commands are in `beeperCommands()` in `src/commands/setup.ts`.
 - Every token is verified against Beeper (`GET /v1/accounts`) before it is stored; a rejected
   token is never stored.
+- **Noise (Jev):** `pbpaste | j-inbox jev-key` (or `j-inbox jev-key` in a terminal: a hidden prompt)
+  keeps the TypeSafe API key in the Keychain as `typesafe-api-key`; it is never printed, logged or
+  put in argv, and is only sent to `https://api.typesafe.ai/v1/systemone` in the `Authorization`
+  header. The running service reads it whenever it asks Jev (no restart). `--delete` removes it.
+  Without a key nothing is judged and Settings > Noise says "Jev key not set on your computer".
 
 ## Where things live
 
 | What | Where |
 |---|---|
 | Config (no secrets: cloud URL, Beeper URL, engine, device id and name) | `~/.config/j-inbox/config.json` (0600) |
-| Beeper token, device token, Gmail refresh tokens | login Keychain, service `build.jsuite.j-inbox`, accounts `beeper-token` / `device-token` / `gmail:<address>`, written with `security -i` on stdin (never in argv) |
+| Beeper token, device token, Gmail refresh tokens, the Jev key | login Keychain, service `build.jsuite.j-inbox`, accounts `beeper-token` / `device-token` / `gmail:<address>` / `typesafe-api-key`, written with `security -i` on stdin (never in argv) |
 | Gmail accounts (addresses and connected / reconnect_required; never tokens or mail) | `~/Library/Application Support/j-inbox/gmail.json` (0600) |
 | Idempotency journal (key hashes, parameter digests, result ids; never text or chat ids), asset allowlist (URL hashes) | `~/Library/Application Support/j-inbox/` |
 | Request store `drafts.json`: for "ask an agent to draft a reply", each request's chat id, the owner's instruction and the agent's draft; for "delegate to an agent as a Raft task", each request's chat id and the owner's instruction (the cloud keeps none of them); at most 200, each forgotten when the owner handles it (a delegation: when the task is created, or it is cancelled or dismissed) or 7 days after it was made | `~/Library/Application Support/j-inbox/` (0600) |
 | Upload store `uploads/`: files being sent through J-Inbox (the owner's from the web page, an agent's on its draft), one `upl_*.bin` per file plus `index.json` (name, type, size, an owner tag that is a digest of the caller, never a sub); at most 60 files and 256 MiB; a file is forgotten once sent, discarded or handled with its draft, 1 hour after it began unless it is on a draft, with its draft (7 days at the latest) | `~/Library/Application Support/j-inbox/uploads/` (0700; files 0600) |
+| Noise store `noise.json`: the owner's definition of noise, the verdicts (chat id, noise or not, the definition line Jev chose, its confidence, Jev's or the owner's, the newest message id Jev saw; at most 5000, the least recently judged go first), the owner's corrections with a one-line summary of the conversation (shown to Jev as examples), and the 20 latest decisions with the conversation's title (the cloud keeps none of it) | `~/Library/Application Support/j-inbox/` (0600) |
 | Audit log `audit.jsonl` (rotated at 5 MiB, 3 files), service log `service.log` | `~/Library/Logs/j-inbox/` |
 | Service state for `status` (pid, cloud link state, Beeper health) | `~/.config/j-inbox/state.json` |
 | launchd agent | `~/Library/LaunchAgents/build.jsuite.j-inbox.plist`: `RunAtLoad`, `KeepAlive {SuccessfulExit: false}`, `ThrottleInterval 10`, logs to `service.log` |
@@ -55,8 +62,9 @@ j-inbox run          # the service in the foreground (what launchd runs)
 directory, under one directory. `J_INBOX_SECRETS=file` swaps the Keychain for a 0600 JSON file,
 and is refused unless `J_INBOX_CONFIG_DIR` is set (tests and local development only). The same holds
 for `J_INBOX_GMAIL_API_URL` / `J_INBOX_GOOGLE_OAUTH_URL` (a loopback fake instead of
-`gmail.googleapis.com` / `oauth2.googleapis.com`) and `J_INBOX_GMAIL_POLL_MS` (a shorter history
-poll): refused without `J_INBOX_CONFIG_DIR`.
+`gmail.googleapis.com` / `oauth2.googleapis.com`), `J_INBOX_TYPESAFE_URL` (a loopback fake instead of
+`api.typesafe.ai`), `J_INBOX_GMAIL_POLL_MS` (a shorter history poll) and `J_INBOX_NOISE_DEBOUNCE_MS` (a
+shorter noise collection window): refused without `J_INBOX_CONFIG_DIR`.
 
 ## How it works
 
@@ -75,6 +83,7 @@ poll): refused without `J_INBOX_CONFIG_DIR`.
 | `src/gmail/accounts.ts`, `src/gmail/service.ts`, `src/gmail/poller.ts` | `gmail.json` + Keychain; `gmail_connect` (one `users.getProfile`: the address must match, else nothing is stored) and removal (revoke at Google, forget); history polling every 30 s -> metadata-only events, re-sync on a history reset |
 | `src/drafts.ts` | the request store behind the cloud-only `draft_store_put` / `_get` / `_set_text` / `_delete` (never Beeper): drafts (`drq_`) and delegations (`dlg_`, no text), one 0600 JSON file written atomically, validated on load, bounded, purged after 7 days; a draft may carry one upload (`attachmentId`), forgotten with it |
 | `src/uploads.ts` | the upload store behind the cloud-only `upload_store_begin` / `_chunk` / `_commit` / `_delete` and the owner's `discard_upload` ("attachments.v1"): chunks only from the upload's owner tag, in order, never past the declared size; `claim` puts a finished upload on a draft (only its owner's, the agent that uploaded it); purged every minute (1 h, or with the draft). A send with `attachmentId` (`send_message`, `compose_email`) reads it here: Beeper gets `POST /v1/assets/upload` (multipart) then the message with `attachment {uploadID, fileName, mimeType}`, Gmail a multipart/mixed reply-all (RFC 2231 file names); it is deleted once sent; a 400/422 from Beeper (or Gmail) is `NOT_SUPPORTED` with Beeper's own reason. Such sends get `SEND_WITH_FILE_TIMEOUT_MS` (2 min) instead of the usual request time |
+| `src/noise/store.ts`, `src/noise/jev.ts`, `src/noise/judge.ts` | noise ("noise.v1", protocol README "Noise"): the noise store behind `get_noise_settings`, `set_noise_definition` and `set_noise` (0600, bounded, validated on load; an empty definition applies nothing; the owner's verdicts stick); Jev's request (one `choice` question per conversation, the criteria "Not noise" plus one per definition line, the owner's last 20 corrections as examples in `state`, the last 5 messages cut to 300 characters, a size budget) and verdict (a line chosen with confidence 0.7 or more, else not noise), `callJev` (`POST /v1/systemone`, 20 s timeout, capped answer, no redirects); the judge: `message` upserted events (Beeper and Gmail) queue a conversation, 5 s later up to 40 are read (`read_chat` limit 5) and asked about in one call, at most 6 calls a minute, unchanged conversations and the owner's own skipped, failures keep the verdicts and retry from 5 s doubling to 10 min. The Beeper actions and the router keep noise chats out of `inbox: "primary"` and `unread_summary` and add them to `inbox: "low-priority"` (Beeper: one walk over every chat; Gmail: a second lane per account over its Primary tab); the dispatcher marks every chat it returns (`isLowPriority`, `noise`). Nothing is ever written to Beeper or Gmail for it |
 | `src/media.ts`, `src/assets.ts` | `get_media`: only URLs a returned result carried (`AssetAllowlist`, hashes, bounded, persisted); head, then 256 KiB chunks under `ChunkWindow`, capped at 25 MiB or the declared size |
 | `src/events.ts`, `src/beeper-ws.ts` | Beeper `/v1/ws` subscription per the spec: wait for `ready`, send `subscriptions.set` with a `requestID`, connected only when `subscriptions.updated` echoes `["*"]`; an `INVALID_PAYLOAD`/`INVALID_COMMAND` error is retried once without the `app` key; no confirmed subscription within 20 s of opening the socket (or a socket that never opens): close and retry with backoff. Resubscribe after drops, 30 s health checks (status events; `reachable:false` = Beeper down, `tokenValid:false`), re-sync after reconnects |
 | `src/beeper-client.ts`, `src/beeper-map.ts`, `src/pager.ts`, `src/idempotency.ts` | Beeper HTTP client (encoded ids, no redirects, timeouts, capped bodies), mapping and sanitizing, `j2.` cursors, write dedupe that survives restarts |
@@ -144,7 +153,9 @@ account's access at Google before deleting the tokens. The idempotency journal n
 account address (compose results are rebuilt from the request).
 
 Privacy: events, audit log, state file and service log carry metadata only (action names, error
-codes, close codes, counts, durations). The audit log validates every field against a closed
+codes, close codes, counts, durations). With noise on (a definition and a Jev key), the excerpts Jev
+needs (title, network, the last 5 messages cut to 300 characters, the owner's correction summaries)
+go from this Mac straight to TypeSafe (`api.typesafe.ai`), never through the J-Inbox cloud. The audit log validates every field against a closed
 vocabulary, so content cannot be written there by mistake. Tokens never appear in config files,
 logs, argv or the launchd plist (`generatePlist` refuses them).
 

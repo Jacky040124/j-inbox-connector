@@ -55,8 +55,10 @@ const JSON_LIMITS = { maxDepth: 32, maxKeys: 50_000 };
  * "delegations.v1": its request store also takes delegation requests (dlg_ ids) in draft_store_put / _get / _delete.
  * "attachments.v1": it keeps uploads (upload_store_*, discard_upload), sends them (send_message /
  * compose_email attachmentId) and keeps one with a draft (draft_store_set_text attachmentId).
+ * "noise.v1": it judges conversations with Jev and keeps the owner's definition and verdicts
+ * (get_noise_settings, set_noise_definition, set_noise; ChatSummary.noise).
  */
-export const CAPABILITIES = { media: "media.v1", gmail: "gmail.v1", drafts: "drafts.v1", delegations: "delegations.v1", attachments: "attachments.v1" } as const;
+export const CAPABILITIES = { media: "media.v1", gmail: "gmail.v1", drafts: "drafts.v1", delegations: "delegations.v1", attachments: "attachments.v1", noise: "noise.v1" } as const;
 
 export const helloFrame = object({
   type: literal("hello"),

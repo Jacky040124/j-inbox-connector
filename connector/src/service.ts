@@ -1,5 +1,6 @@
 // The background service (`j-inbox run`, started by launchd): Beeper client + whitelist dispatcher
-// + cloud link + Beeper events + health checks + re-sync, with the local audit log and a small
+// + cloud link + Beeper events + health checks + re-sync + the noise judge (every conversation with
+// new activity, Beeper's or Gmail's, is asked about), with the local audit log and a small
 // metadata-only state file that `j-inbox status` reads.
 import { readFileSync } from "node:fs";
 import type { EventFrame } from "@j-inbox/protocol";
@@ -8,7 +9,7 @@ import { AssetAllowlist } from "./assets.ts";
 import { AuditLog } from "./audit.ts";
 import { createBeeperClient } from "./beeper-client.ts";
 import { CloudLink, type LinkState, type SocketFactory } from "./cloud-link.ts";
-import { gmailPollOverride, googleEndpoints, loadConfig, writeAtomic, type Paths } from "./config.ts";
+import { gmailPollOverride, googleEndpoints, loadConfig, noiseDebounceOverride, typesafeURL, writeAtomic, type Paths } from "./config.ts";
 import { createDispatcher } from "./dispatcher.ts";
 import { BeeperEventStream, HealthMonitor, Reconciler } from "./events.ts";
 import { FileIdempotencyJournal } from "./idempotency.ts";
@@ -17,6 +18,8 @@ import { UploadStore } from "./uploads.ts";
 import type { SecretStore } from "./secrets.ts";
 import { cloudTokenRefresher } from "./gmail/client.ts";
 import { createGmailService } from "./gmail/service.ts";
+import { NoiseStore } from "./noise/store.ts";
+import { NoiseJudge } from "./noise/judge.ts";
 
 export type ServiceOptions = {
   paths: Paths;
@@ -30,6 +33,8 @@ export type ServiceOptions = {
   env?: Record<string, string | undefined>;
   fetchImpl?: typeof fetch;
   gmailPollIntervalMs?: number;
+  /** The noise judge's collection window (tests). */
+  noiseDebounceMs?: number;
 };
 
 export type ExitReason = "not_paired" | "no_beeper_token" | "config_error" | "shutdown" | "revoked" | "unauthenticated" | "replaced" | "version";
@@ -93,9 +98,13 @@ export async function startService(o: ServiceOptions): Promise<Service> {
   let config;
   let google: { gmailURL: string; oauthURL: string };
   let pollMs: number | undefined;
+  let jevURL: string;
+  let noiseDebounceMs: number | undefined;
   try {
     config = loadConfig(o.paths);
     google = googleEndpoints(o.env ?? {}, o.paths);
+    jevURL = typesafeURL(o.env ?? {}, o.paths);
+    noiseDebounceMs = o.noiseDebounceMs ?? noiseDebounceOverride(o.env ?? {}, o.paths);
     pollMs = o.gmailPollIntervalMs ?? gmailPollOverride(o.env ?? {}, o.paths);
   } catch (e) {
     return exitNow("config_error", (e as Error).message);
@@ -110,7 +119,8 @@ export async function startService(o: ServiceOptions): Promise<Service> {
   const client = createBeeperClient({ baseURL: config.beeperURL, token: beeperToken });
   const assets = new AssetAllowlist({ path: o.paths.assetsFile });
   const idempotency = createWriteDedupe({ journal: new FileIdempotencyJournal(o.paths.idempotencyFile) });
-  const actions = createActions(client, { connectorVersion: o.version, assets, idempotency });
+  const noise = new NoiseStore({ path: o.paths.noiseFile });
+  const actions = createActions(client, { connectorVersion: o.version, assets, idempotency, noise });
   // Gmail: tokens in the Keychain, access tokens refreshed through the cloud (the client secret
   // cannot ship in this open-source connector), Gmail itself reached directly from this Mac.
   const gmail = createGmailService({
@@ -126,10 +136,31 @@ export async function startService(o: ServiceOptions): Promise<Service> {
   });
   const drafts = new DraftStore({ path: o.paths.draftsFile });
   const uploads = new UploadStore({ dir: o.paths.uploadsDir, draftAlive: (id) => drafts.has(id) });
-  const dispatcher = createDispatcher({ actions, client, assets, gmail, idempotency, drafts, uploads });
+  // Jev reads conversations through the dispatcher's router; the key is read from the Keychain each batch.
+  let readChat: ConstructorParameters<typeof NoiseJudge>[0]["readChat"] = async () => ({ ok: false, error: { code: "INTERNAL", message: "starting" } });
+  // A verdict that moves a chat in or out of Low priority is announced like any change (metadata only), so open pages refetch.
+  const judge = new NoiseJudge({
+    store: noise,
+    readChat: (p, ctx) => readChat(p, ctx),
+    apiKey: () => o.secrets.get("typesafe-api-key"),
+    url: jevURL,
+    fetchImpl: o.fetchImpl,
+    debounceMs: noiseDebounceMs,
+    log: (m) => log(m),
+    onChange: (ids) => {
+      const ts = new Date().toISOString();
+      for (const chatID of ids) link.sendEvent({ type: "event", kind: "chat", op: "upserted", chatID, ts });
+    },
+  });
+  const dispatcher = createDispatcher({ actions, client, assets, gmail, idempotency, drafts, uploads, noise, judge });
+  readChat = dispatcher.readChat;
 
   let link: CloudLink;
-  const send = (f: EventFrame) => link.sendEvent(f);
+  // New activity (a message in, or the owner's own out) is judged again; the event goes on as before.
+  const send = (f: EventFrame) => {
+    if (f.kind === "message" && f.op === "upserted") judge.touch(f.chatID);
+    return link.sendEvent(f);
+  };
   let lastBeeper = "";
   const health = new HealthMonitor({
     client,
@@ -226,6 +257,7 @@ export async function startService(o: ServiceOptions): Promise<Service> {
       events.stop();
       health.stop();
       gmail.stopPolling();
+      judge.stop();
       clearInterval(flushTimer);
       await link.stop(graceMs);
       try {

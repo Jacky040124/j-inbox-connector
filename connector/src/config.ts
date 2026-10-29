@@ -1,6 +1,6 @@
 // Where the connector keeps things, and its (secret-free) config file.
 //   config  ~/.config/j-inbox/config.json      cloud URL, Beeper URL, device id and name
-//   data    ~/Library/Application Support/j-inbox   idempotency journal, asset allowlist (hashes), draft store, upload store
+//   data    ~/Library/Application Support/j-inbox   idempotency journal, asset allowlist (hashes), draft store, upload store, noise store
 //   logs    ~/Library/Logs/j-inbox              audit.jsonl (metadata only), service.log
 // J_INBOX_CONFIG_DIR moves all of it, including the LaunchAgents dir, under one directory (tests).
 import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
@@ -29,6 +29,8 @@ export type Paths = {
   draftsFile: string;
   /** Files being sent (uploads.ts): kept here until sent, never in the cloud. */
   uploadsDir: string;
+  /** The owner's definition of noise and the verdicts (noise/store.ts): kept here, never in the cloud. */
+  noiseFile: string;
   /** Everything lives under J_INBOX_CONFIG_DIR. */
   testMode: boolean;
 };
@@ -65,6 +67,7 @@ export function resolvePaths(env: Record<string, string | undefined>): Paths {
     gmailFile: join(dataDir, "gmail.json"),
     draftsFile: join(dataDir, "drafts.json"),
     uploadsDir: join(dataDir, "uploads"),
+    noiseFile: join(dataDir, "noise.json"),
     testMode: override !== undefined,
   };
 }
@@ -173,6 +176,19 @@ export function googleEndpoints(env: Record<string, string | undefined>, p: Path
   return { gmailURL: pick("J_INBOX_GMAIL_API_URL", "https://gmail.googleapis.com"), oauthURL: pick("J_INBOX_GOOGLE_OAUTH_URL", "https://oauth2.googleapis.com") };
 }
 
+/**
+ * TypeSafe's API (Jev, for noise): https://api.typesafe.ai, or J_INBOX_TYPESAFE_URL, a loopback fake,
+ * only in test mode (J_INBOX_CONFIG_DIR set), like the Google endpoints.
+ */
+export function typesafeURL(env: Record<string, string | undefined>, p: Paths): string {
+  const v = env.J_INBOX_TYPESAFE_URL;
+  if (v === undefined || v === "") return "https://api.typesafe.ai";
+  if (!p.testMode) throw new Error("J_INBOX_TYPESAFE_URL is only allowed together with J_INBOX_CONFIG_DIR (tests and local development).");
+  const u = plainOrigin(v, "J_INBOX_TYPESAFE_URL");
+  if (u.protocol !== "http:" || !LOOPBACK.has(u.hostname)) throw new Error("J_INBOX_TYPESAFE_URL must be a loopback http:// URL.");
+  return u.origin;
+}
+
 /** J_INBOX_GMAIL_POLL_MS (tests only, with J_INBOX_CONFIG_DIR): a shorter Gmail history poll. undefined: the default. */
 export function gmailPollOverride(env: Record<string, string | undefined>, p: Paths): number | undefined {
   const v = env.J_INBOX_GMAIL_POLL_MS;
@@ -180,5 +196,15 @@ export function gmailPollOverride(env: Record<string, string | undefined>, p: Pa
   if (!p.testMode) throw new Error("J_INBOX_GMAIL_POLL_MS is only allowed together with J_INBOX_CONFIG_DIR (tests and local development).");
   const n = Number(v);
   if (!Number.isInteger(n) || n < 200 || n > 600_000) throw new Error("J_INBOX_GMAIL_POLL_MS must be 200-600000.");
+  return n;
+}
+
+/** J_INBOX_NOISE_DEBOUNCE_MS (tests only, with J_INBOX_CONFIG_DIR): a shorter collection window for the noise judge. undefined: the default. */
+export function noiseDebounceOverride(env: Record<string, string | undefined>, p: Paths): number | undefined {
+  const v = env.J_INBOX_NOISE_DEBOUNCE_MS;
+  if (v === undefined || v === "") return undefined;
+  if (!p.testMode) throw new Error("J_INBOX_NOISE_DEBOUNCE_MS is only allowed together with J_INBOX_CONFIG_DIR (tests and local development).");
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 50 || n > 60_000) throw new Error("J_INBOX_NOISE_DEBOUNCE_MS must be 50-60000.");
   return n;
 }

@@ -84,12 +84,15 @@ export type ListFilter = {
   lowPriority?: boolean;
 };
 
-/** Gmail query and post-filter for list_chats params (network/accountIDs are routed before). */
-export function listFilterFor(p: Partial<ActionParams<"list_chats">>): ListFilter {
+/**
+ * Gmail query and post-filter for list_chats params (network/accountIDs are routed before). `isNoise`
+ * (noise on): noise threads leave the Primary list; Low priority gets them from noiseLaneFilter.
+ */
+export function listFilterFor(p: Partial<ActionParams<"list_chats">>, isNoise?: (chatID: string) => boolean): ListFilter {
   const q: string[] = [];
   const keeps: ((c: ChatSummary) => boolean)[] = [];
   let lowPriority: boolean | undefined;
-  if (p.inbox === "primary") q.push(Q_PRIMARY), keeps.push((c) => !c.isArchived), (lowPriority = false);
+  if (p.inbox === "primary") q.push(Q_PRIMARY), keeps.push((c) => !c.isArchived && !isNoise?.(c.id)), (lowPriority = false);
   else if (p.inbox === "low-priority") q.push(Q_LOW_PRIORITY), keeps.push((c) => !c.isArchived), (lowPriority = true);
   else if (p.inbox === "archive") q.push("-in:inbox"), keeps.push((c) => c.isArchived);
   if (p.unreadOnly) q.push("is:unread"), keeps.push((c) => c.unreadCount > 0);
@@ -102,6 +105,12 @@ export function listFilterFor(p: Partial<ActionParams<"list_chats">>): ListFilte
     keeps.push((c) => words.every((w) => c.title.toLowerCase().includes(w.toLowerCase())));
   }
   return { q: q.join(" "), keep: (c) => keeps.every((k) => k(c)), ...(lowPriority === undefined ? {} : { lowPriority }) };
+}
+
+/** Low priority's second lane per account (noise on): the Primary tab's threads that are noise. */
+export function noiseLaneFilter(p: Partial<ActionParams<"list_chats">>, isNoise: (chatID: string) => boolean): ListFilter {
+  const base = listFilterFor({ ...p, inbox: "primary" });
+  return { q: base.q, keep: (c) => base.keep(c) && isNoise(c.id), lowPriority: false };
 }
 
 export type GmailSource = ReturnType<typeof createGmailSource>;
@@ -208,9 +217,9 @@ export function createGmailSource(o: { email: string; client: GmailClient; scan?
     };
   }
 
-  /** Unread chats in the primary inbox, newest first (unread_summary). */
-  async function unread(limit: number, ctx: RequestContext): Promise<{ items: MergeItem<ChatSummary>[]; truncated: boolean }> {
-    const page = await listThreads({ q: `is:unread ${Q_PRIMARY}`, keep: (c) => c.unreadCount > 0 && !c.isArchived, lowPriority: false }, null, limit, ctx);
+  /** Unread chats in the primary inbox, newest first (unread_summary); noise ones (isNoise) left out. */
+  async function unread(limit: number, ctx: RequestContext, isNoise?: (chatID: string) => boolean): Promise<{ items: MergeItem<ChatSummary>[]; truncated: boolean }> {
+    const page = await listThreads({ q: `is:unread ${Q_PRIMARY}`, keep: (c) => c.unreadCount > 0 && !c.isArchived && !isNoise?.(c.id), lowPriority: false }, null, limit, ctx);
     return { items: page.items, truncated: page.hasMore };
   }
 

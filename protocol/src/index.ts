@@ -6,6 +6,7 @@ export * from "./textutil.ts";
 export * from "./model.ts";
 export * from "./snooze.ts";
 export * from "./uploads.ts";
+export * from "./noise.ts";
 export * from "./drafts.ts";
 export * from "./delegations.ts";
 export * from "./actions.ts";

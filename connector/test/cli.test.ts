@@ -120,7 +120,7 @@ describe("help and version", () => {
   test("--help lists every command; unknown command is a usage error (exit 2)", async () => {
     const h = harness();
     expect(await h.cli("--help")).toBe(0);
-    for (const c of ["setup", "run", "status", "logs", "pair", "unpair", "doctor", "uninstall"]) expect(h.text()).toContain(c);
+    for (const c of ["setup", "run", "status", "logs", "pair", "unpair", "doctor", "uninstall", "jev-key"]) expect(h.text()).toContain(c);
     expect(await h.cli("frobnicate")).toBe(2);
     expect(await h.cli()).toBe(0);
   });
@@ -409,6 +409,40 @@ describe("setup", () => {
     h.prog.pmsetSleep = 15;
     await h.cli("setup", "--engine", "desktop", "--beeper-url", fb.url, "--beeper-token-stdin", "--cloud-url", cloud.url, "--no-service", "--yes");
     expect(h.text()).toMatch(/sleep/i);
+  });
+});
+
+describe("jev-key", () => {
+  const KEY = "ts_live_0123456789abcdefABCDEF";
+  test("reads the key from stdin, keeps it in the secret store (never printed), notes it in the audit log", async () => {
+    const h = harness({ stdin: `${KEY}\n` });
+    expect(await h.cli("jev-key")).toBe(0);
+    expect(await h.secrets.get("typesafe-api-key")).toBe(KEY);
+    expect(h.text() + h.err.join("\n")).not.toContain(KEY);
+    expect(h.text()).toMatch(/Keychain/);
+    expect(readFileSync(h.paths.auditFile, "utf8")).toContain("jev.key_set");
+    expect(readFileSync(h.paths.auditFile, "utf8")).not.toContain(KEY);
+  });
+  test("a terminal gets a hidden prompt; nothing or a bad key stores nothing", async () => {
+    const h = harness({ secretAnswers: [KEY, null] });
+    h.deps.isTTY = true;
+    expect(await h.cli("jev-key")).toBe(0);
+    expect(await h.secrets.get("typesafe-api-key")).toBe(KEY);
+    expect(await h.cli("jev-key")).toBe(1);
+    const bad = harness({ stdin: 'has "quotes" and spaces\n' });
+    expect(await bad.cli("jev-key")).toBe(1);
+    expect(await bad.secrets.get("typesafe-api-key")).toBeNull();
+    expect(bad.err.join("\n")).not.toContain("quotes");
+  });
+  test("--delete removes it; uninstall removes it too", async () => {
+    const h = harness({ stdin: KEY });
+    await h.cli("jev-key");
+    expect(await h.cli("jev-key", "--delete")).toBe(0);
+    expect(await h.secrets.get("typesafe-api-key")).toBeNull();
+    const p = await pairedHarness();
+    await p.secrets.set("typesafe-api-key", KEY);
+    expect(await p.cli("uninstall", "--yes")).toBe(0);
+    expect(await new FileSecretStore(p.paths.secretsFile).get("typesafe-api-key")).toBeNull();
   });
 });
 

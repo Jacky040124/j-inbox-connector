@@ -68,6 +68,7 @@ import {
 } from "./drafts.ts";
 import { MAX_RECENT_CHANNELS, MAX_SHOWN_DELEGATIONS, delegationInstruction, delegationRequestID, delegationView, raftChannel } from "./delegations.ts";
 import { MAX_STORED_UPLOADS, MAX_UPLOAD_BYTES, MAX_UPLOAD_CHUNKS, fileName, uploadChunkData, uploadID, uploadInfo, uploadOwner } from "./uploads.ts";
+import { noiseDefinition, noiseSettings } from "./noise.ts";
 
 
 type Shape = Record<string, Schema<any>>;
@@ -788,6 +789,51 @@ export const ACTIONS = {
     streamed: false,
     timeoutMs: REQUEST_TIMEOUT_MS,
     beeper: "none (the connector's local upload store)",
+  }),
+
+  // ---- noise (protocol noise.ts): the owner's definition and verdicts live on the owner's computer.
+
+  get_noise_settings: define({
+    description: "Settings > Noise: the owner's definition of noise, whether it is on, whether the Jev key is on the computer, and the latest decisions. Owner only.",
+    params: object({}),
+    paramDocs: {},
+    defaults: {},
+    result: noiseSettings,
+    write: false,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    beeper: "none (the connector's noise store)",
+  }),
+
+  set_noise_definition: define({
+    description: "Save the owner's definition of noise (one idea per line; empty turns noise off). Only new activity is judged with it. Owner only.",
+    params: object({ definition: noiseDefinition }),
+    paramDocs: { definition: "What counts as noise, in plain words, one idea per line (at most 4000 characters, 50 lines)" },
+    defaults: {},
+    result: noiseSettings,
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    beeper: "none (the connector's noise store)",
+  }),
+
+  set_noise: define({
+    description: "The owner's own verdict on a conversation: noise (to Low priority) or not noise (back to the inbox). It sticks: Jev does not judge that conversation again, and it is an example for Jev's next judgments. Nothing changes in Beeper or Gmail. Owner only.",
+    params: object({ chatID, noise: boolean() }),
+    paramDocs: { chatID: "Chat ID", noise: "true: noise; false: not noise" },
+    defaults: {},
+    result: object({ chatID, noise: boolean() }),
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    rateLimitPerMinute: 60,
+    beeper: "none (the connector's noise store; read_chat limit 5 for the example)",
   }),
 
   get_media: define({

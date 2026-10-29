@@ -15,6 +15,7 @@ import { runCommand } from "./commands/run.ts";
 import { setupCommand } from "./commands/setup.ts";
 import { statusCommand } from "./commands/status.ts";
 import { uninstallCommand } from "./commands/uninstall.ts";
+import { jevKeyCommand } from "./commands/jev-key.ts";
 
 export type { CliDeps } from "./commands/context.ts";
 
@@ -43,6 +44,7 @@ const COMMANDS: Record<string, Command> = {
   pair: { summary: "Pair this computer with your J-Inbox (shows a code to type in the web page)", flags: { force: "bool", name: "string", "cloud-url": "string" }, run: (c) => pairCommand(c) },
   unpair: { summary: "Unpair this computer", flags: {}, run: unpairCommand },
   doctor: { summary: "Find common problems and how to fix them", flags: {}, run: doctorCommand },
+  "jev-key": { summary: "Keep the Jev (TypeSafe) API key for noise in the Keychain (from stdin; --delete removes it)", flags: { delete: "bool" }, run: jevKeyCommand },
   uninstall: { summary: "Remove the connector's service, tokens and files (Beeper is left alone)", flags: { yes: "bool", "keep-config": "bool" }, run: uninstallCommand },
 };
 
@@ -68,6 +70,7 @@ function usage(): string {
     "         --cloud-url URL  --name NAME  --skip-pair  --no-service  --yes",
     "pair:    --force  --name NAME  --cloud-url URL",
     "logs:    -n N  --service",
+    "jev-key: --delete   (the key comes from stdin, or a hidden prompt in a terminal; it is never shown)",
     "uninstall: --yes  --keep-config",
   ];
   return lines.join("\n");

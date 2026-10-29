@@ -28,8 +28,9 @@ import { hashKey, type IdempotencyCache } from "./idempotency.ts";
 import { SourceFailure, mergeCollect, type FailedSource, type MergeItem, type MergeSource, type Merged } from "./merge.ts";
 import { CursorExpired, CursorTooLong, RequestAborted, fitToFrame } from "./pager.ts";
 import { activityMs } from "./gmail/map.ts";
-import { listFilterFor, type GmailSource } from "./gmail/source.ts";
+import { listFilterFor, noiseLaneFilter, type GmailSource } from "./gmail/source.ts";
 import type { GmailService } from "./gmail/service.ts";
+import type { NoiseView } from "./noise/store.ts";
 
 const err = (code: ErrorBody["code"], message: string): Outcome<never> => ({ ok: false, error: makeError(code, message) });
 const isGmailNetwork = (n: string | undefined) => n !== undefined && n.toLowerCase() === GMAIL_NETWORK.toLowerCase();
@@ -45,6 +46,8 @@ export type RouterOptions = {
   idempotency?: IdempotencyCache<Outcome<unknown>>;
   /** The upload store: the file of an email (attachmentId), gone once sent. */
   uploads?: UploadSource;
+  /** Noise verdicts: Gmail's noise threads leave Primary and unread_summary and join Low priority (the Beeper actions do the same with their own). */
+  noise?: NoiseView;
 };
 
 async function guarded<T>(fn: () => Promise<Outcome<T>>): Promise<Outcome<T>> {
@@ -112,7 +115,11 @@ export function createRouter(o: RouterOptions) {
     return asked > 0 && m.failed.length === asked ? m.failed[0]!.error : null;
   }
 
-  const withFailed = (failed: FailedSource[]) => (failed.length ? { failedSources: failed.slice(0, 51) } : {});
+  // One entry per source (Low priority asks a Gmail account twice when noise is on).
+  const withFailed = (failed: FailedSource[]) => {
+    const one = failed.filter((f, i) => failed.findIndex((g) => g.source === f.source && g.accountID === f.accountID) === i);
+    return one.length ? { failedSources: one.slice(0, 51) } : {};
+  };
 
   // ---------------------------------------------------------------- lists
 
@@ -121,7 +128,11 @@ export function createRouter(o: RouterOptions) {
     if (beeperOnly(sel) || !gmail) return b.list_chats({ ...p, ...(sel.beeperAccountIDs ? { accountIDs: sel.beeperAccountIDs } : {}) }, ctx);
     return guarded(async (): Promise<Outcome<ActionResult<"list_chats">>> => {
       const limit = p.limit ?? 25;
-      const filter = listFilterFor(p);
+      const noise = o.noise?.active() ? o.noise : null;
+      const isNoise = noise ? (id: string) => noise.isNoise(id) : undefined;
+      const filter = listFilterFor(p, isNoise);
+      // Low priority with noise on: each account's other tabs, and its Primary threads that are noise.
+      const noiseLane = isNoise && p.inbox === "low-priority" ? noiseLaneFilter(p, isNoise) : null;
       const beeperParams = { ...p, ...(sel.beeperAccountIDs ? { accountIDs: sel.beeperAccountIDs } : {}) };
       delete beeperParams.cursor;
       const sources: MergeSource<ChatSummary>[] = [];
@@ -141,11 +152,12 @@ export function createRouter(o: RouterOptions) {
               };
             })(),
         });
-      sel.gmail.forEach((s, i) =>
-        sources.push({ id: shortId(s.email), rank: 1 + i, failure: { source: "gmail", accountID: gmailAccountID(s.email) }, fetch: (cursor, n) => s.listThreads(filter, cursor, n, ctx) }),
-      );
+      sel.gmail.forEach((s, i) => {
+        sources.push({ id: shortId(s.email), rank: 1 + i, failure: { source: "gmail", accountID: gmailAccountID(s.email) }, fetch: (cursor, n) => s.listThreads(filter, cursor, n, ctx) });
+        if (noiseLane) sources.push({ id: "n" + shortId(s.email).slice(1), rank: 1 + sel.gmail.length + i, failure: { source: "gmail", accountID: gmailAccountID(s.email) }, fetch: (cursor, n) => s.listThreads(noiseLane, cursor, n, ctx) });
+      });
       if (!sources.length) return { ok: true, data: { items: [], hasMore: false, nextCursor: null } };
-      const scope = `merged\u0000list_chats\u0000${JSON.stringify([p.network?.toLowerCase() ?? null, p.accountIDs ?? null, p.unreadOnly ?? null, p.pinnedOnly ?? null, p.inbox ?? null, p.type ?? null, p.query ?? null])}`;
+      const scope = `merged\u0000list_chats\u0000${JSON.stringify([p.network?.toLowerCase() ?? null, p.accountIDs ?? null, p.unreadOnly ?? null, p.pinnedOnly ?? null, p.inbox ?? null, p.type ?? null, p.query ?? null])}${noiseLane ? "\u0000noise" : ""}`;
       const m = await mergeCollect(sources, p.cursor ?? null, limit, scope);
       if (m === "bad") return err("BAD_PARAMS", "cursor is not from this list (other filters or another action).");
       const all = failuresOrError(m, sources.length);
@@ -177,7 +189,7 @@ export function createRouter(o: RouterOptions) {
         })(),
         ...sources.map(async (s, i) => {
           try {
-            const r = await s.unread(limit, ctx);
+            const r = await s.unread(limit, ctx, o.noise?.active() ? (id) => o.noise!.isNoise(id) : undefined);
             return { rank: 1 + i, items: r.items, truncated: r.truncated };
           } catch (e) {
             if (e instanceof RequestAborted) throw e;
