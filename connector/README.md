@@ -45,7 +45,7 @@ j-inbox run          # the service in the foreground (what launchd runs)
 | Beeper token, device token, Gmail refresh tokens | login Keychain, service `build.jsuite.j-inbox`, accounts `beeper-token` / `device-token` / `gmail:<address>`, written with `security -i` on stdin (never in argv) |
 | Gmail accounts (addresses and connected / reconnect_required; never tokens or mail) | `~/Library/Application Support/j-inbox/gmail.json` (0600) |
 | Idempotency journal (key hashes, parameter digests, result ids; never text or chat ids), asset allowlist (URL hashes) | `~/Library/Application Support/j-inbox/` |
-| Draft store `drafts.json`: for "ask an agent to draft a reply", each request's chat id, the owner's instruction and the agent's draft (the cloud keeps none of them); at most 100, each forgotten when the owner handles it or 7 days after it was made | `~/Library/Application Support/j-inbox/` (0600) |
+| Request store `drafts.json`: for "ask an agent to draft a reply", each request's chat id, the owner's instruction and the agent's draft; for "delegate to an agent as a Raft task", each request's chat id and the owner's instruction (the cloud keeps none of them); at most 200, each forgotten when the owner handles it (a delegation: when the task is created, or it is cancelled or dismissed) or 7 days after it was made | `~/Library/Application Support/j-inbox/` (0600) |
 | Audit log `audit.jsonl` (rotated at 5 MiB, 3 files), service log `service.log` | `~/Library/Logs/j-inbox/` |
 | Service state for `status` (pid, cloud link state, Beeper health) | `~/.config/j-inbox/state.json` |
 | launchd agent | `~/Library/LaunchAgents/build.jsuite.j-inbox.plist`: `RunAtLoad`, `KeepAlive {SuccessfulExit: false}`, `ThrottleInterval 10`, logs to `service.log` |
@@ -72,7 +72,7 @@ poll): refused without `J_INBOX_CONFIG_DIR`.
 | `src/gmail/client.ts` | Gmail REST client per account: access tokens from the cloud's `/google/token` proxy (`cloudTokenRefresher`, memory only), one refresh and retry on 401, capped bodies, no redirects, error mapping (`gmailErrorCode`: reads `UPSTREAM_DOWN`, lost writes `UNKNOWN_OUTCOME`, `invalid_grant` `REAUTH_REQUIRED`); `revokeAtGoogle` |
 | `src/gmail/source.ts`, `src/gmail/map.ts`, `src/gmail/mime.ts` | one account as a source (lists, threads, search, writes, attachments); Gmail JSON -> protocol shapes (drafts never leave the Mac); decoding (charsets, RFC 2047, address lists, email HTML -> text) and writing (reply-all recipients, `Re:`, `In-Reply-To`/`References`, UTF-8 base64 body, RFC 2047 headers, no header injection) |
 | `src/gmail/accounts.ts`, `src/gmail/service.ts`, `src/gmail/poller.ts` | `gmail.json` + Keychain; `gmail_connect` (one `users.getProfile`: the address must match, else nothing is stored) and removal (revoke at Google, forget); history polling every 30 s -> metadata-only events, re-sync on a history reset |
-| `src/drafts.ts` | the draft store behind the cloud-only `draft_store_put` / `_get` / `_set_text` / `_delete` (never Beeper): one 0600 JSON file written atomically, validated on load, bounded, purged after 7 days |
+| `src/drafts.ts` | the request store behind the cloud-only `draft_store_put` / `_get` / `_set_text` / `_delete` (never Beeper): drafts (`drq_`) and delegations (`dlg_`, no text), one 0600 JSON file written atomically, validated on load, bounded, purged after 7 days |
 | `src/media.ts`, `src/assets.ts` | `get_media`: only URLs a returned result carried (`AssetAllowlist`, hashes, bounded, persisted); head, then 256 KiB chunks under `ChunkWindow`, capped at 25 MiB or the declared size |
 | `src/events.ts`, `src/beeper-ws.ts` | Beeper `/v1/ws` subscription per the spec: wait for `ready`, send `subscriptions.set` with a `requestID`, connected only when `subscriptions.updated` echoes `["*"]`; an `INVALID_PAYLOAD`/`INVALID_COMMAND` error is retried once without the `app` key; no confirmed subscription within 20 s of opening the socket (or a socket that never opens): close and retry with backoff. Resubscribe after drops, 30 s health checks (status events; `reachable:false` = Beeper down, `tokenValid:false`), re-sync after reconnects |
 | `src/beeper-client.ts`, `src/beeper-map.ts`, `src/pager.ts`, `src/idempotency.ts` | Beeper HTTP client (encoded ids, no redirects, timeouts, capped bodies), mapping and sanitizing, `j2.` cursors, write dedupe that survives restarts |
@@ -121,6 +121,10 @@ Request handling (`CloudLink`):
   (`request_draft` and the other owner actions are `NOT_ALLOWED` here); the connector only keeps its
   texts in the draft store, handing them back to the cloud for the owner's page and for the one agent
   that was asked, and forgets them when the cloud says so (`draft_store_delete`) or after 7 days.
+- Delegations to agents (`"delegations.v1"`): the same store keeps a delegation's instruction under
+  its `dlg_` id (`request_delegation` and the other owner actions are `NOT_ALLOWED` here). The
+  connector never creates the Raft task: the agent does, with its own Raft CLI. The chat is marked
+  read through the ordinary `mark_read`.
 - `list_chats` with `inbox: "primary"` (the web's All chats and Unread) reads `GET /v1/chats`
   (`ChatWithPreview`) and filters archived/low-priority (and unread) chats here, so every row has
   its last message; text queries, chat types and the other inboxes use `/v1/chats/search` (no

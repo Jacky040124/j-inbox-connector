@@ -108,8 +108,15 @@ export const draftView = object({
 });
 export type DraftView = Infer<typeof draftView>;
 
-/** One request in the connector's draft store (draft_store_get). */
-export const storedDraft = object({ requestId: draftRequestID, chatID, instruction: draftInstruction, text: optional(draftText) });
+/**
+ * A request id the connector's request store keeps: a draft request (drq_) or, since 2026-10-29, a
+ * delegation request (dlg_, protocol delegations.ts; connectors with "delegations.v1"). The store is
+ * one for both: the owner's instruction (and a draft's text) by request id.
+ */
+export const storedRequestID = string({ min: 8, max: 64, pattern: /^(?:drq|dlg)_[A-Za-z0-9_-]+$/, format: "stored-request-id" });
+
+/** One request in the connector's request store (draft_store_get). `text` is a draft's only. */
+export const storedDraft = object({ requestId: storedRequestID, chatID, instruction: draftInstruction, text: optional(draftText) });
 export type StoredDraft = Infer<typeof storedDraft>;
 
 /** The Raft agent event's payload: the request id and nothing else (the agent CLI does not even show it). */
@@ -123,9 +130,14 @@ export type DraftEventPayload = Infer<typeof draftEventPayload>;
  */
 export function draftEventSummary(ownerName: string | null, requestId: string): string {
   if (!parse(draftRequestID, requestId).ok) throw new Error("invalid draft request id");
-  const who = sanitizeLine(ownerName ?? "", 60).replace(/[\[\]()<>*_`~|\\#!@:]/g, "").replace(/ {2,}/g, " ").trim() || "The owner";
+  const who = ownerLabelForEvent(ownerName);
   const s = `J-Inbox: ${who} asked you to draft a reply (request ${requestId}). Use the J-Inbox app: get_draft_request, then read_chat, then submit_draft. Draft only; never send.`;
   return s.slice(0, RAFT_EVENT_SUMMARY_MAX);
+}
+
+/** The owner's name as a Raft event's summary says it: one plain line, no markup or mentions, or "The owner". */
+export function ownerLabelForEvent(ownerName: string | null): string {
+  return sanitizeLine(ownerName ?? "", 60).replace(/[\[\]()<>*_`~|\\#!@:]/g, "").replace(/ {2,}/g, " ").trim() || "The owner";
 }
 
 /** /live `draft`: a request changed (metadata only; the page reads the texts with list_drafts). */

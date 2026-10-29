@@ -63,7 +63,9 @@ import {
   raftAgentID,
   raftAgentsResult,
   storedDraft,
+  storedRequestID,
 } from "./drafts.ts";
+import { MAX_RECENT_CHANNELS, MAX_SHOWN_DELEGATIONS, delegationInstruction, delegationRequestID, delegationView, raftChannel } from "./delegations.ts";
 
 
 type Shape = Record<string, Schema<any>>;
@@ -553,15 +555,87 @@ export const ACTIONS = {
     beeper: "none",
   }),
 
+  // ---- delegations (protocol delegations.ts): the owner hands a chat to an agent as a Raft task.
+  // The cloud keeps the request's metadata, the connector its instruction (the draft store, by a dlg_
+  // id). Agents use get_delegation_request / report_delegation (agent.ts).
+
+  request_delegation: define({
+    description:
+      "Delegate a chat to one of the allowed Raft agents (Settings > Agents) as a Raft task in a channel: the chat is marked read, the agent gets a Raft event with the request id only and has 30 minutes to create and claim the task and report its number. A new request for the same chat replaces the open one. Owner only.",
+    params: object({ chatID, agentID: raftAgentID, channel: raftChannel, instruction: delegationInstruction }),
+    paramDocs: {
+      chatID: "Chat ID",
+      agentID: "The agent's id (from list_raft_agents, allowed)",
+      channel: "The Raft channel for the task, as #name",
+      instruction: "What the task is, 1-2000 characters (kept on the owner's computer)",
+    },
+    defaults: {},
+    result: delegationView,
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    cloud: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    rateLimitPerMinute: 20,
+    beeper: "none: the cloud runs read_chat (limit 1), draft_store_put and mark_read at the connector, then sends the Raft agent event",
+  }),
+
+  cancel_delegation: define({
+    description: "Cancel a pending delegation (the agent can no longer report a task). Owner only.",
+    params: object({ requestId: delegationRequestID }),
+    paramDocs: { requestId: "requestId from request_delegation or list_delegations" },
+    defaults: {},
+    result: delegationView,
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    cloud: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    beeper: "none: the cloud forgets the instruction on the computer (draft_store_delete)",
+  }),
+
+  dismiss_delegation: define({
+    description: "Put a delegation aside (created, failed or expired): it no longer shows on the chat. Owner only.",
+    params: object({ requestId: delegationRequestID }),
+    paramDocs: { requestId: "requestId from list_delegations" },
+    defaults: {},
+    result: delegationView,
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    cloud: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    beeper: "none: draft_store_delete at the connector",
+  }),
+
+  list_delegations: define({
+    description:
+      "The delegations shown on chats (pending, created, failed, expired), newest first, with the instruction of the open ones read from the owner's computer (absent while it is offline), and the channels the owner used before (most recent first). Owner only.",
+    params: object({ chatID: optional(chatID) }),
+    paramDocs: { chatID: "Only this chat's" },
+    defaults: {},
+    result: object({ items: array(delegationView, { max: MAX_SHOWN_DELEGATIONS }), channels: array(raftChannel, { max: MAX_RECENT_CHANNELS }) }),
+    write: false,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    cloud: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    beeper: "the cloud's request store (metadata), then draft_store_get at the connector",
+  }),
+
   // The connector's draft store (the instruction and the draft text stay on the owner's computer).
   // Cloud-only: only the room sends them, as the steps of the draft actions above.
 
   draft_store_put: define({
-    description: "Internal: keep a draft request's instruction on the owner's computer.",
-    params: object({ requestId: draftRequestID, chatID, instruction: draftInstruction, deadline: isoDateTime() }),
-    paramDocs: { requestId: "The request id", chatID: "Chat ID", instruction: "The owner's instruction", deadline: "When the request expires" },
+    description: "Internal: keep a draft or delegation request's instruction on the owner's computer.",
+    params: object({ requestId: storedRequestID, chatID, instruction: draftInstruction, deadline: isoDateTime() }),
+    paramDocs: { requestId: "The request id (drq_ draft, dlg_ delegation)", chatID: "Chat ID", instruction: "The owner's instruction", deadline: "When the request expires" },
     defaults: {},
-    result: object({ requestId: draftRequestID, stored: literal(true) }),
+    result: object({ requestId: storedRequestID, stored: literal(true) }),
     write: true,
     needsApprovalForAgents: false,
     humanOnly: true,
@@ -572,8 +646,8 @@ export const ACTIONS = {
   }),
 
   draft_store_get: define({
-    description: "Internal: read draft requests (instruction, draft) from the owner's computer. Unknown ids are left out.",
-    params: object({ requestIds: array(draftRequestID, { min: 1, max: MAX_DRAFT_READ }) }),
+    description: "Internal: read draft or delegation requests (instruction, draft) from the owner's computer. Unknown ids are left out.",
+    params: object({ requestIds: array(storedRequestID, { min: 1, max: MAX_DRAFT_READ }) }),
     paramDocs: { requestIds: "Request ids" },
     defaults: {},
     result: object({ items: array(storedDraft, { max: MAX_DRAFT_READ }) }),
@@ -602,8 +676,8 @@ export const ACTIONS = {
   }),
 
   draft_store_delete: define({
-    description: "Internal: forget draft requests (instruction and draft) on the owner's computer.",
-    params: object({ requestIds: array(draftRequestID, { min: 1, max: MAX_ACTIVE_DRAFTS }) }),
+    description: "Internal: forget draft or delegation requests (instruction and draft) on the owner's computer.",
+    params: object({ requestIds: array(storedRequestID, { min: 1, max: MAX_ACTIVE_DRAFTS }) }),
     paramDocs: { requestIds: "Request ids" },
     defaults: {},
     result: object({ deleted: integer({ min: 0, max: MAX_ACTIVE_DRAFTS }) }),

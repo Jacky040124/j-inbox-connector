@@ -31,6 +31,7 @@ import { errorBody, errorCode } from "./errors.ts";
 import { beeperHealth, chatID, ownId, versionString } from "./model.ts";
 import { SNOOZE_REASONS } from "./snooze.ts";
 import { draftMeta, raftAgentID } from "./drafts.ts";
+import { delegationMeta } from "./delegations.ts";
 import { approvalView, canonicalOrigin } from "./agent.ts";
 import { eventFrame } from "./frames.ts";
 import type { ActionName } from "./actions.ts";
@@ -338,6 +339,12 @@ export const liveServerMessage = discriminated("type", {
   draft: object({ type: literal("draft"), request: draftMeta }),
   /** The allowed agents or the agent directory changed (Settings > Agents in another tab). */
   draft_agents: object({ type: literal("draft_agents") }),
+  /**
+   * A delegation request was made or changed (added 2026-10-29): metadata only (the channel, the
+   * task number once the agent reported it). The page reads an open one's instruction with
+   * list_delegations {chatID}.
+   */
+  delegation: object({ type: literal("delegation"), request: delegationMeta }),
 });
 
 export const liveClientMessage = discriminated("type", {

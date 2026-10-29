@@ -90,6 +90,25 @@ describe("DraftStore", () => {
     writeFileSync(path, JSON.stringify({ v: 1, entries: [good, { ...good, requestId: "../etc" }, { ...good, requestId: rid(2), instruction: "" }, { ...good, requestId: rid(3), createdAt: "x" }, { ...good, requestId: rid(4), extra: 1 }, null] }));
     expect(new DraftStore({ path }).get([1, 2, 3, 4].map(rid)).map((d) => d.requestId)).toEqual([rid(1)]);
   });
+  test("delegations' instructions (dlg_ ids) share the store: kept, read, forgotten like drafts'; never a draft text", () => {
+    const path = join(tmp(), "drafts.json");
+    const s = new DraftStore({ path });
+    const dlg = "dlg_0000000000000001";
+    s.put({ requestId: dlg, chatID, instruction: "delegation-secret: get three roof quotes", deadline: deadline() });
+    s.put({ requestId: rid(1), chatID, instruction: "draft", deadline: deadline() });
+    expect(s.get([dlg])).toEqual([{ requestId: dlg, chatID, instruction: "delegation-secret: get three roof quotes" }]);
+    expect(s.setText(dlg, "not for a delegation")).toBe(false);
+    expect(new DraftStore({ path }).get([dlg, rid(1)]).map((d) => d.requestId)).toEqual([dlg, rid(1)]);
+    expect(s.delete([dlg])).toBe(1);
+    expect(readFileSync(path, "utf8")).not.toContain("delegation-secret");
+  });
+  test("room for 50 open drafts and 50 open delegations, and more", () => {
+    const s = new DraftStore();
+    for (let i = 1; i <= 150; i++) s.put({ requestId: i % 2 ? rid(i) : `dlg_${String(i).padStart(16, "0")}`, chatID, instruction: `i${i}`, deadline: deadline() });
+    expect(s.size).toBe(150);
+    for (let i = 151; i <= 260; i++) s.put({ requestId: rid(i), chatID, instruction: `i${i}`, deadline: deadline() });
+    expect(s.size).toBe(200);
+  });
   test("a write that fails leaves nothing half-stored", () => {
     const dir = tmp();
     // The store's file is a directory: every write fails.
@@ -119,6 +138,13 @@ describe("draft_store_* through the dispatcher", () => {
     expect((await ok("draft_store_get", { requestIds: [rid(1), rid(2)] })).items).toEqual([{ requestId: rid(1), chatID, instruction: HOSTILE, text: "x".repeat(MAX_SEND_TEXT_LENGTH) }]);
     expect(await ok("draft_store_delete", { requestIds: [rid(1)] })).toEqual({ deleted: 1 });
     expect((await ok("draft_store_get", { requestIds: [rid(1)] })).items).toEqual([]);
+    // A delegation's instruction, by its dlg_ id; it takes no draft text.
+    const dlg = "dlg_0000000000000007";
+    expect(await ok("draft_store_put", { requestId: dlg, chatID, instruction: "Get quotes", deadline: deadline() })).toEqual({ requestId: dlg, stored: true });
+    expect((await ok("draft_store_get", { requestIds: [dlg, rid(1)] })).items).toEqual([{ requestId: dlg, chatID, instruction: "Get quotes" }]);
+    const st = await d.dispatch("draft_store_set_text", { requestId: dlg, text: "x" });
+    expect(st.kind === "res" && !st.ok && st.error.code).toBe("BAD_PARAMS");
+    expect(await ok("draft_store_delete", { requestIds: [dlg, rid(1)] })).toEqual({ deleted: 1 });
   });
   test("bad params are refused before the store is touched; an unwritable store is INTERNAL", async () => {
     const store = new DraftStore();
@@ -129,6 +155,7 @@ describe("draft_store_* through the dispatcher", () => {
       ["draft_store_put", { requestId: rid(1), chatID, instruction: "x".repeat(2001), deadline: deadline() }],
       ["draft_store_set_text", { requestId: rid(1), text: "x".repeat(MAX_SEND_TEXT_LENGTH + 1) }],
       ["draft_store_get", { requestIds: [] }],
+      ["draft_store_put", { requestId: "apr_0000000000000001", chatID, instruction: "x", deadline: deadline() }],
     ] as const) {
       const r = await d.dispatch(a, p);
       expect(r.kind === "res" && !r.ok && r.error.code).toBe("BAD_PARAMS");

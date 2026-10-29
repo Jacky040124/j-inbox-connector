@@ -75,7 +75,7 @@ describe("dispatcher whitelist", () => {
     }
     expect(fb.state.calls).toEqual([]);
   });
-  test("the cloud's own actions (the snooze store, the draft requests) are NOT_ALLOWED here, even with valid params", async () => {
+  test("the cloud's own actions (the snooze store, the draft and delegation requests) are NOT_ALLOWED here, even with valid params", async () => {
     const { d } = make();
     const rid = { requestId: "drq_0123456789abcdef" };
     const valid: Record<string, unknown> = {
@@ -89,6 +89,10 @@ describe("dispatcher whitelist", () => {
       list_drafts: {},
       list_raft_agents: {},
       set_draft_agents: { agentIDs: [] },
+      request_delegation: { chatID: CHAT_IDS.imessageAlice, agentID: "agent_x", channel: "#garage", instruction: "Get quotes" },
+      cancel_delegation: { requestId: "dlg_0123456789abcdef" },
+      dismiss_delegation: { requestId: "dlg_0123456789abcdef" },
+      list_delegations: {},
     };
     expect([...CLOUD_ACTION_NAMES].sort() as string[]).toEqual(Object.keys(valid).sort());
     for (const a of CLOUD_ACTION_NAMES) {

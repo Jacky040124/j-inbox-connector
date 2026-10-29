@@ -21,8 +21,9 @@ Changes must be **additive** and recorded in the root README changelog (see "Rul
 | `model.ts` | Normalized data shapes: `chatSummary`, `messageItem` (optional `email` headers), `attachment`, `reaction`, `account`, `beeperHealth`, `mediaHead`, `emailHeaders`/`emailPerson`, `emailRecipient`. |
 | `actions.ts` | The action catalogue `ACTIONS`, `parseActionParams` (fills defaults), `parseActionResult`, `coerceAgentParams`. |
 | `frames.ts` | Connector<->cloud frames, `parseConnectorFrame`, `parseCloudFrame`, `encodeFrame`, media chunking and flow control (`makeChunkFrames`, `ChunkAssembler`, `ChunkWindow`, `mediaDeadlineMs`), `CLOSE_CODES`, `shouldReconnect`, `backoffDelay`. |
-| `agent.ts` | Raft App surface: `buildRaftManifest`, agent action response, approvals (`approvalTicket`, `approvalView`), `agentMediaResult`, owner notices (`ownerNoticeText`, `offlineAlertDue`), room binding (`canBindRoom`, `authorizeRoomAccess`), meta actions `whoami`, `approval_status`, `get_draft_request` and `submit_draft`. |
+| `agent.ts` | Raft App surface: `buildRaftManifest`, agent action response, approvals (`approvalTicket`, `approvalView`), `agentMediaResult`, owner notices (`ownerNoticeText`, `offlineAlertDue`), room binding (`canBindRoom`, `authorizeRoomAccess`), meta actions `whoami`, `approval_status`, `get_draft_request`, `submit_draft`, `get_delegation_request` and `report_delegation`. |
 | `drafts.ts` | Drafts by agents: `draftMeta` (what the cloud keeps), `draftView` (+ the texts from the computer), `storedDraft`, `raftAgent`, `raftAgentsResult`, ids (`draftRequestID`, `raftAgentID`), `DRAFT_STATUSES`, `ACTIVE_DRAFT_STATUSES`, `DRAFT_DELIVERIES`, limits (`DRAFT_DEADLINE_MS` 30 min, `MAX_DRAFT_INSTRUCTION_LENGTH` 2000, `MAX_ACTIVE_DRAFTS` 50, `MAX_DRAFT_READ` 10, `DRAFT_KEEP_MS` 7 days), the Raft event (`draftEventSummary`, `draftEventPayload`). |
+| `delegations.ts` | Delegations to agents as Raft tasks: `delegationMeta` (what the cloud keeps), `delegationView` (+ the instruction from the computer), `delegationRequestForAgent`, `delegationRequestID` (`dlg_`), channels (`raftChannel`, `CHANNEL_PATTERN`, `normalizeChannel`, `sameChannel`), `delegationTask`, `cleanDelegationReason`, `coerceReportParams`, `DELEGATION_STATUSES` / `SHOWN_` / `OPEN_`, limits (`DELEGATION_DEADLINE_MS` 30 min, `MAX_ACTIVE_DELEGATIONS` 50, `MAX_SHOWN_DELEGATIONS` 200, `MAX_RECENT_CHANNELS` 20, `MAX_DELEGATION_REASON_LENGTH` 200), the Raft event (`delegationEventSummary`, `delegationEventPayload`). `drafts.ts` adds `storedRequestID` (`drq_` or `dlg_`: the connector's one request store). |
 | `web.ts` | Browser API routes and shapes, CSRF header, `mediaResponseHeaders`, `WEB_HTML_HEADERS`, human and agent session cookies, logout, local-cache rules, upgrade `Origin` checks, `/live` messages. |
 | `auth.ts` | Login with Raft (`startHumanLogin`, `handleRaftCallback`: state + nonce + PKCE for humans, stateless only for proven agents), session lifetimes (`sessionExpired`, `agentSessionMaxAge`), surfaces (`surfaceForPath`, `sessionKindForSurface`, `authorizeSurface`). |
 | `pairing.ts` | Device-code pairing flow, user/device codes, device tokens, `hashToken`, `checkPairConfirm`, `approximateIP`, `PairingGuard` attempt limits. |
@@ -105,7 +106,10 @@ camelCase (like Beeper). Agent writes marked "approval" go through the approval 
 | `list_drafts` | `chatID?` | `{items: draftView[]}` (active ones, newest first, at most `MAX_ACTIVE_DRAFTS`) | (cloud, `humanOnly`) | n/a | the cloud's store, then `draft_store_get` |
 | `list_raft_agents` | `refresh?` | `raftAgentsResult {agents, allowedAgentIDs, fetchedAt, signInNeeded}` | (cloud, `humanOnly`) | n/a | Raft's agent directory (owner's token) |
 | `set_draft_agents` | `agentIDs[0-100]` | `{allowedAgentIDs}` | yes (cloud, `humanOnly`) | n/a | none |
-| `draft_store_put` / `_get` / `_set_text` / `_delete` | see `actions.ts` | | (cloud-only, `humanOnly`) | n/a | the connector's local draft store |
+| `request_delegation` | `chatID agentID channel(#name) instruction(1-2000)` | `delegationView` | yes (cloud, `humanOnly`) | n/a | none itself: see "Delegations" |
+| `cancel_delegation`, `dismiss_delegation` | `requestId` | `delegationView` (cancelled / dismissed) | yes (cloud, `humanOnly`) | n/a | `draft_store_delete` at the connector |
+| `list_delegations` | `chatID?` | `{items: delegationView[], channels: #name[]}` (shown ones, newest first, at most `MAX_SHOWN_DELEGATIONS`; recent channels, at most 20) | (cloud, `humanOnly`) | n/a | the cloud's store, then `draft_store_get` |
+| `draft_store_put` / `_get` / `_set_text` / `_delete` | see `actions.ts` | | (cloud-only, `humanOnly`) | n/a | the connector's local request store (draft texts and, by `dlg_` id, delegation instructions; `_set_text` drafts only) |
 | `get_media` | `url` (an attachment `url` or chat `avatarURL` from another result) | `res` = `{mimeType, size (null if unknown), fileName?}` then `chunk` frames | | | `GET /v1/assets/serve?url=`; `gmail://` URLs: Gmail `messages.attachments.get` |
 
 Notes for implementers:
@@ -201,6 +205,52 @@ sends (or edits, discards, asks again). Nothing is written into Beeper or Gmail 
   HMAC of it, the agent id, status, times, deadline, delivery bookkeeping, an error code). Never the
   instruction, the draft, a title or a network. `/live` `draft {request: draftMeta}` and
   `draft_agents {}` keep tabs in step.
+- The connector's store is one for drafts and delegations: `draft_store_put` / `_get` / `_delete`
+  take `storedRequestID` (`drq_` or `dlg_`), `draft_store_set_text` a draft's id only.
+
+### Delegations (`delegations.ts`; cloud actions, agent meta actions; added 2026-10-29)
+
+Delegation is not a reply: the owner turns a chat (an email that needs some work done) into a
+Raft task for an agent, the chat is finished (marked read), and the owner follows the task in Raft.
+
+- **Who may be asked**: the agents allowed in Settings > Agents (the drafts' allowlist,
+  `set_draft_agents`).
+- **`request_delegation {chatID, agentID, channel, instruction}`**: the same checks as
+  `request_draft` (allowed agent, agent access on, computer online), with `"delegations.v1"`
+  (`NOT_SUPPORTED`). `channel` is `#name` (`raftChannel`; the web normalises what the owner typed
+  with `normalizeChannel`). The cloud reads the chat (`read_chat` limit 1), puts the instruction in
+  the connector's request store (`draft_store_put` with the `dlg_` id), stores the metadata, and
+  sends the agent a Raft event: `summary` = `delegationEventSummary(owner, requestId)`, `payload` =
+  `{type:"delegation_request", requestId}`, `externalEventId` = the request id, `ttlSeconds` 1800.
+  Then it marks the chat read (`mark_read` as the owner) and remembers the channel among the owner's
+  recent ones (most recent first, case-insensitive, at most 20). The channel, the chat and the
+  instruction never go to Raft in the event. A new request for a chat replaces the one it shows
+  (pending: cancelled; created, failed, expired: dismissed). At most `MAX_ACTIVE_DELEGATIONS` (50)
+  open (pending, failed, expired) per room (`TOO_LARGE`).
+- **The agent**: `get_delegation_request {requestId}` -> `delegationRequestForAgent` `{requestId,
+  chatID, network, chatTitle, instruction, channel, status:"pending", deadline}`, then
+  (optionally) `read_chat`, then its own Raft CLI (`raft task create --target "#channel" --title …
+  --description … --assignee @self`, or create then `raft task claim --target "#channel" --number
+  N`), then `report_delegation {requestId, task: {number, channel}}` -> `{requestId,
+  status:"created"}` or `report_delegation {requestId, error}` -> `{requestId, status:"failed"}`
+  (the reason is cleaned with `cleanDelegationReason`: one line, no bidi or zero-width characters,
+  at most 200). Exactly one of `task` and `error` (`BAD_PARAMS`). Only the agent the request was
+  made for (anyone else: `NOT_FOUND`), only while pending and before the deadline (`CONFLICT`),
+  once, `DELEGATION_GET_PER_MINUTE` (30) / `DELEGATION_REPORT_PER_MINUTE` (10) per agent.
+  `coerceReportParams` accepts `task` as JSON text and its number as digits (`#12` too). The event
+  and the action docs say it: delegation means creating the task; never send anything in the chat.
+- **Deadline**: `DELEGATION_DEADLINE_MS` (30 min); then `expired` (the room's alarm).
+- **The owner**: `list_delegations {chatID?}` (shown requests; the open ones with their instruction
+  read from the computer, absent while it is offline; the recent channels), `cancel_delegation`
+  (pending), `dismiss_delegation` (created, failed or expired). Retry is a new `request_delegation`.
+  The instruction leaves the connector's store when the task is created, the request is cancelled,
+  dismissed or replaced (offline: when the computer is back), and after `DRAFT_KEEP_MS` (7 days) at
+  the latest.
+- **What the cloud keeps** per request: `delegationMeta` only (request id, the chat id sealed and an
+  HMAC of it, the agent id, the channel name, status, times, deadline, delivery bookkeeping, the task
+  number and its channel, an error code or the agent's cleaned reason), and the owner's recent
+  channel names. Never the instruction, a title or a network. `/live` `delegation {request:
+  delegationMeta}` keeps tabs in step.
 
 ### Gmail (`gmail.ts`, design/gmail-plan.md)
 
@@ -302,7 +352,9 @@ both                 ping {t} / pong {t}                    every 25 s; 60 s sil
   or message value.
 - `hello.capabilities` values are in `CAPABILITIES`: `"media.v1"` = `get_media` streams chunks
   under `ack` flow control; `"gmail.v1"` = the connector runs Gmail accounts (`gmail_connect`,
-  `compose_email`, Gmail chats). The cloud gates Sign in with Google on `"gmail.v1"`.
+  `compose_email`, Gmail chats). The cloud gates Sign in with Google on `"gmail.v1"`; `"drafts.v1"` =
+  the connector keeps draft requests' texts (`draft_store_*`); `"delegations.v1"` = its store also
+  takes delegation requests (`dlg_` ids). The cloud gates `request_draft` / `request_delegation` on them.
 - Connector behaviour the cloud may rely on: a duplicate in-flight `req` id is ignored; a `req`
   that arrives while the connector shuts down gets `OFFLINE` and is not dispatched; a queued `req`
   whose deadline has (nearly) passed gets `TIMEOUT` without being dispatched; a `get_media` stream
@@ -349,7 +401,7 @@ both                 ping {t} / pong {t}                    every 25 s; 60 s sil
   `canBindRoom(human, existing)` lets only a server `owner`/`admin` pair, and refuses a second
   owner on an already bound server (`CONFLICT`). `authorizeRoomAccess(principal, binding)` runs on
   every request: humans only reach their own room; agents only the room bound to their server.
-- Meta actions (cloud-only, never forwarded): `whoami`, `approval_status`, `get_draft_request`, `submit_draft` (see "Drafts by agents").
+- Meta actions (cloud-only, never forwarded): `whoami`, `approval_status`, `get_draft_request`, `submit_draft` (see "Drafts by agents"), `get_delegation_request`, `report_delegation` (see "Delegations").
 
 ## Browser API (`web.ts`)
 

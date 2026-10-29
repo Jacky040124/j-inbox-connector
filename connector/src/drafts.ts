@@ -1,17 +1,19 @@
-// The draft store: for "ask an agent to draft a reply", the owner's instruction and the agent's
-// draft stay on this computer, never in the cloud (protocol drafts.ts). The cloud keeps only the
-// request's metadata and asks for the texts with the cloud-only draft_store_* actions when the
-// owner's page or the agent that was asked needs them. One JSON file, mode 0600 in a 0700
-// directory, written atomically on every change; bounded in count and size; a request is forgotten
-// when the cloud says it was handled, or DRAFT_KEEP_MS (7 days) after it was made, whatever happened.
+// The request store (file drafts.json): the owner's instructions for agents stay on this computer,
+// never in the cloud (protocol drafts.ts, delegations.ts). For "ask an agent to draft a reply" it
+// keeps the instruction and the agent's draft (drq_ ids); for "delegate to an agent as a Raft task"
+// the instruction only (dlg_ ids, since "delegations.v1"). The cloud keeps only the requests'
+// metadata and asks for the texts with the cloud-only draft_store_* actions when the owner's page or
+// the agent that was asked needs them. One JSON file, mode 0600 in a 0700 directory, written
+// atomically on every change; bounded in count and size; a request is forgotten when the cloud says
+// it was handled, or DRAFT_KEEP_MS (7 days) after it was made, whatever happened.
 import { readFileSync } from "node:fs";
 import { DRAFT_KEEP_MS, parse, storedDraft, type StoredDraft } from "@j-inbox/protocol";
 import { writeAtomic } from "./config.ts";
 
 type Entry = StoredDraft & { createdAt: number; deadline: number; updatedAt: number };
 
-/** The cloud keeps at most MAX_ACTIVE_DRAFTS (50) open; room for that and some that were not purged yet. */
-const MAX_ENTRIES = 100;
+/** The cloud keeps at most MAX_ACTIVE_DRAFTS (50) drafts and MAX_ACTIVE_DELEGATIONS (50) delegations open; room for those and some that were not purged yet. */
+const MAX_ENTRIES = 200;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 
 export class DraftStoreError extends Error {}
@@ -83,7 +85,7 @@ export class DraftStore {
     } catch {}
   }
 
-  /** Keep a request's instruction (a request asked again replaces it). Throws if it cannot be written. */
+  /** Keep a request's instruction (a draft's or a delegation's; a request asked again replaces it). Throws if it cannot be written. */
   put(p: { requestId: string; chatID: string; instruction: string; deadline: string }): void {
     const now = this.now();
     const before = this.entries.get(p.requestId);
@@ -110,11 +112,11 @@ export class DraftStore {
     return out;
   }
 
-  /** Keep the agent's draft. false: no such request here. Throws if it cannot be written. */
+  /** Keep the agent's draft. false: no such draft request here (a delegation has no draft). Throws if it cannot be written. */
   setText(requestId: string, text: string): boolean {
     this.purge();
     const e = this.entries.get(requestId);
-    if (!e) return false;
+    if (!e || !requestId.startsWith("drq_")) return false;
     const before = { ...e };
     e.text = text;
     e.updatedAt = this.now();
