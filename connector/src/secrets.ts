@@ -7,9 +7,13 @@ import { dirname } from "node:path";
 import { normalizeGmailAddress } from "@j-inbox/protocol";
 import type { Runner } from "./runner.ts";
 
-export type SecretName = "beeper-token" | "device-token" | "typesafe-api-key" | `gmail:${string}`;
-/** The fixed names; Gmail accounts add `gmail:<address>` (gmailSecretName). `typesafe-api-key`: Jev, for noise (`j-inbox jev-key`). */
-export const SECRET_NAMES: readonly SecretName[] = ["beeper-token", "device-token", "typesafe-api-key"];
+export type SecretName = "beeper-token" | "device-token" | "typesafe-api-key" | "gmail-cache-key" | `gmail:${string}`;
+/**
+ * The fixed names; Gmail accounts add `gmail:<address>` (gmailSecretName). `typesafe-api-key`: Jev,
+ * for noise (`j-inbox jev-key`). `gmail-cache-key`: seals the Gmail metadata cache file (made by the
+ * service when it runs a Gmail account; random, never leaves this Mac).
+ */
+export const SECRET_NAMES: readonly SecretName[] = ["beeper-token", "device-token", "typesafe-api-key", "gmail-cache-key"];
 
 /** Keychain account for a Gmail account's refresh token. */
 export function gmailSecretName(email: string): SecretName {

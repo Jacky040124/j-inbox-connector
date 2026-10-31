@@ -27,6 +27,10 @@ Real-API behaviour it models (from the read-only smoke run, see `e2e/README.md`)
 - `PATCH /v1/chats/{id}` refuses a non-empty draft while one exists (409 `CONFLICT`).
 - `POST /v1/chats/{id}/unread` within 5 s of an unarchive puts the chat back in the archive (seen on
   Beeper Desktop 4.3, 2026-10-28); unread first, then unarchive, keeps both.
+- `POST /v1/chats/{id}/unread` on a WhatsApp chat also archives it about 0.5 s later, and `POST
+  /read` un-archives it (measured 2026-10-31): `controls.unreadArchives` (networks, default
+  `["WhatsApp"]`) and `controls.unreadArchiveDelayMs` (default 300). Modelled at its worst: an
+  unarchive in between does not stop it.
 - `/v1/ws` `subscriptions.set` with `app: {state: true}` gets `app.state.updated`;
   `fb.setAppState("needs-login")` changes it.
 - Every request is logged in `fb.state.calls` before auth and fault injection (`authorized`,

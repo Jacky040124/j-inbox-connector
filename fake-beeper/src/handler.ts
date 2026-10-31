@@ -6,6 +6,8 @@ import type { Call, FakeBeeperState } from "./state.ts";
 /** When each chat was last unarchived, for the unread-after-unarchive quirk (see POST /unread). */
 const unarchivedAt = new WeakMap<object, number>();
 const UNREAD_REARCHIVE_MS = 5_000;
+/** Chats the mark-unread quirk archived (or is about to), for POST /read (see controls.unreadArchives). */
+const unreadArchived = new WeakMap<object, { timer: ReturnType<typeof setTimeout> | null }>();
 
 export const FAKE_BEEPER_VERSION = "4.2.999-fake";
 
@@ -35,9 +37,17 @@ export type Controls = {
   wsRejectApp: boolean;
   /** /v1/ws: accept subscriptions.set but never answer subscriptions.updated (or error). */
   wsSilentSubscribe: boolean;
+  /**
+   * Real Beeper (measured 2026-10-31 on WhatsApp): POST /unread also archives the chat a moment
+   * later (`unreadArchiveDelayMs`, about 0.5 s for real), with a chat event; POST /read on such a
+   * chat un-archives it again. Modelled at its worst: an unarchive in between does not stop it.
+   * Networks (chat `network`, case-insensitive) it happens on; [] turns it off.
+   */
+  unreadArchives: string[];
+  unreadArchiveDelayMs: number;
 };
 
-export const defaultControls = (): Controls => ({ latencyMs: 0, messageOrder: "desc", messagesPageSize: 20, settleMs: 0, dropEvents: false, emptyOlderPageForIMessage: false, wsReadyDelayMs: 0, wsNoReady: false, wsRejectApp: false, wsSilentSubscribe: false });
+export const defaultControls = (): Controls => ({ latencyMs: 0, messageOrder: "desc", messagesPageSize: 20, settleMs: 0, dropEvents: false, emptyOlderPageForIMessage: false, wsReadyDelayMs: 0, wsNoReady: false, wsRejectApp: false, wsSilentSubscribe: false, unreadArchives: ["WhatsApp"], unreadArchiveDelayMs: 300 });
 
 type Match = { method?: string; path?: string; route?: string; times?: number };
 export type FailRule = Match & { status: number; code?: string; message?: string; rawBody?: string; headers?: Record<string, string> };
@@ -513,6 +523,12 @@ async function dispatch(method: string, r: Route, q: URLSearchParams, body: Reco
       c.unreadCount = msgs.filter((m) => m.isUnread).length;
       c.isMarkedUnread = false;
       if (msgs[upto]) c.lastReadMessageSortKey = msgs[upto]!.sortKey;
+      const quirk = unreadArchived.get(c);
+      if (quirk) {
+        if (quirk.timer) clearTimeout(quirk.timer);
+        unreadArchived.delete(c);
+        c.isArchived = false;
+      }
       state.emitChat(c);
       return json(chatOut(c));
     }
@@ -527,6 +543,17 @@ async function dispatch(method: string, r: Route, q: URLSearchParams, body: Reco
       const at = unarchivedAt.get(c);
       if (at !== undefined && Date.now() - at < UNREAD_REARCHIVE_MS) c.isArchived = true;
       unarchivedAt.delete(c);
+      if (ctx.controls.unreadArchives.some((n) => n.toLowerCase() === String(c.network ?? "").toLowerCase()) && !unreadArchived.get(c)?.timer) {
+        const entry: { timer: ReturnType<typeof setTimeout> | null } = { timer: null };
+        entry.timer = setTimeout(() => {
+          entry.timer = null;
+          // Gone with a reset, or read in between: nothing happens.
+          if (ctx.state() !== state || unreadArchived.get(c) !== entry) return;
+          c.isArchived = true;
+          state.emitChat(c);
+        }, Math.max(0, ctx.controls.unreadArchiveDelayMs));
+        unreadArchived.set(c, entry);
+      }
       state.emitChat(c);
       return json(chatOut(c));
     }

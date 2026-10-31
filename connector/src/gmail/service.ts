@@ -8,6 +8,7 @@ import { GmailAccounts } from "./accounts.ts";
 import { createGmailClient, revokeAtGoogle, type RefreshFn } from "./client.ts";
 import { GmailPoller } from "./poller.ts";
 import { createGmailSource, type GmailSource } from "./source.ts";
+import { ThreadMetaCache } from "./meta-cache.ts";
 
 export type GmailServiceOptions = {
   secrets: SecretStore;
@@ -19,8 +20,12 @@ export type GmailServiceOptions = {
   fetchImpl?: typeof fetch;
   scan?: { maxPages?: number; budgetMs?: number };
   pollIntervalMs?: number;
+  /** While a J-Inbox page is open (default GMAIL_POLL_ACTIVE_INTERVAL_MS). */
+  activePollIntervalMs?: number;
   now?: () => number;
   log?: (msg: string, fields?: Record<string, string | number | boolean | null>) => void;
+  /** Thread metadata for the lists, shared by every account (the service's is kept on disk, sealed). Default: memory only. */
+  metaCache?: ThreadMetaCache;
   /** Lifecycle notes for the local audit log (metadata only). */
   onLifecycle?: (event: "gmail.connected" | "gmail.removed" | "gmail.reauth") => void;
 };
@@ -32,6 +37,7 @@ export type GmailService = ReturnType<typeof createGmailService>;
 export function createGmailService(o: GmailServiceOptions) {
   const accounts = new GmailAccounts({ path: o.path, secrets: o.secrets, now: o.now });
   const sources = new Map<string, GmailSource>();
+  const metaCache = o.metaCache ?? new ThreadMetaCache();
   let poller: GmailPoller | null = null;
 
   function sourceFor(email: string): GmailSource {
@@ -53,7 +59,7 @@ export function createGmailService(o: GmailServiceOptions) {
       },
       onHealthy: () => accounts.setStatus(email, "connected"),
     });
-    s = createGmailSource({ email, client, scan: o.scan, now: o.now });
+    s = createGmailSource({ email, client, scan: o.scan, now: o.now, metaCache });
     sources.set(email, s);
     return s;
   }
@@ -120,19 +126,29 @@ export function createGmailService(o: GmailServiceOptions) {
       }
       sources.delete(email);
       poller?.forget(email);
+      metaCache.forget(email);
       o.onLifecycle?.("gmail.removed");
       return { ok: true, revoked };
     },
 
-    startPolling(send: (f: EventFrame) => boolean) {
-      poller ??= new GmailPoller({ sources: () => this.sources(), send, intervalMs: o.pollIntervalMs, log: o.log, skip: (e) => accounts.get(e)?.status === "reconnect_required" });
+    /** `send` true = handed to a connected cloud link; `canSend` false while the link is down (see GmailPoller). */
+    startPolling(send: (f: EventFrame) => boolean, canSend?: () => boolean) {
+      poller ??= new GmailPoller({ sources: () => this.sources(), send, canSend, intervalMs: o.pollIntervalMs, activeIntervalMs: o.activePollIntervalMs, log: o.log, skip: (e) => accounts.get(e)?.status === "reconnect_required" });
       poller.start();
+    },
+    /** The cloud's viewers count: poll faster while the owner has a page open. */
+    setViewers(count: number) {
+      poller?.setActive(count > 0);
+    },
+    pollIntervalMs(): number | null {
+      return poller?.intervalMs ?? null;
     },
     pollNow(): Promise<void> {
       return poller?.pollAll() ?? Promise.resolve();
     },
     stopPolling() {
       poller?.stop();
+      metaCache.flush();
     },
   };
 }

@@ -6,6 +6,7 @@
 // without echoing anything Google said.
 import { GOOGLE_PATHS, googleTokenResponse, isErrorCode, makeError, parse, type ErrorBody, type ErrorCode } from "@j-inbox/protocol";
 import { readCapped } from "../beeper-client.ts";
+import { GMAIL_BATCH_PATH, GMAIL_BATCH_SIZE, batchBoundary, buildBatch, parseBatchResponse } from "./batch.ts";
 
 export const DEFAULT_GMAIL_API_URL = "https://gmail.googleapis.com";
 export const DEFAULT_GOOGLE_OAUTH_URL = "https://oauth2.googleapis.com";
@@ -162,17 +163,26 @@ export function createGmailClient(o: GmailClientOptions) {
   const perSecond = Math.max(1, o.maxRequestsPerSecond ?? 12);
   const sleep = o.sleep ?? defaultSleep;
   const starts: number[] = [];
-  async function pace(signal?: AbortSignal) {
-    for (;;) {
-      const t = now();
-      while (starts.length && t - starts[0]! >= 1000) starts.shift();
-      if (starts.length < perSecond) {
-        starts.push(t);
-        return;
+  // First come, first served (a big batch is not starved by a stream of small calls). A batch
+  // counts as all of its calls (Gmail charges each), at most a whole window.
+  let queue: Promise<void> = Promise.resolve();
+  function pace(signal?: AbortSignal, weight = 1): Promise<void> {
+    const w = Math.max(1, Math.min(weight, perSecond));
+    const turn = queue.then(async () => {
+      for (;;) {
+        if (signal?.aborted) return;
+        const t = now();
+        while (starts.length && t - starts[0]! >= 1000) starts.shift();
+        if (starts.length + w <= perSecond) {
+          for (let i = 0; i < w; i++) starts.push(t);
+          return;
+        }
+        // Until enough of the oldest starts leave the window.
+        await sleep(1000 - (t - starts[starts.length + w - perSecond - 1]!) + 1, signal);
       }
-      await sleep(1000 - (t - starts[0]!) + 1, signal);
-      if (signal?.aborted) return;
-    }
+    });
+    queue = turn.catch(() => {});
+    return turn;
   }
   const retryDelays = o.retryDelaysMs ?? [1000, 3000];
 
@@ -235,6 +245,75 @@ export function createGmailClient(o: GmailClientOptions) {
     return { ok: true, status: res.status, body: json };
   }
 
+  /**
+   * GETs of `paths` (each from path()) in one POST /batch/gmail/v1, one answer per path in order.
+   * Calls Gmail asked to slow down, calls whose access token it refused, and parts it did not
+   * answer readably are tried again one by one (get(), with its retries); a batch Gmail refused
+   * as a whole fails every call with that error.
+   */
+  async function batchGet(paths: string[], ctx: GCallOptions, retried = false): Promise<GCall[]> {
+    if (paths.length <= 1) return Promise.all(paths.map((p) => call("GET", p, undefined, false, ctx)));
+    if (paths.length > GMAIL_BATCH_SIZE) {
+      const out: GCall[] = [];
+      for (let i = 0; i < paths.length; i += GMAIL_BATCH_SIZE) out.push(...(await batchGet(paths.slice(i, i + GMAIL_BATCH_SIZE), ctx)));
+      return out;
+    }
+    const all = (r: GCall) => paths.map(() => r);
+    if (ctx.signal?.aborted) return all(fail("TIMEOUT"));
+    const t = await token(ctx.signal);
+    if (!t.ok) return all(t);
+    if (ctx.signal?.aborted) return all(fail("TIMEOUT"));
+    await pace(ctx.signal, paths.length);
+    if (ctx.signal?.aborted) return all(fail("TIMEOUT"));
+    const boundary = batchBoundary();
+    let res: Response;
+    try {
+      res = await doFetch(new URL(GMAIL_BATCH_PATH, base), {
+        method: "POST",
+        headers: { authorization: `Bearer ${t.token}`, "content-type": `multipart/mixed; boundary=${boundary}` },
+        body: buildBatch(paths, boundary),
+        redirect: "manual",
+        signal: ctx.signal ? AbortSignal.any([ctx.signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
+      });
+    } catch (e) {
+      return all(fail(gmailErrorCode({ network: networkKind(e), write: false })));
+    }
+    let text: string | null;
+    try {
+      text = await readCapped(res, maxBody);
+    } catch (e) {
+      return all(fail(gmailErrorCode({ network: networkKind(e), write: false })));
+    }
+    if (text === null) return all(fail("TOO_LARGE"));
+    if (res.status === 401 && !retried) {
+      const again = await token(ctx.signal, true);
+      if (!again.ok) return all(again);
+      return batchGet(paths, ctx, true);
+    }
+    if (res.status < 200 || res.status > 299) {
+      let reason: string | undefined;
+      try {
+        const j = JSON.parse(text);
+        if (typeof j?.error?.errors?.[0]?.reason === "string") reason = j.error.errors[0].reason;
+      } catch {}
+      const code = gmailErrorCode({ status: res.status, write: false, reason });
+      if (code === "REAUTH_REQUIRED") o.onReauth?.();
+      return all(fail(code));
+    }
+    const parts = parseBatchResponse(res.headers.get("content-type"), text, paths.length);
+    const out: GCall[] = [];
+    for (let i = 0; i < paths.length; i++) {
+      const p = parts?.[i] ?? null;
+      const reason = typeof (p?.body as any)?.error?.errors?.[0]?.reason === "string" ? (p!.body as any).error.errors[0].reason : undefined;
+      if (p && p.status >= 200 && p.status <= 299) out.push({ ok: true, status: p.status, body: p.body });
+      else if (!p || p.status === 401 || p.status === 429 || p.status >= 500 || (p.status === 403 && /rateLimit|RateLimit|quota/i.test(reason ?? ""))) {
+        // One by one: get() refreshes the token on a 401 and waits on "slow down"; or a part we could not read.
+        out.push(await call("GET", paths[i]!, undefined, false, ctx));
+      } else out.push(fail(gmailErrorCode({ status: p.status, write: false, reason })));
+    }
+    return out;
+  }
+
   const enc = encodeURIComponent;
   return {
     email: o.email,
@@ -246,6 +325,8 @@ export function createGmailClient(o: GmailClientOptions) {
       return `/gmail/v1/users/me/${segments.map(enc).join("/")}${s ? `?${s}` : ""}`;
     },
     get: (path: string, ctx: GCallOptions = {}) => call("GET", path, undefined, false, ctx),
+    /** Many GETs in Gmail batch requests (GMAIL_BATCH_SIZE per request); answers in the order of `paths`. */
+    batchGet: (paths: string[], ctx: GCallOptions = {}) => batchGet(paths, ctx),
     write: (path: string, body: unknown, ctx: GCallOptions = {}) => call("POST", path, body, true, ctx),
     /** Forget the cached access token and any refusal (e.g. after the account was reconnected). */
     reset() {

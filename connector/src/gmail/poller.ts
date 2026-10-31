@@ -1,15 +1,24 @@
-// Live updates for Gmail: every GMAIL_POLL_INTERVAL_MS per account, users.history.list from the
-// last historyId, turned into the same metadata-only events the Beeper source sends (`message`
-// upserted/deleted, `chat` upserted). The first poll only records where history starts. A 404
-// (history too old) re-syncs: a fresh start point and a `chat` event for the newest threads, so
-// open pages refetch. An account that needs reconnecting is skipped until it is reconnected.
-import { GMAIL_POLL_INTERVAL_MS, MAX_EVENT_IDS, eventFrame, gmailChatID, parse, type EventFrame } from "@j-inbox/protocol";
+// Live updates for Gmail: every GMAIL_POLL_INTERVAL_MS per account (GMAIL_POLL_ACTIVE_INTERVAL_MS
+// while the owner has a J-Inbox page open), users.history.list from the last historyId, turned
+// into the same metadata-only events the Beeper source sends (`message` upserted/deleted, `chat`
+// upserted). The first poll only records where history starts. A 404 (history too old) re-syncs:
+// a fresh start point and a `chat` event for the newest threads, so open pages refetch. An account
+// that needs reconnecting is skipped until it is reconnected. The position moves on only when
+// every event of the poll was handed to the cloud (send true); while the link is down (canSend
+// false) nothing is polled, and the poll after the next welcome reads from the last position that
+// was handed over, so a change is announced late rather than never.
+import { GMAIL_POLL_ACTIVE_INTERVAL_MS, GMAIL_POLL_INTERVAL_MS, MAX_EVENT_IDS, eventFrame, gmailChatID, parse, type EventFrame } from "@j-inbox/protocol";
 import type { GmailSource } from "./source.ts";
 
 export type PollerOptions = {
   sources: () => GmailSource[];
+  /** Hand an event to the cloud: true only when it went out on a connected link. */
   send: (f: EventFrame) => boolean;
+  /** False while the cloud link is down: accounts are not polled (only a first start point is taken); pollAll after the welcome catches up. */
+  canSend?: () => boolean;
   intervalMs?: number;
+  /** While someone watches (setActive(true)). Default GMAIL_POLL_ACTIVE_INTERVAL_MS, never slower than intervalMs. */
+  activeIntervalMs?: number;
   /** Threads announced after a history reset. */
   resyncThreads?: number;
   log?: (msg: string, fields?: Record<string, string | number | boolean | null>) => void;
@@ -25,18 +34,39 @@ export class GmailPoller {
   private historyIds = new Map<string, string>();
   private timer?: ReturnType<typeof setInterval>;
   private running: Promise<void> | null = null;
+  private active = false;
 
   constructor(private readonly o: PollerOptions) {}
+
+  /** The interval in use now. */
+  get intervalMs(): number {
+    const idle = this.o.intervalMs ?? GMAIL_POLL_INTERVAL_MS;
+    return this.active ? Math.min(idle, this.o.activeIntervalMs ?? GMAIL_POLL_ACTIVE_INTERVAL_MS) : idle;
+  }
 
   start() {
     if (this.timer) return;
     void this.pollAll();
-    this.timer = setInterval(() => void this.pollAll(), this.o.intervalMs ?? GMAIL_POLL_INTERVAL_MS);
+    this.schedule();
+  }
+
+  private schedule() {
+    clearInterval(this.timer);
+    this.timer = setInterval(() => void this.pollAll(), this.intervalMs);
   }
 
   stop() {
     clearInterval(this.timer);
     this.timer = undefined;
+  }
+
+  /** Someone has a J-Inbox page open (the cloud's viewers count > 0): poll faster, and at once when that starts. */
+  setActive(active: boolean) {
+    if (active === this.active) return;
+    this.active = active;
+    if (!this.timer) return;
+    this.schedule();
+    if (active) void this.pollAll();
   }
 
   /** Forget an account's position (removed, or reconnected). */
@@ -48,6 +78,8 @@ export class GmailPoller {
   pollAll(): Promise<void> {
     this.running ??= (async () => {
       for (const s of this.o.sources()) {
+        // Link down: only find where history starts (nothing to send for that); the rest waits for the welcome.
+        if (this.o.canSend && !this.o.canSend() && this.historyIds.has(s.email)) continue;
         if (this.o.skip?.(s.email)) continue;
         try {
           await this.poll(s);
@@ -61,18 +93,22 @@ export class GmailPoller {
     return this.running;
   }
 
-  private emit(f: EventFrame) {
-    if (parse(eventFrame, f).ok) this.o.send(f);
+  /** True when the event went out (an invalid one is skipped: it can never go out). */
+  private emit(f: EventFrame): boolean {
+    if (!parse(eventFrame, f).ok) return true;
+    return this.o.send(f);
   }
 
   private async resync(s: GmailSource) {
     const p = await s.profile({});
     if (!p.ok) return;
-    this.historyIds.set(s.email, p.data.historyId);
     const r = await s.client.get(s.client.path(["threads"], { q: "in:inbox", maxResults: String(this.o.resyncThreads ?? 20) }));
     if (!r.ok || !Array.isArray(r.body?.threads)) return;
     const ts = new Date().toISOString();
-    for (const t of r.body.threads) if (typeof t?.id === "string" && /^[A-Za-z0-9]{1,64}$/.test(t.id)) this.emit({ type: "event", kind: "chat", op: "upserted", chatID: gmailChatID(s.email, t.id), ts });
+    let all = true;
+    for (const t of r.body.threads) if (typeof t?.id === "string" && /^[A-Za-z0-9]{1,64}$/.test(t.id)) all = this.emit({ type: "event", kind: "chat", op: "upserted", chatID: gmailChatID(s.email, t.id), ts }) && all;
+    // Only once the cloud has heard: else the next poll finds the old position too old and re-syncs again.
+    if (all) this.historyIds.set(s.email, p.data.historyId);
   }
 
   async poll(s: GmailSource): Promise<number> {
@@ -129,24 +165,26 @@ export class GmailPoller {
       pageToken = typeof body.nextPageToken === "string" && body.nextPageToken ? body.nextPageToken : undefined;
       if (!pageToken) break;
     }
-    this.historyIds.set(s.email, latest);
     const ts = new Date().toISOString();
     let n = 0;
+    let all = true;
     for (const [op, map] of [["upserted", added], ["deleted", deleted]] as const)
-      for (const [threadId, ids] of map) {
-        const all = [...ids];
-        for (let i = 0; i < all.length; i += MAX_EVENT_IDS) {
+      for (const [threadId, set] of map) {
+        const ids = [...set];
+        for (let i = 0; i < ids.length; i += MAX_EVENT_IDS) {
           // othersAt (snooze's early return): Gmail history has no times, and added mail is new: the poll's time.
           const who = op === "upserted" ? senders.get(threadId) : undefined;
           const othersAt = who === "others" ? ts : who === "self" ? null : undefined;
-          this.emit({ type: "event", kind: "message", op, chatID: gmailChatID(s.email, threadId), messageIDs: all.slice(i, i + MAX_EVENT_IDS), ts, ...(othersAt !== undefined ? { othersAt } : {}) });
-          n++;
+          if (this.emit({ type: "event", kind: "message", op, chatID: gmailChatID(s.email, threadId), messageIDs: ids.slice(i, i + MAX_EVENT_IDS), ts, ...(othersAt !== undefined ? { othersAt } : {}) })) n++;
+          else all = false;
         }
       }
     for (const threadId of touched) {
-      this.emit({ type: "event", kind: "chat", op: "upserted", chatID: gmailChatID(s.email, threadId), ts });
-      n++;
+      if (this.emit({ type: "event", kind: "chat", op: "upserted", chatID: gmailChatID(s.email, threadId), ts })) n++;
+      else all = false;
     }
+    // Handed over: next time from here. Not (the link dropped meanwhile): the same changes again next time.
+    if (all && this.historyIds.get(s.email) === start) this.historyIds.set(s.email, latest);
     return n;
   }
 }

@@ -21,6 +21,8 @@ import type { GCall, GmailClient } from "./client.ts";
 import { activityMs, header, isDraft, mapGmailMessage, mapGmailThread, threadMessages, type GMessage, type GPart, type GThread } from "./map.ts";
 import { b64urlToBytes, buildMessage, headerText, parseAddressList, rawForGmail, replyAllRecipients, replyReferences, replySubject, type OutgoingFile } from "./mime.ts";
 import { sniffImageType } from "../media.ts";
+import { GMAIL_BATCH_SIZE } from "./batch.ts";
+import { ThreadMetaCache, keptThread } from "./meta-cache.ts";
 
 const META_HEADERS = ["From", "To", "Cc", "Subject", "Date", "Message-ID"];
 const REPLY_HEADERS = ["From", "To", "Cc", "Reply-To", "Subject", "Message-ID", "References", "In-Reply-To"];
@@ -31,7 +33,6 @@ const REPLY_HEADERS = ["From", "To", "Cc", "Reply-To", "Subject", "Message-ID", 
  */
 export const Q_PRIMARY = "in:inbox category:primary";
 export const Q_LOW_PRIORITY = "in:inbox -category:primary";
-const CONCURRENCY = 8;
 const MAX_SCAN_PAGES = 5;
 
 export type Out<T> = { ok: true; data: T } | { ok: false; error: ErrorBody };
@@ -40,20 +41,6 @@ const fail = (code: ErrorBody["code"], message: string): { ok: false; error: Err
 function must(r: GCall): any {
   if (!r.ok) throw new SourceFailure(r.error);
   return r.body;
-}
-
-async function pool<A, B>(items: A[], n: number, fn: (a: A) => Promise<B>): Promise<B[]> {
-  const out: B[] = new Array(items.length);
-  let next = 0;
-  await Promise.all(
-    Array.from({ length: Math.min(n, items.length) }, async () => {
-      while (next < items.length) {
-        const i = next++;
-        out[i] = await fn(items[i]!);
-      }
-    }),
-  );
-  return out;
 }
 
 const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64url");
@@ -115,7 +102,7 @@ export function noiseLaneFilter(p: Partial<ActionParams<"list_chats">>, isNoise:
 
 export type GmailSource = ReturnType<typeof createGmailSource>;
 
-export function createGmailSource(o: { email: string; client: GmailClient; scan?: { maxPages?: number; budgetMs?: number }; now?: () => number }) {
+export function createGmailSource(o: { email: string; client: GmailClient; scan?: { maxPages?: number; budgetMs?: number }; now?: () => number; metaCache?: ThreadMetaCache }) {
   const { email, client } = o;
   const now = o.now ?? Date.now;
   const opts = (ctx: RequestContext) => ({ signal: ctx.signal });
@@ -124,29 +111,29 @@ export function createGmailSource(o: { email: string; client: GmailClient; scan?
     if (ctx.signal?.aborted) throw new RequestAborted();
   }
 
-  async function threadMeta(id: string, ctx: RequestContext, headers = META_HEADERS): Promise<GThread | null> {
-    const r = await client.get(client.path(["threads", id], { format: "metadata", metadataHeaders: headers }), opts(ctx));
-    if (!r.ok && r.error.code === "NOT_FOUND") return null;
-    return must(r) as GThread;
-  }
-
   // Thread metadata by id, valid while the thread's historyId (from threads.list) is unchanged: the
-  // inbox lists the same threads again and again, and each fetch costs Gmail quota. Memory only.
-  const metaCache = new Map<string, { historyId: string; thread: GThread }>();
-  const META_CACHE_MAX = 2000;
-  async function listedThreadMeta(id: string, historyId: string | undefined, ctx: RequestContext): Promise<GThread | null> {
-    const hit = historyId ? metaCache.get(id) : undefined;
-    if (hit && hit.historyId === historyId) {
-      metaCache.delete(id);
-      metaCache.set(id, hit);
-      return hit.thread;
+  // inbox lists the same threads again and again, and each fetch costs Gmail quota. The service
+  // shares one cache, kept on disk (meta-cache.ts), across its accounts.
+  const metaCache = o.metaCache ?? new ThreadMetaCache();
+  const metaPath = (id: string) => client.path(["threads", id], { format: "metadata", metadataHeaders: META_HEADERS });
+
+  /** Metadata of many threads: cached ones as they are, the rest in Gmail batch requests. null = gone (404). */
+  async function threadMetas(ids: string[], historyOf: (id: string) => string | undefined, ctx: RequestContext): Promise<(GThread | null)[]> {
+    const out: (GThread | null | undefined)[] = ids.map((id) => metaCache.get(email, id, historyOf(id)) ?? undefined);
+    const missing = ids.map((_, i) => i).filter((i) => out[i] === undefined);
+    for (let k = 0; k < missing.length; k += GMAIL_BATCH_SIZE) {
+      checkTime(ctx);
+      const part = missing.slice(k, k + GMAIL_BATCH_SIZE);
+      const got = await client.batchGet(part.map((i) => metaPath(ids[i]!)), opts(ctx));
+      part.forEach((i, j) => {
+        const r = got[j]!;
+        if (!r.ok && r.error.code === "NOT_FOUND") return void (out[i] = null);
+        const raw = must(r);
+        // The same shape whether it came from Gmail now or from the cache later.
+        out[i] = metaCache.set(email, ids[i]!, historyOf(ids[i]!), raw) ?? keptThread(raw) ?? (raw as GThread);
+      });
     }
-    const t = await threadMeta(id, ctx);
-    if (t && historyId) {
-      metaCache.set(id, { historyId, thread: t });
-      if (metaCache.size > META_CACHE_MAX) metaCache.delete(metaCache.keys().next().value!);
-    }
-    return t;
+    return out as (GThread | null)[];
   }
 
   /**
@@ -175,8 +162,8 @@ export function createGmailSource(o: { email: string; client: GmailClient; scan?
       const next: string | null = typeof list?.nextPageToken === "string" && list.nextPageToken ? list.nextPageToken : null;
       let i = pos.o;
       while (i < ids.length && kept.length < limit) {
-        const chunk = ids.slice(i, i + Math.min(CONCURRENCY * 2, limit - kept.length + 2));
-        const threads = await pool(chunk, CONCURRENCY, (id) => listedThreadMeta(id, historyOf.get(id), ctx));
+        const chunk = ids.slice(i, i + Math.min(GMAIL_BATCH_SIZE, limit - kept.length + 2));
+        const threads = await threadMetas(chunk, (id) => historyOf.get(id), ctx);
         for (let j = 0; j < chunk.length; j++) {
           const idx = i + j;
           const after: Pos = idx + 1 < ids.length ? { t: pos.t, o: idx + 1 } : next ? { t: next, o: 0 } : { t: pos.t, o: ids.length };
@@ -269,11 +256,12 @@ export function createGmailSource(o: { email: string; client: GmailClient; scan?
     const refs: { id: string; threadId: string }[] = Array.isArray(list?.messages) ? list.messages.filter((m: any) => typeof m?.id === "string" && typeof m?.threadId === "string") : [];
     const next: string | null = typeof list?.nextPageToken === "string" && list.nextPageToken ? list.nextPageToken : null;
     const slice = refs.slice(start.o, start.o + limit);
-    const msgs = await pool(slice, CONCURRENCY, async (r) => {
-      const g = await client.get(client.path(["messages", r.id], { format: "metadata", metadataHeaders: META_HEADERS }), opts(ctx));
-      if (!g.ok && g.error.code === "NOT_FOUND") return null;
-      return must(g) as GMessage;
-    });
+    const msgs: (GMessage | null)[] = [];
+    for (let k = 0; k < slice.length; k += GMAIL_BATCH_SIZE) {
+      checkTime(ctx);
+      const got = await client.batchGet(slice.slice(k, k + GMAIL_BATCH_SIZE).map((r) => client.path(["messages", r.id], { format: "metadata", metadataHeaders: META_HEADERS })), opts(ctx));
+      for (const g of got) msgs.push(!g.ok && g.error.code === "NOT_FOUND" ? null : (must(g) as GMessage));
+    }
     const kept: { item: MergeItem<MessageItem>; after: Pos }[] = [];
     for (let j = 0; j < slice.length; j++) {
       const idx = start.o + j;
@@ -285,11 +273,15 @@ export function createGmailSource(o: { email: string; client: GmailClient; scan?
       if (!m || !keep(m)) continue;
       kept.push({ item: { value: m, time: Number(m.sortKey), key: `${m.chatID}\u0000${m.id}`, urls }, after });
     }
-    // The chats of these messages (one metadata call per thread).
+    // The chats of these messages (their thread metadata, batched).
     const threads = [...new Set(kept.map((k) => k.item.value.chatID))].filter((id) => !chats.has(id));
-    await pool(threads, CONCURRENCY, async (chatID) => {
-      const tid = chatID.slice(chatID.lastIndexOf(":") + 1);
-      const t = await threadMeta(tid, ctx);
+    const metas = await threadMetas(
+      threads.map((chatID) => chatID.slice(chatID.lastIndexOf(":") + 1)),
+      () => undefined,
+      ctx,
+    );
+    threads.forEach((chatID, i) => {
+      const t = metas[i];
       const urls: string[] = [];
       const chat = t ? mapGmailThread(t, email, { onAsset: (u) => urls.push(u) }) : null;
       if (chat) chats.set(chatID, { chat: { ...chat, preview: null }, urls });

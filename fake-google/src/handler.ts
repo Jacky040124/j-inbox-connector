@@ -7,6 +7,7 @@
 //   GET  /oauth2/v3/userinfo                   sub, email, email_verified
 //   /gmail/v1/users/me/...                     profile, threads.list/get/modify, messages.list/get/send/modify,
 //                                              messages.attachments.get, drafts.create, history.list
+//   POST /batch/gmail/v1                       Gmail batch: one multipart/mixed request carrying many of the calls above
 //
 // Behaviour follows developers.google.com (OAuth 2.0 for web server apps, Gmail API reference):
 // error bodies, invalid_grant on a reused code or revoked refresh token, 404 for a too-old
@@ -48,7 +49,10 @@ export type FailRule = {
   times?: number;
 };
 
-export type RequestLog = { method: string; path: string; status: number; email: string | null; grant?: string };
+export type RequestLog = { method: string; path: string; status: number; email: string | null; grant?: string; /** One call inside a POST /batch/gmail/v1 (logged after it). */ inBatch?: true };
+
+/** Gmail refuses a batch of more calls than this (400). */
+export const GMAIL_BATCH_MAX = 100;
 
 type Code = { clientId: string; redirectUri: string; email: string; scopes: string[]; challenge: string | null; method: string | null; expiresAt: number; used: boolean; offline: boolean; nonce: string | null };
 
@@ -92,6 +96,14 @@ const strip = (s: string) => {
   for (let prev = ""; prev !== v; ) (prev = v), (v = v.replace(/^(re|fwd?|aw|sv)\s*:\s*/i, "").trim());
   return v.toLowerCase();
 };
+
+const STATUS_LINE: Record<number, string> = { 200: "OK", 204: "No Content", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed", 409: "Conflict", 429: "Too Many Requests", 500: "Internal Server Error", 503: "Service Unavailable" };
+
+/** Headers and body of one MIME / HTTP message (split at the first empty line). */
+function splitHead(s: string): [string, string] {
+  const m = /\r?\n\r?\n/.exec(s);
+  return m ? [s.slice(0, m.index), s.slice(m.index + m[0].length)] : [s, ""];
+}
 
 export class FakeGoogle {
   readonly clients: Client[];
@@ -231,6 +243,10 @@ export class FakeGoogle {
   // ---------------------------------------------------------------- entry
 
   async fetch(req: Request): Promise<Response> {
+    return this.handle(req, false);
+  }
+
+  private async handle(req: Request, inBatch: boolean): Promise<Response> {
     const url = new URL(req.url);
     const path = url.pathname;
     const rule = this.rules.find((r) => (!r.method || r.method === req.method) && (!r.path || (typeof r.path === "string" ? path.startsWith(r.path) : r.path.test(path))) && (r.times ?? 1) > 0);
@@ -239,16 +255,17 @@ export class FakeGoogle {
       this.rules = this.rules.filter((r) => (r.times ?? 1) > 0);
       if (rule.hang) await new Promise<void>((r) => this.hangs.push(r));
       if (rule.network) {
-        this.requests.push({ method: req.method, path, status: 0, email: null });
+        this.requests.push({ method: req.method, path, status: 0, email: null, ...(inBatch ? { inBatch: true as const } : {}) });
         throw new TypeError("fake network failure");
       }
       if (rule.status) {
-        this.requests.push({ method: req.method, path, status: rule.status, email: null });
+        this.requests.push({ method: req.method, path, status: rule.status, email: null, ...(inBatch ? { inBatch: true as const } : {}) });
         return rule.body !== undefined ? json(rule.body, rule.status) : googleError(rule.status, "Injected failure.", "backendError");
       }
     }
-    if (this.latencyMs) await new Promise((r) => setTimeout(r, this.latencyMs));
-    const log: RequestLog = { method: req.method, path, status: 0, email: null };
+    // One wait per HTTP request: the calls inside a batch share the batch's.
+    if (this.latencyMs && !inBatch) await new Promise((r) => setTimeout(r, this.latencyMs));
+    const log: RequestLog = { method: req.method, path, status: 0, email: null, ...(inBatch ? { inBatch: true as const } : {}) };
     let res: Response;
     try {
       res = await this.route(req, url, log);
@@ -265,6 +282,7 @@ export class FakeGoogle {
     if (p === "/o/oauth2/v2/auth" && req.method === "GET") return this.authorize(url);
     if (p === "/token" && req.method === "POST") return this.token(req, log);
     if (p === "/revoke" && req.method === "POST") return this.revoke(req, url);
+    if (p === "/batch/gmail/v1") return req.method === "POST" ? this.batch(req, url) : googleError(405, "Method not allowed", "badRequest");
     if (p === "/oauth2/v3/userinfo" && req.method === "GET") {
       const a = this.bearer(req);
       if (!a) return googleError(401, "Invalid Credentials", "authError");
@@ -283,6 +301,62 @@ export class FakeGoogle {
       return this.gmail(req, url, m[2]!, this.mailbox(a.grant.email));
     }
     return googleError(404, "Not Found", "notFound");
+  }
+
+  // ---------------------------------------------------------------- batch
+
+  /**
+   * POST /batch/gmail/v1 (developers.google.com/gmail/api/guides/batch): a multipart/mixed body of
+   * `application/http` parts, each one Gmail call (request line, headers, optional body); the
+   * batch's own Authorization applies to calls without one. Each call runs as if sent alone (same
+   * auth, fault rules and request log, marked inBatch), in order; the answer is multipart/mixed
+   * with one `application/http` part per call, `Content-ID: <response-ID>` for a call's
+   * `Content-ID: <ID>`. More than GMAIL_BATCH_MAX calls, or a body that is not multipart: 400.
+   */
+  private async batch(req: Request, url: URL): Promise<Response> {
+    const m = /boundary=(?:"([^"]+)"|([^;\s]+))/i.exec(req.headers.get("content-type") ?? "");
+    if (!/^multipart\/mixed/i.test(req.headers.get("content-type") ?? "") || !m) return googleError(400, "Invalid batch request: expected multipart/mixed.", "badRequest");
+    const boundary = m[1] ?? m[2]!;
+    const text = await req.text();
+    const parts: string[] = [];
+    for (const chunk of text.split(`--${boundary}`).slice(1)) {
+      if (chunk.startsWith("--")) break;
+      parts.push(chunk.replace(/^\r?\n/, ""));
+    }
+    if (!parts.length) return googleError(400, "Invalid batch request: no calls.", "badRequest");
+    if (parts.length > GMAIL_BATCH_MAX) return googleError(400, `Too many requests in batch. The maximum is ${GMAIL_BATCH_MAX}.`, "badRequest");
+    const out: string[] = [];
+    const respBoundary = `batch_${randomToken("").slice(0, 16)}`;
+    for (const part of parts) {
+      const [outer, inner] = splitHead(part);
+      const id = /^content-id:\s*<?([^>\r\n]*)>?\s*$/im.exec(outer)?.[1]?.trim() ?? "";
+      const [head, body] = splitHead(inner);
+      const lines = head.split(/\r?\n/);
+      const rl = /^([A-Z]+)\s+(\S+)(?:\s+HTTP\/1\.1)?$/.exec(lines[0]?.trim() ?? "");
+      let res: Response;
+      if (!rl || !rl[2]!.startsWith("/") || rl[2]!.startsWith("/batch/")) res = googleError(400, "Invalid call in batch.", "badRequest");
+      else {
+        const headers = new Headers();
+        for (const l of lines.slice(1)) {
+          const i = l.indexOf(":");
+          if (i > 0) headers.set(l.slice(0, i).trim(), l.slice(i + 1).trim());
+        }
+        if (!headers.has("authorization") && req.headers.has("authorization")) headers.set("authorization", req.headers.get("authorization")!);
+        const method = rl[1]!;
+        const call = new Request(new URL(rl[2]!, url.origin), { method, headers, ...(method !== "GET" && method !== "HEAD" && body.trim() ? { body: body.replace(/\r?\n$/, "") } : {}) });
+        try {
+          res = await this.handle(call, true);
+        } catch {
+          res = googleError(503, "Backend Error", "backendError");
+        }
+      }
+      const resBody = await res.text();
+      out.push(
+        `--${respBoundary}\r\nContent-Type: application/http\r\n${id ? `Content-ID: <response-${id}>\r\n` : ""}\r\nHTTP/1.1 ${res.status} ${STATUS_LINE[res.status] ?? "Status"}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${resBody}\r\n`,
+      );
+    }
+    out.push(`--${respBoundary}--\r\n`);
+    return new Response(out.join(""), { status: 200, headers: { "content-type": `multipart/mixed; boundary=${respBoundary}` } });
   }
 
   // ---------------------------------------------------------------- OAuth

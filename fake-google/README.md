@@ -22,6 +22,7 @@ One origin serves everything (the real endpoints live on several Google hosts):
 | `POST /token` | Form or JSON, client secret in the body or Basic. `authorization_code`: single-use (a failed exchange uses it up), 10 min, `redirect_uri` and PKCE verifier checked, `refresh_token` only with `access_type=offline`, `id_token` (claims `iss`, `aud`, `sub`, `email`, `email_verified`, `nonce`; signature is fake) when `openid` was granted. `refresh_token`: `invalid_grant` "Token has been expired or revoked." once revoked. Wrong secret: 401 `invalid_client` |
 | `POST /revoke` | `token=` (refresh or access): revokes the whole grant, its access tokens too; unknown: 400 `invalid_token` |
 | `GET /oauth2/v3/userinfo` | `sub`, `email`, `email_verified` |
+| `POST /batch/gmail/v1` | Gmail's batch endpoint: a `multipart/mixed` body of `application/http` parts (request line, headers), at most 100 (`GMAIL_BATCH_MAX`, else 400); each call runs as if sent alone (auth, fault rules, `requests` with `inBatch: true`), in order, the batch's `Authorization` for calls without one; the answer is `multipart/mixed` with one part per call, `Content-ID: <response-ID>`. `latencyMs` is paid once per batch |
 | `/gmail/v1/users/me/...` | `profile`, `threads` (list: `q`, `labelIds`, `maxResults` 1-500, `pageToken`, `includeSpamTrash`; newest activity first, drafts do not count as activity), `threads/{id}` (`format=full|metadata|minimal`, `metadataHeaders`), `threads/{id}/modify`, `messages` (list), `messages/{id}`, `messages/{id}/modify`, `messages/{id}/attachments/{id}`, `messages/send`, `drafts` (create), `history` (`startHistoryId`, `historyTypes`, `labelId`; 404 when older than the kept history). Bearer access token of that user with the `gmail.modify` scope (read-only scope: GETs only), else 401/403 in Google's error shape |
 
 Gmail realism: payload trees (`multipart/mixed` > `multipart/alternative` > text parts; files by
@@ -46,4 +47,4 @@ dance), `revokeAll(email)`, `isRevoked`, `liveGrants`, `expireAccessTokens`, `ex
 `advance(ms)`, `deliver(email, {threadId?, from, subject, text})` (incoming mail),
 `failNext({method?, path?, status?, body?, network?, hang?, times?})`, `releaseHangs`, `latencyMs`,
 `sent(email)` / `drafts(email)` (what clients sent, with parsed headers and text), `requests`
-(method, path, status, account: metadata only), `reset()`.
+(method, path, status, account, `inBatch`: metadata only), `reset()`.

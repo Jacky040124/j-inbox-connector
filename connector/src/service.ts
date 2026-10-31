@@ -12,6 +12,7 @@ import { CloudLink, type LinkState, type SocketFactory } from "./cloud-link.ts";
 import { gmailPollOverride, googleEndpoints, loadConfig, noiseDebounceOverride, typesafeURL, writeAtomic, type Paths } from "./config.ts";
 import { createDispatcher } from "./dispatcher.ts";
 import { BeeperEventStream, HealthMonitor, Reconciler } from "./events.ts";
+import { EventBuffer } from "./event-buffer.ts";
 import { FileIdempotencyJournal } from "./idempotency.ts";
 import { DraftStore } from "./drafts.ts";
 import { UploadStore } from "./uploads.ts";
@@ -20,6 +21,10 @@ import { cloudTokenRefresher } from "./gmail/client.ts";
 import { createGmailService } from "./gmail/service.ts";
 import { NoiseStore } from "./noise/store.ts";
 import { NoiseJudge } from "./noise/judge.ts";
+import { GmailAccounts } from "./gmail/accounts.ts";
+import { ThreadMetaCache } from "./gmail/meta-cache.ts";
+import { isStorableSecret } from "./secrets.ts";
+import { randomBytes } from "node:crypto";
 
 export type ServiceOptions = {
   paths: Paths;
@@ -33,6 +38,8 @@ export type ServiceOptions = {
   env?: Record<string, string | undefined>;
   fetchImpl?: typeof fetch;
   gmailPollIntervalMs?: number;
+  /** While a J-Inbox page is open (tests; default GMAIL_POLL_ACTIVE_INTERVAL_MS). */
+  gmailActivePollIntervalMs?: number;
   /** The noise judge's collection window (tests). */
   noiseDebounceMs?: number;
 };
@@ -88,6 +95,26 @@ export function readState(p: Paths): ServiceState | null {
   }
 }
 
+/**
+ * The key that seals the Gmail metadata cache file: from the Keychain, made there (32 random bytes)
+ * the first time the service runs a Gmail account. null (the cache stays in memory) when there is
+ * no Gmail account or the Keychain cannot be used.
+ */
+async function gmailCacheKey(secrets: SecretStore, paths: Paths, create: boolean): Promise<Uint8Array | null> {
+  try {
+    let k = await secrets.get("gmail-cache-key");
+    if (!k) {
+      if (!create && !new GmailAccounts({ path: paths.gmailFile, secrets }).list().length) return null;
+      k = randomBytes(32).toString("base64url");
+      await secrets.set("gmail-cache-key", k);
+    }
+    const b = isStorableSecret(k) ? Buffer.from(k, "base64url") : null;
+    return b && b.length === 32 ? b : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function startService(o: ServiceOptions): Promise<Service> {
   const log = o.log ?? ((line: string) => console.error(`${new Date().toISOString()} ${line}`));
   const exitNow = (reason: ExitReason, message?: string): Service => {
@@ -123,7 +150,9 @@ export async function startService(o: ServiceOptions): Promise<Service> {
   const actions = createActions(client, { connectorVersion: o.version, assets, idempotency, noise });
   // Gmail: tokens in the Keychain, access tokens refreshed through the cloud (the client secret
   // cannot ship in this open-source connector), Gmail itself reached directly from this Mac.
+  const metaCache = new ThreadMetaCache({ path: o.paths.gmailCacheFile, key: await gmailCacheKey(o.secrets, o.paths, false) });
   const gmail = createGmailService({
+    metaCache,
     secrets: o.secrets,
     path: o.paths.gmailFile,
     refresh: cloudTokenRefresher({ cloudURL: config.cloudURL, deviceToken, fetchImpl: o.fetchImpl }),
@@ -131,8 +160,13 @@ export async function startService(o: ServiceOptions): Promise<Service> {
     oauthURL: google.oauthURL,
     fetchImpl: o.fetchImpl,
     pollIntervalMs: pollMs,
+    activePollIntervalMs: o.gmailActivePollIntervalMs,
     log: (m) => log(m),
-    onLifecycle: (e) => audit.lifecycle(e),
+    onLifecycle: (e) => {
+      audit.lifecycle(e);
+      // The first Gmail account: from now on its list metadata is kept on disk too (sealed).
+      if (e === "gmail.connected" && !metaCache.persistent) void gmailCacheKey(o.secrets, o.paths, true).then((k) => k && metaCache.persistTo(o.paths.gmailCacheFile, k));
+    },
   });
   const drafts = new DraftStore({ path: o.paths.draftsFile });
   const uploads = new UploadStore({ dir: o.paths.uploadsDir, draftAlive: (id) => drafts.has(id) });
@@ -149,18 +183,24 @@ export async function startService(o: ServiceOptions): Promise<Service> {
     log: (m) => log(m),
     onChange: (ids) => {
       const ts = new Date().toISOString();
-      for (const chatID of ids) link.sendEvent({ type: "event", kind: "chat", op: "upserted", chatID, ts });
+      for (const chatID of ids) emit({ type: "event", kind: "chat", op: "upserted", chatID, ts });
     },
   });
   const dispatcher = createDispatcher({ actions, client, assets, gmail, idempotency, drafts, uploads, noise, judge });
   readChat = dispatcher.readChat;
 
   let link: CloudLink;
+  // Chat and message events while the cloud link is down wait here (bounded) for the next welcome.
+  const pending = new EventBuffer();
+  const connected = () => link?.state.status === "connected";
+  const emit = (f: EventFrame) => link.sendEvent(f) || (!connected() && pending.add(f));
   // New activity (a message in, or the owner's own out) is judged again; the event goes on as before.
-  const send = (f: EventFrame) => {
+  const touch = (f: EventFrame) => {
     if (f.kind === "message" && f.op === "upserted") judge.touch(f.chatID);
-    return link.sendEvent(f);
   };
+  const send = (f: EventFrame) => (touch(f), emit(f));
+  // Gmail keeps its own place in history instead: true only when the event really went out.
+  const sendNow = (f: EventFrame) => (touch(f), link.sendEvent(f));
   let lastBeeper = "";
   const health = new HealthMonitor({
     client,
@@ -229,9 +269,12 @@ export async function startService(o: ServiceOptions): Promise<Service> {
     },
     onWelcome: () => {
       send(health.statusFrame());
+      const flushed = pending.flush((f) => link.sendEvent(f));
+      if (flushed) log(`cloud: sent ${flushed} events kept while disconnected`);
       void reconciler.run();
       void gmail.pollNow();
     },
+    onViewers: (count) => gmail.setViewers(count),
     onRequest: (r) => audit.request(r),
     onState: (s) => {
       if (s.status === "connected") audit.lifecycle("cloud.connected");
@@ -271,7 +314,7 @@ export async function startService(o: ServiceOptions): Promise<Service> {
   log(`j-inbox ${o.version}: starting (device ${config.deviceID})`);
   health.start();
   events.start();
-  gmail.startPolling(send);
+  gmail.startPolling(sendNow, connected);
   link.start();
   writeState();
 

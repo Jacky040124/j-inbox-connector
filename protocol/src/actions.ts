@@ -73,6 +73,15 @@ import { noiseDefinition, noiseSettings } from "./noise.ts";
 
 type Shape = Record<string, Schema<any>>;
 
+/**
+ * read_chat's default page. Beeper answers 20 messages per /messages page (it has no limit
+ * parameter), so 30 costs two history calls; callers that want one round trip ask for
+ * BEEPER_MESSAGES_PAGE. The default stays 30: the web relies on it (2026-10-31).
+ */
+export const READ_CHAT_DEFAULT_LIMIT = 30;
+/** Messages in one Beeper /messages page: read_chat with this limit (or less) is one history call. */
+export const BEEPER_MESSAGES_PAGE = 20;
+
 export interface ActionDef<P extends Shape, R> {
   readonly description: string;
   readonly params: ObjectSchema<P>;
@@ -233,9 +242,9 @@ export const ACTIONS = {
     paramDocs: {
       chatID: "Chat ID from list_chats or unread_summary",
       cursor: "nextCursor from the previous call, to load older messages",
-      limit: `Messages per page, 1-${MAX_PAGE_LIMIT} (default 30)`,
+      limit: `Messages per page, 1-${MAX_PAGE_LIMIT} (default ${READ_CHAT_DEFAULT_LIMIT}; ${BEEPER_MESSAGES_PAGE} or fewer is the quickest)`,
     },
-    defaults: { limit: 30 },
+    defaults: { limit: READ_CHAT_DEFAULT_LIMIT },
     result: object({ chat: chatSummary, ...page(messageItem, MAX_PAGE_LIMIT) }),
     write: false,
     needsApprovalForAgents: false,
@@ -453,10 +462,10 @@ export const ACTIONS = {
 
   list_snoozed: define({
     description:
-      "The owner's snoozed chats, soonest return first: when each comes back (until) and when it was snoozed, with each chat's details (title, network, account) read from the owner's computer; while the computer is offline the details are missing.",
-    params: object({}),
-    paramDocs: {},
-    defaults: {},
+      "The owner's snoozed chats, soonest return first: when each comes back (until) and when it was snoozed, with each chat's details (title, network, account) read from the owner's computer; while the computer is offline the details are missing. details:false answers from the cloud's store only (ids and times, no reads on the computer).",
+    params: object({ details: optional(boolean()) }),
+    paramDocs: { details: "Read each chat's details from the computer (default true). false: chatID, until and snoozedAt only, at once" },
+    defaults: { details: true },
     result: object({ items: array(snoozeItem, { max: MAX_SNOOZES }) }),
     write: false,
     needsApprovalForAgents: false,
@@ -465,7 +474,7 @@ export const ACTIONS = {
     timeoutMs: REQUEST_TIMEOUT_MS,
     // Each call reads every snoozed chat at the connector: agents get a per-action cap.
     rateLimitPerMinute: 10,
-    beeper: "the cloud's snooze store (chat ids and times only), then list_chats {inbox: archive} and read_chat (limit 1) for chats that page missed, at most 6 at a time; nothing while the computer is offline"
+    beeper: "the cloud's snooze store (chat ids and times only), then (details, the default) list_chats {inbox: archive} and read_chat (limit 1) for chats that page missed, at most 6 at a time; nothing while the computer is offline or with details:false"
   }),
 
   // ---- drafts by agents (protocol drafts.ts): the owner asks, the cloud keeps the request's

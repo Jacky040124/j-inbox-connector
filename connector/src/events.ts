@@ -290,7 +290,8 @@ export class Reconciler {
     for (const raw of (r.body as any).items as unknown[]) {
       const c = mapChat(raw);
       if (!c) continue;
-      const fp = `${c.lastActivity}|${c.unreadCount}|${c.isArchived}|${c.isMarkedUnread ?? ""}`;
+      // Everything that moves a chat between lists or changes its row (Beeper's socket may have lost the event).
+      const fp = `${c.lastActivity}|${c.unreadCount}|${c.isArchived}|${c.isMarkedUnread ?? ""}|${c.isLowPriority ?? ""}|${c.isMuted}|${c.isPinned}`;
       if (this.seen.get(c.id) === fp) continue;
       const f: EventFrame = { type: "event", kind: "chat", op: "upserted", chatID: c.id, ts, unreadCount: c.unreadCount };
       if (!parse(eventFrame, f).ok || !this.o.send(f)) continue;

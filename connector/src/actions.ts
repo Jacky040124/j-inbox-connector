@@ -1,6 +1,7 @@
 // Catalogue actions implemented against the Beeper Client API. Callers pass params already checked
 // with parseActionParams; every result is built from mapped data and shrunk to fit one frame.
 import {
+  READ_CHAT_DEFAULT_LIMIT,
   makeError,
   parseActionResult,
   sanitizeLine,
@@ -166,7 +167,21 @@ export type ActionsOptions = {
   uploads?: UploadSource;
   /** Noise verdicts (noise/store.ts): noise chats leave the main inbox and unread_summary, and join Low priority. */
   noise?: NoiseView;
+  /** How long to watch a chat after mark unread for Beeper archiving it on its own (keepInInbox; default 1.5 s, every 250 ms). */
+  unreadWatch?: { windowMs?: number; everyMs?: number };
 };
+
+/** Beeper's own archive after a mark unread comes within about 0.5 s (measured 2026-10-31): watch this long. */
+export const UNREAD_WATCH_MS = 1_500;
+const UNREAD_WATCH_EVERY_MS = 250;
+/** An unarchive this soon after the connector marked the chat unread is watched too (the snooze's return: unread, then unarchive). */
+const RECENT_UNREAD_MS = 5_000;
+
+const pause = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => (clearTimeout(t), resolve()), { once: true });
+  });
 
 /** A mapped value plus the asset URLs it carries, so only URLs that are actually returned get allowed. */
 type WithAssets<T> = { value: T; urls: string[] };
@@ -295,25 +310,38 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
       const scope = `read_chat\u0000${p.chatID}`;
       const cursor = cursorParam(p.cursor, scope);
       if (cursor === "bad") return err("BAD_PARAMS", "cursor is not from this chat.");
-      const rawChat = must(await client.get(client.chatPath(p.chatID), callOpts(ctx)));
-      const chatT = tracked(mapChat, rawChat);
-      if (!chatT) return err("BEEPER_DOWN", "Beeper sent an unexpected chat.");
-      learnSelf(rawChat);
-      const chat = chatT.value;
       const base = client.chatPath(p.chatID, "messages");
-      const r = await collect({
+      const fetchPage = async (b: string | null) => {
+        const page = beeperPage(must(await client.get(b ? `${base}?${chatsQuery({ cursor: b, direction: "before" })}` : base, callOpts(ctx))));
+        // Page order is unspecified: walk newest first.
+        return { ...page, items: [...page.items].sort(sortKeyDesc) };
+      };
+      // The chat and the first history page at once: one round trip to Beeper instead of two.
+      const firstB = cursor?.b ?? null;
+      let first: Promise<BeeperPage<any>> | null = fetchPage(firstB);
+      first.catch(() => {});
+      const chatCall = client.get(client.chatPath(p.chatID), callOpts(ctx));
+      const collected = collect({
         cursor,
-        limit: p.limit ?? 30,
-        fetchPage: async (b) => {
-          const page = beeperPage(must(await client.get(b ? `${base}?${chatsQuery({ cursor: b, direction: "before" })}` : base, callOpts(ctx))));
-          // Page order is unspecified: walk newest first.
-          return { ...page, items: [...page.items].sort(sortKeyDesc) };
+        limit: p.limit ?? READ_CHAT_DEFAULT_LIMIT,
+        fetchPage: (b) => {
+          const f = first;
+          first = null;
+          return f && b === firstB ? f : fetchPage(b);
         },
         keep: (m) => mapMessage(m) !== null,
         keyOf: (m) => String(m.id),
         ...scan,
         ...ctx,
       });
+      collected.catch(() => {});
+      // The chat's own failure (NOT_FOUND for an unknown chat) is the answer, whatever the history did.
+      const rawChat = must(await chatCall);
+      const chatT = tracked(mapChat, rawChat);
+      if (!chatT) return err("BEEPER_DOWN", "Beeper sent an unexpected chat.");
+      learnSelf(rawChat);
+      const chat = chatT.value;
+      const r = await collected;
       for (const m of r.items) learnSelf(m);
       const newestFirst = r.items.map((m) => tracked(mapMessage, m, { selfIDs })!);
       const build = (n: number) => ({ chat, ...finishPage(r, n, scope), items: newestFirst.slice(0, n).map((x) => x.value).reverse() as MessageItem[] });
@@ -380,15 +408,15 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
   async function status(_p: Partial<ActionParams<"status">> = {}, ctx: RequestContext = {}): Promise<Outcome<ActionResult<"status">>> {
     return guard(async () => {
       const base = { online: true, lastSeenAt: new Date().toISOString(), connectorVersion: opts.connectorVersion ?? null };
-      const info = await client.get("/v1/info", callOpts(ctx));
+      // Three independent reads at once (one round trip); the answer is decided in the same order as before.
+      const [info, acc, chatsCall] = await Promise.all([client.get("/v1/info", callOpts(ctx)), client.get("/v1/accounts", callOpts(ctx)), client.get(`/v1/chats?${chatsQuery({ limit: "50" })}`, callOpts(ctx))]);
       if (!info.ok && info.error.code !== "BEEPER_UNAUTHORIZED") return { ok: true, data: { ...base, beeper: { reachable: false, version: null }, accounts: [], networks: [] } };
       const v = info.ok && isObj(info.body) && isObj(info.body.app) && typeof info.body.app.version === "string" ? sanitizeLine(info.body.app.version, 64) : "";
       const version = v || null;
-      const acc = await client.get("/v1/accounts", callOpts(ctx));
       if (!acc.ok && acc.error.code === "BEEPER_UNAUTHORIZED") return { ok: true, data: { ...base, beeper: { reachable: true, version, tokenValid: false }, accounts: [], networks: [] } };
       const rawAccounts = must(acc);
       const accounts = (Array.isArray(rawAccounts) ? rawAccounts : isObj(rawAccounts) && Array.isArray(rawAccounts.items) ? rawAccounts.items : []).map(mapAccount).filter((a: Account | null): a is Account => a !== null).slice(0, 50);
-      const chats = beeperPage(must(await client.get(`/v1/chats?${chatsQuery({ limit: "50" })}`, callOpts(ctx)))).items;
+      const chats = beeperPage(must(chatsCall)).items;
       const data = { ...base, beeper: { reachable: true, version, tokenValid: true }, accounts, networks: connectedNetworks(accounts, chats) };
       const checked = parseActionResult("status", data);
       return checked.ok ? { ok: true, data: checked.value } : err("INTERNAL", "Beeper sent an unexpected status.");
@@ -471,10 +499,46 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
     );
   }
 
+  // Chats this connector marked unread lately (bounded), for an unarchive right after (the snooze's return).
+  const recentUnread = new Map<string, number>();
+  const noteUnread = (chatID: string) => {
+    recentUnread.delete(chatID);
+    recentUnread.set(chatID, Date.now());
+    while (recentUnread.size > 500) recentUnread.delete(recentUnread.keys().next().value!);
+  };
+
+  /**
+   * Real Beeper (WhatsApp, measured 2026-10-31) archives a chat about 0.5 s after it was marked
+   * unread, so it would vanish from the inbox it was meant to stand out in. Watch the chat for a
+   * short while and un-archive it once if Beeper did. Within the request's deadline; failures of
+   * the watch never fail the action (the owner's change itself went through).
+   */
+  async function keepInInbox(chatID: string, ctx: RequestContext): Promise<void> {
+    const windowMs = opts.unreadWatch?.windowMs ?? UNREAD_WATCH_MS;
+    const every = Math.max(10, opts.unreadWatch?.everyMs ?? UNREAD_WATCH_EVERY_MS);
+    const end = Math.min(Date.now() + windowMs, ctx.deadline !== undefined ? ctx.deadline - 2 * every : Number.POSITIVE_INFINITY);
+    while (Date.now() + every <= end && !ctx.signal?.aborted) {
+      await pause(every, ctx.signal);
+      if (ctx.signal?.aborted) return;
+      const r = await client.get(client.chatPath(chatID), callOpts(ctx));
+      if (!r.ok) return;
+      if (isObj(r.body) && r.body.isArchived === true) {
+        await client.write("POST", client.chatPath(chatID, "archive"), { archived: false }, callOpts(ctx));
+        return;
+      }
+    }
+  }
+
   async function mark_read(p: Partial<ActionParams<"mark_read">> & { chatID: string }, ctx: RequestContext = {}): Promise<Outcome<ActionResult<"mark_read">>> {
     return guard(async () => {
       const read = p.read !== false;
+      // Unread: was the chat in the inbox? Only then is it kept there (an archived one stays archived).
+      const before = read ? null : must(await client.get(client.chatPath(p.chatID), callOpts(ctx)));
       must(await client.write("POST", client.chatPath(p.chatID, read ? "read" : "unread"), p.messageID ? { messageID: p.messageID } : {}, callOpts(ctx)));
+      if (!read) {
+        noteUnread(p.chatID);
+        if (!(isObj(before) && before.isArchived === true)) await keepInInbox(p.chatID, ctx);
+      }
       return { ok: true, data: { chatID: p.chatID, read } };
     });
   }
@@ -483,6 +547,12 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
     return guard(async () => {
       const archived = p.archived !== false;
       must(await client.write("POST", client.chatPath(p.chatID, "archive"), { archived }, callOpts(ctx)));
+      // Marked unread a moment ago (a snooze coming back: unread, then unarchive): Beeper's own
+      // archive may still come. Watched after answering (its own short window, not the request's):
+      // the caller's next step must not wait for it.
+      const unreadAt = recentUnread.get(p.chatID);
+      if (!archived && unreadAt !== undefined && Date.now() - unreadAt < RECENT_UNREAD_MS) void keepInInbox(p.chatID, {}).catch(() => {});
+      else if (archived) recentUnread.delete(p.chatID);
       return { ok: true, data: { chatID: p.chatID, archived } };
     });
   }

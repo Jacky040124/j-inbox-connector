@@ -31,6 +31,8 @@ export type Paths = {
   uploadsDir: string;
   /** The owner's definition of noise and the verdicts (noise/store.ts): kept here, never in the cloud. */
   noiseFile: string;
+  /** Gmail thread metadata for the lists (gmail/meta-cache.ts), sealed with the Keychain's `gmail-cache-key`. */
+  gmailCacheFile: string;
   /** Everything lives under J_INBOX_CONFIG_DIR. */
   testMode: boolean;
 };
@@ -68,6 +70,7 @@ export function resolvePaths(env: Record<string, string | undefined>): Paths {
     draftsFile: join(dataDir, "drafts.json"),
     uploadsDir: join(dataDir, "uploads"),
     noiseFile: join(dataDir, "noise.json"),
+    gmailCacheFile: join(dataDir, "gmail-cache.json"),
     testMode: override !== undefined,
   };
 }

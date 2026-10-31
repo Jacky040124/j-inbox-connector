@@ -4,6 +4,8 @@ import { describe, expect, test } from "bun:test";
 import {
   ACTIONS,
   GMAIL_NETWORK,
+  GMAIL_POLL_ACTIVE_INTERVAL_MS,
+  GMAIL_POLL_INTERVAL_MS,
   GOOGLE_PATHS,
   GOOGLE_SCOPE,
   approvalView,
@@ -35,6 +37,11 @@ import {
 import { chat, message } from "./fixtures/examples.ts";
 
 const EMAIL = "jacky@example.com";
+
+test("Gmail is polled every 30 s, every 10 s while a J-Inbox page is open", () => {
+  expect(GMAIL_POLL_INTERVAL_MS).toBe(30_000);
+  expect(GMAIL_POLL_ACTIVE_INTERVAL_MS).toBe(10_000);
+});
 
 describe("Gmail ids", () => {
   test("account and chat ids round-trip and stay valid protocol ids", () => {

@@ -96,6 +96,33 @@ describe("Gmail in the service", () => {
     expect(JSON.parse(readFileSync(paths.gmailFile, "utf8")).accounts).toEqual([]);
   });
 
+  test("a restart is warm: the Gmail list metadata is kept sealed on disk (key in the secret store) and the next run lists without thread fetches", async () => {
+    const { cloud, paths, svc, secrets } = await boot();
+    const rt = fg.google.issueRefreshToken(OWNER_EMAIL);
+    expect((await cloud.req("gmail_connect", { email: OWNER_EMAIL, refreshToken: rt })).res.ok).toBe(true);
+    for (let i = 0; i < 200 && !(await secrets.get("gmail-cache-key")); i++) await Bun.sleep(10);
+    expect((await secrets.get("gmail-cache-key"))?.length).toBe(43);
+    const first = await cloud.req("list_chats", { network: "Gmail", limit: 20 });
+    expect(first.res.ok).toBe(true);
+    await svc.stop(0);
+    expect(statSync(paths.gmailCacheFile).mode & 0o777).toBe(0o600);
+    const text = readFileSync(paths.gmailCacheFile, "utf8");
+    for (const s of ["Lunch", "alice@example.com", OWNER_EMAIL]) expect(text.includes(s)).toBe(false);
+    cloud.stop();
+    // The same computer, started again.
+    const cloud2 = await startFakeCloud({ token: TOKEN, google: { url: fg.url, clientId: FAKE_GOOGLE_CLIENT.id, clientSecret: FAKE_GOOGLE_CLIENT.secret } });
+    cleanup.push(() => cloud2.stop());
+    saveConfig(paths, { cloudURL: cloud2.url, beeperURL: fb.url, deviceID: "dev_gsvc", deviceName: "Test Mac" });
+    const env = { J_INBOX_GMAIL_API_URL: fg.url, J_INBOX_GOOGLE_OAUTH_URL: fg.url };
+    const svc2 = await startService({ paths, secrets, version: "0.1.0", healthIntervalMs: 60_000, backoff: () => 30, env, gmailPollIntervalMs: 60_000 });
+    cleanup.push(() => svc2.stop(0));
+    await cloud2.waitFor(() => svc2.link?.state.status === "connected", 4000, "connected again");
+    fg.google.requests = [];
+    const second = await cloud2.req("list_chats", { network: "Gmail", limit: 20 });
+    expect((second.res.data as any).items).toEqual((first.res.data as any).items);
+    expect(fg.google.requests.filter((r) => /\/threads\/[A-Za-z0-9]+$/.test(r.path))).toEqual([]);
+  });
+
   test("Google endpoint overrides are for tests only (loopback, with J_INBOX_CONFIG_DIR)", () => {
     const test_ = resolvePaths({ HOME: "/h", J_INBOX_CONFIG_DIR: "/tmp/x" });
     const real = resolvePaths({ HOME: "/h" });

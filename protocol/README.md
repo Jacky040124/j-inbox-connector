@@ -16,7 +16,7 @@ Changes must be **additive** and recorded in the root README changelog (see "Rul
 | `schema.ts` | Tiny validator library: `string` (single line), `text` (multi-line), `id`, `cursor`, `isoDateTime`, `base64`, `assetUrl`, `httpUrl`, `integer`, `number`, `boolean`, `literal`, `enumOf`, `array`, `object` (strict), `optional`, `nullable`, `record`, `discriminated`, `refine`, `jsonObject`/`jsonValue`. `parse(schema, value)` returns `{ok, value}` or `{ok:false, issues}`; issues never echo input values, record keys (reported as `<entry i>`) or unknown keys that do not look like field names (reported at the parent path). Output objects are fresh copies containing only declared keys. |
 | `limits.ts` | `PROTOCOL_VERSION` and every numeric limit (frame size, chunk size, timeouts, string lengths, page sizes). |
 | `errors.ts` | `ERROR_CODES`, `httpStatusForError`, `isRetryable(code, action)`, `errorAfterDispatch`, `errorBody`, `makeError` (clamps and sanitizes). The codes and `errorBody` live in `error-schema.ts` (re-exported) so `actions.ts` can use them without an import cycle. |
-| `gmail.ts` | Gmail as a source: `GMAIL_NETWORK`, ids (`gmailAccountID`, `gmailChatID`, `parseGmailAccountID`, `parseGmailChatID`, `isGmailID`, `normalizeGmailAddress`), attachment URLs (`gmailAssetURL`, `parseGmailAssetURL`), `GOOGLE_SCOPES`, `GOOGLE_PATHS`, `googleTokenRequest`/`googleTokenResponse`, `GMAIL_CONNECT_ERRORS`, `GMAIL_POLL_INTERVAL_MS`, `GOOGLE_TOKEN_REFRESHES_PER_MINUTE`. |
+| `gmail.ts` | Gmail as a source: `GMAIL_NETWORK`, ids (`gmailAccountID`, `gmailChatID`, `parseGmailAccountID`, `parseGmailChatID`, `isGmailID`, `normalizeGmailAddress`), attachment URLs (`gmailAssetURL`, `parseGmailAssetURL`), `GOOGLE_SCOPES`, `GOOGLE_PATHS`, `googleTokenRequest`/`googleTokenResponse`, `GMAIL_CONNECT_ERRORS`, `GMAIL_POLL_INTERVAL_MS`, `GMAIL_POLL_ACTIVE_INTERVAL_MS`, `GOOGLE_TOKEN_REFRESHES_PER_MINUTE`. |
 | `textutil.ts` | `truncateText`, `sanitizeText`, `sanitizeLine`: turn hostile upstream text into values the validators accept. |
 | `model.ts` | Normalized data shapes: `chatSummary`, `messageItem` (optional `email` headers), `attachment`, `reaction`, `account`, `beeperHealth`, `mediaHead`, `emailHeaders`/`emailPerson`, `emailRecipient`. |
 | `actions.ts` | The action catalogue `ACTIONS`, `parseActionParams` (fills defaults), `parseActionResult`, `coerceAgentParams`. |
@@ -91,7 +91,7 @@ camelCase (like Beeper). Agent writes marked "approval" go through the approval 
 | `status` | – | `{online, lastSeenAt, connectorVersion, beeper:{reachable, version, appState?, tokenValid?}, accounts[], networks?[]}`. `networks` is the platform list; `accounts[]` alone is not (no iMessage account, `X` vs `Twitter/X`) | | | `GET /v1/info`, `GET /v1/accounts`, `GET /v1/chats` (first page, networks by `accountID`) |
 | `list_chats` | `network? accountIDs? unreadOnly? pinnedOnly? inbox?(primary/low-priority/archive) type?(single/group/any) query? limit?(1-50, 25) cursor?` | `{items: ChatSummary[], hasMore, nextCursor}` | | | `GET /v1/chats` or `/v1/chats/search`, then connector-side `network`/`pinnedOnly` filter (see "Filtered paging") |
 | `unread_summary` | `limit?(1-50, 50)` | `{totalUnreadChats, totalUnreadMessages, items: ChatSummary[] (with preview), truncated}` | | | `GET /v1/chats` (ChatWithPreview) paged, keep `unreadCount>0 \|\| isMarkedUnread`, drop `isArchived` and `isLowPriority` chats (Beeper's inbox view). Not `/v1/chats/search`: it returns `Chat` without `preview` |
-| `read_chat` | `chatID cursor? limit?(1-50, 30)` | `{chat, items: MessageItem[] oldest-first, hasMore, nextCursor}` (nextCursor = older) | | | `GET /v1/chats/{id}`, `GET /v1/chats/{id}/messages?cursor&direction=before` |
+| `read_chat` | `chatID cursor? limit?(1-50, 30; 20 = `BEEPER_MESSAGES_PAGE` or fewer costs one Beeper history call)` | `{chat, items: MessageItem[] oldest-first, hasMore, nextCursor}` (nextCursor = older) | | | `GET /v1/chats/{id}`, `GET /v1/chats/{id}/messages?cursor&direction=before` |
 | `search_messages` | `query chatIDs? accountIDs? network? sender?(me/others) dateAfter? dateBefore? limit?(1-20, 20) cursor?` | `{items, chats: {chatID: ChatSummary}, hasMore, nextCursor}` | | | `GET /v1/messages/search` |
 | `draft_reply` | `chatID text(1-10000) attachmentId?` (agents only: their own upload, see "Files") | `{chatID, draftSet: true}` | yes | no | `GET /v1/chats/{id}`; if `draft` is non-empty answer `CONFLICT` (never clear the owner's half-typed text); else `PATCH /v1/chats/{id}` `{draft:{text}}`; Beeper 409/422 -> `CONFLICT` |
 | `send_message` | `chatID text?(1-10000) replyToMessageID? idempotencyKey? attachmentId?` (text or attachmentId; attachmentId: the owner only, see "Files") | `{chatID, pendingMessageID}` | yes | **yes** (10/min; agents may not attach files) | `POST /v1/chats/{id}/messages`; with a file first `POST /v1/assets/upload` (multipart), then the message with `attachment {uploadID, fileName, mimeType}` |
@@ -102,7 +102,7 @@ camelCase (like Beeper). Agent writes marked "approval" go through the approval 
 | `gmail_connect` | `email refreshToken` | `{accountID, connected: true}` | yes (cloud-only, `humanOnly`) | n/a | Gmail `users.getProfile` (the address must match), then the Keychain |
 | `snooze_chat` | `chatID until` (ISO 8601 with timezone; `snoozeUntilProblem`: 1 min to 7 days ahead, 10 min clock slack) | `{chatID, until}` | yes (cloud) | **yes** (60/min, like `archive`) | none itself: the cloud keeps the snooze (see "Snooze") and runs `read_chat` (limit 1) and `archive` now |
 | `unsnooze_chat` | `chatID` | `{chatID}` | yes (cloud) | **yes** (60/min) | none itself: the cloud runs `archive {archived:false}` and forgets the snooze |
-| `list_snoozed` | – | `{items: {chatID, until, snoozedAt, chat?: ChatSummary (no preview)}[]}` soonest first, at most `MAX_SNOOZES` (500) | (cloud) | (10/min) | the cloud's store (ids and times), then `list_chats {inbox: archive}` and `read_chat` (limit 1) for chats that page missed, 6 at a time within one request timeout; offline: no `chat` |
+| `list_snoozed` | `details?(true)` | `{items: {chatID, until, snoozedAt, chat?: ChatSummary (no preview)}[]}` soonest first, at most `MAX_SNOOZES` (500) | (cloud) | (10/min) | the cloud's store (ids and times), then `list_chats {inbox: archive}` and `read_chat` (limit 1) for chats that page missed, 6 at a time within one request timeout; offline or `details: false` (added 2026-10-31): no `chat` and no read at the connector |
 | `request_draft` | `chatID agentID instruction(1-2000)` | `draftView` | yes (cloud, `humanOnly`) | n/a (owner 20/min is the human budget) | none itself: see "Drafts by agents" |
 | `cancel_draft`, `discard_draft`, `mark_draft_sent` | `requestId` | `draftView` (cancelled / discarded / sent) | yes (cloud, `humanOnly`) | n/a | `draft_store_delete` at the connector |
 | `list_drafts` | `chatID?` | `{items: draftView[]}` (active ones, newest first, at most `MAX_ACTIVE_DRAFTS`) | (cloud, `humanOnly`) | n/a | the cloud's store, then `draft_store_get` |
@@ -413,9 +413,12 @@ The connector runs Gmail accounts next to Beeper. Rules every peer relies on:
   that fails is named in `failedSources[] {source, accountID?, error}` and the others still answer;
   when every source failed, the first failure is the answer. For Gmail, `search_messages.query` is
   Gmail search syntax; `sender`, `dateAfter`, `dateBefore` and `chatIDs` are honoured.
-- **Events.** The connector polls Gmail history every `GMAIL_POLL_INTERVAL_MS` (30 s) per account
-  and sends the same metadata-only `message`/`chat` events as for Beeper (re-sync on a history
-  reset).
+- **Events.** The connector polls Gmail history every `GMAIL_POLL_INTERVAL_MS` (30 s) per account,
+  every `GMAIL_POLL_ACTIVE_INTERVAL_MS` (10 s) while the cloud says a J-Inbox page is open
+  (`viewers`), and sends the same metadata-only `message`/`chat` events as for Beeper (re-sync on a
+  history reset). It moves its history position on only once the events of a poll were handed to a
+  connected cloud link; while the link is down it does not poll, and after the next `welcome` it
+  reads from the last position that was handed over, so nothing is skipped.
 - **Sign in with Google** (cloud, `GOOGLE_PATHS`): `GET /auth/google/start` (signed-in owner, computer
   online with `"gmail.v1"`) -> Google with exactly `GOOGLE_SCOPES`, `access_type=offline`,
   `prompt=consent`, PKCE S256 and `state`, sealed with the human session into a 10-minute cookie ->
@@ -465,7 +468,8 @@ cloud -> connector   req    {id, action, params, caller?{type:"human"|"agent", n
 connector -> cloud   res    {id, ok:true, data} | {id, ok:false, error{code,message}}
 connector -> cloud   chunk  {id, seq, data(base64 <= 256 KiB raw), last, error?}   get_media only, after res
 cloud -> connector   ack    {id, seq}                       get_media flow control: chunk seq was written out
-cloud -> connector   cancel {id}                            caller gone or timed out
+cloud -> connector   cancel {id}                            caller gone (the browser aborted a read) or timed out
+cloud -> connector   viewers{count}                         "viewers.v1" only: open browser /live sockets (0-1000), after welcome and on 0 <-> some
 connector -> cloud   event  {kind:"message", op, chatID, messageIDs[1..100], ts, othersAt?: time|null}
                             {kind:"chat", op, chatID, ts, unreadCount?}
                             {kind:"status", ts, beeper{reachable, version, appState?}}
@@ -487,7 +491,11 @@ both                 ping {t} / pong {t}                    every 25 s; 60 s sil
   the connector keeps draft requests' texts (`draft_store_*`); `"delegations.v1"` = its store also
   takes delegation requests (`dlg_` ids). The cloud gates `request_draft` / `request_delegation` on them;
   `"attachments.v1"` = it keeps and sends files (`upload_store_*`, `discard_upload`, `attachmentId`; see "Files");
-  `"noise.v1"` = it judges conversations with Jev and keeps the noise store (see "Noise").
+  `"noise.v1"` = it judges conversations with Jev and keeps the noise store (see "Noise");
+  `"viewers.v1"` (2026-10-31) = it takes the `viewers {count}` frame: the cloud sends it after every
+  `welcome` and whenever the owner's open `/live` sockets go from none to some or back; the connector
+  then polls Gmail every `GMAIL_POLL_ACTIVE_INTERVAL_MS` (10 s) instead of `GMAIL_POLL_INTERVAL_MS`
+  (30 s), and polls at once when the first page opens. A count only, never which tab or session.
 - Connector behaviour the cloud may rely on: a duplicate in-flight `req` id is ignored; a `req`
   that arrives while the connector shuts down gets `OFFLINE` and is not dispatched; a queued `req`
   whose deadline has (nearly) passed gets `TIMEOUT` without being dispatched; a `get_media` stream
@@ -500,7 +508,7 @@ both                 ping {t} / pong {t}                    every 25 s; 60 s sil
   `TIMEOUT` (nothing was sent, the idempotency key stays free); a write in flight when time ran
   out is `UNKNOWN_OUTCOME`.
 - Close codes (`CLOSE_CODES`): 4400 bad frame, 4401 unauthenticated (only for a device token the cloud rejected), 4403 revoked, 4408 heartbeat timeout and `HELLO_TIMEOUT` (no hello in time: a timeout, so reconnect), 4409 replaced by another paired computer, 4410 `SUPERSEDED` (the same device connected again; reconnect after a long delay), 4413 too large, 4426 version unsupported. `shouldReconnect(code)` is false for 4401, 4403, 4409, 4426. The connector re-checks a 4401 a few times before it stops (an older cloud sent 4401 for a slow hello). Reconnect delay: `backoffDelay(attempt)` = 1 s, 2 s, 4 s ... 60 s, with +/-20% jitter.
-- After every reconnect (to the cloud or to Beeper `/v1/ws`), the connector re-syncs recent chats and emits events, because Beeper's WebSocket is at-most-once.
+- After every reconnect (to the cloud or to Beeper `/v1/ws`), the connector re-syncs recent chats and emits events, because Beeper's WebSocket is at-most-once. Beeper `chat`/`message` events that happen while the cloud link is down are kept (at most 200, one per chat and kind, message ids merged) and sent after the next `welcome`; `status` events are not kept (every welcome sends a fresh one).
 - Media flow control: the connector sends chunk `seq` only while `seq <= lastAck + MEDIA_WINDOW_CHUNKS`
   (8 x 256 KiB), using `ChunkWindow.waitFor(seq)`. The cloud streams with
   `ChunkAssembler({expectedSize, onBytes}).accept(frame)`, which awaits `onBytes` (the

@@ -174,7 +174,8 @@ export class NoiseStore implements NoiseView {
   }
 
   private note(d: Decision) {
-    this.recent = [d, ...this.recent.filter((x) => !(x.chatID === d.chatID && x.source === d.source && x.at === d.at))].slice(0, MAX_NOISE_DECISIONS);
+    // The same decision once; two different verdicts within one millisecond are both kept.
+    this.recent = [d, ...this.recent.filter((x) => !(x.chatID === d.chatID && x.source === d.source && x.at === d.at && x.noise === d.noise && x.reason === d.reason))].slice(0, MAX_NOISE_DECISIONS);
   }
 
   /** Jev's verdicts (one call's). Conversations the owner decided are left alone. Throws if they cannot be written. */

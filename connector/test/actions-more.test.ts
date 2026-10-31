@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { ASSET_URLS, CHAT_IDS, HOSTILE_TEXTS, startFakeBeeper, type FakeBeeper } from "@j-inbox/fake-beeper";
 import { parseActionResult } from "@j-inbox/protocol";
 import { createBeeperClient } from "../src/beeper-client.ts";
-import { createActions } from "../src/actions.ts";
+import { createActions, requestContext } from "../src/actions.ts";
 import { AssetAllowlist } from "../src/assets.ts";
 
 let fb: FakeBeeper;
@@ -167,6 +167,84 @@ describe("mark_read", () => {
   test("unknown chat is NOT_FOUND", async () => {
     const { a } = make();
     expect((await a.mark_read({ chatID: "!nope:x", read: true })).error?.code).toBe("NOT_FOUND");
+  });
+});
+
+// Real Beeper (WhatsApp, measured 2026-10-31) archives a chat about 0.5 s after it was marked unread.
+describe("mark unread keeps an inbox chat in the inbox (Beeper's archive-on-unread quirk)", () => {
+  const watch = { windowMs: 700, everyMs: 40 };
+  const mk = () => createActions(createBeeperClient({ baseURL: fb.url, token: fb.token, timeoutMs: 5000 }), { unreadWatch: watch });
+  const chat = (id: string) => fb.state.chats.get(id)!;
+  const writes = () => fb.writes().map((w) => [w.route, w.body]);
+  test("WhatsApp chat in the inbox: unread, Beeper archives it, the connector un-archives it once; it stays put", async () => {
+    fb.controls.unreadArchiveDelayMs = 150;
+    const id = CHAT_IDS.pinnedUnread;
+    expect(chat(id).isArchived).not.toBe(true);
+    expect(ok(await mk().mark_read({ chatID: id, read: false }))).toEqual({ chatID: id, read: false });
+    expect([chat(id).isArchived, chat(id).isMarkedUnread]).toEqual([false, true]);
+    expect(writes()).toEqual([
+      ["POST /v1/chats/{chatID}/unread", {}],
+      ["POST /v1/chats/{chatID}/archive", { archived: false }],
+    ]);
+    await Bun.sleep(300);
+    expect([chat(id).isArchived, chat(id).isMarkedUnread]).toEqual([false, true]);
+  });
+  test("an archived chat marked unread stays archived (nothing un-archived)", async () => {
+    fb.controls.unreadArchiveDelayMs = 50;
+    const id = CHAT_IDS.pinnedUnread;
+    chat(id).isArchived = true;
+    ok(await mk().mark_read({ chatID: id, read: false }));
+    await Bun.sleep(150);
+    expect(chat(id).isArchived).toBe(true);
+    expect(writes()).toEqual([["POST /v1/chats/{chatID}/unread", {}]]);
+  });
+  test("a network without the quirk: one write, the watch ends after its window", async () => {
+    const t0 = performance.now();
+    ok(await mk().mark_read({ chatID: CHAT_IDS.imessageAlice, read: false }));
+    const ms = performance.now() - t0;
+    expect(ms).toBeGreaterThanOrEqual(600);
+    expect(ms).toBeLessThan(1200);
+    expect(writes()).toEqual([["POST /v1/chats/{chatID}/unread", {}]]);
+  });
+  test("a snooze coming back (unread, then unarchive): Beeper's late archive is undone too, after the unarchive answered", async () => {
+    fb.controls.unreadArchiveDelayMs = 150;
+    const id = CHAT_IDS.pinnedUnread;
+    chat(id).isArchived = true;
+    const a = mk();
+    ok(await a.mark_read({ chatID: id, read: false }));
+    const t = performance.now();
+    ok(await a.archive({ chatID: id, archived: false }));
+    // The unarchive answers at once (the snooze's next step must not wait); the watch runs after it.
+    expect(performance.now() - t).toBeLessThan(120);
+    await Bun.sleep(300);
+    expect([chat(id).isArchived, chat(id).isMarkedUnread]).toEqual([false, true]);
+    // Without the quirk the unarchive after an unread just returns (no extra write).
+    fb.controls.unreadArchives = [];
+    chat(id).isArchived = true;
+    fb.state.calls.length = 0;
+    ok(await a.mark_read({ chatID: id, read: false }));
+    ok(await a.archive({ chatID: id, archived: false }));
+    expect(writes().map((w) => w[0])).toEqual(["POST /v1/chats/{chatID}/unread", "POST /v1/chats/{chatID}/archive"]);
+    // An unarchive long after (or never after) an unread is not watched.
+    const t0 = performance.now();
+    ok(await a.archive({ chatID: CHAT_IDS.archived, archived: false }));
+    expect(performance.now() - t0).toBeLessThan(300);
+  });
+  test("the watch stays inside the request's deadline and stops on cancel; an unknown chat is NOT_FOUND with nothing sent", async () => {
+    const a = createActions(createBeeperClient({ baseURL: fb.url, token: fb.token, timeoutMs: 5000 }));
+    const t0 = performance.now();
+    ok(await a.mark_read({ chatID: CHAT_IDS.imessageAlice, read: false }, requestContext({ timeoutMs: 600, marginMs: 50 })));
+    expect(performance.now() - t0).toBeLessThan(560);
+    const cancel = new AbortController();
+    const done = a.mark_read({ chatID: CHAT_IDS.imessageAlice, read: false }, requestContext({ timeoutMs: 10_000, cancel: cancel.signal }));
+    await Bun.sleep(100);
+    const t1 = performance.now();
+    cancel.abort();
+    expect((await done).ok).toBe(true);
+    expect(performance.now() - t1).toBeLessThan(100);
+    fb.state.calls.length = 0;
+    expect((await a.mark_read({ chatID: "!nope:x", read: false })).error?.code).toBe("NOT_FOUND");
+    expect(fb.writes()).toEqual([]);
   });
 });
 

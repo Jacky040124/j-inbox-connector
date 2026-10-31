@@ -230,6 +230,19 @@ describe("Reconciler", () => {
     expect(sent).toEqual([expect.objectContaining({ kind: "chat", chatID: CHAT_IDS.longHistory, unreadCount: 4 })]);
     expect(JSON.stringify(sent)).not.toContain("missed while offline");
   });
+  test("a chat moved to Low priority, muted, pinned, archived or marked unread is announced again", async () => {
+    const sent: EventFrame[] = [];
+    const r = new Reconciler({ client: createBeeperClient({ baseURL: fb.url, token: fb.token }), send: (f) => (sent.push(f), true) });
+    await r.run();
+    const c = fb.state.chats.get(CHAT_IDS.longHistory)!;
+    for (const change of [() => (c.isLowPriority = !c.isLowPriority), () => (c.isMuted = !c.isMuted), () => (c.isPinned = !c.isPinned), () => (c.isArchived = !c.isArchived), () => (c.isMarkedUnread = !c.isMarkedUnread), () => (c.unreadCount += 1)]) {
+      sent.length = 0;
+      change();
+      expect(await r.run()).toBe(1);
+      expect(sent).toEqual([expect.objectContaining({ kind: "chat", op: "upserted", chatID: CHAT_IDS.longHistory })]);
+      expect(await r.run()).toBe(0);
+    }
+  });
   test("Beeper down: no events, no throw", async () => {
     const sent: EventFrame[] = [];
     const r = new Reconciler({ client: createBeeperClient({ baseURL: fb.url, token: fb.token, timeoutMs: 500 }), send: (f) => (sent.push(f), true) });

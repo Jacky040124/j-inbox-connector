@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  CAPABILITIES,
   CLOSE_CODES,
   ChunkAssembler,
   backoffDelay,
@@ -125,6 +126,14 @@ describe("frames the connector receives (from the cloud)", () => {
       const r = parseCloudFrame(s(f));
       if (!r.ok) throw new Error(JSON.stringify(r));
     }
+  });
+  test("viewers {count}: a bounded integer only, cloud -> connector only, behind \"viewers.v1\"", () => {
+    expect(CAPABILITIES.viewers).toBe("viewers.v1");
+    for (const count of [0, 1, 16, 1000]) expect(parseCloudFrame(s({ type: "viewers", count })).ok).toBe(true);
+    for (const bad of [{ count: -1 }, { count: 1001 }, { count: 1.5 }, { count: "1" }, {}, { count: 1, session: "x" }, { count: null }])
+      expect(parseCloudFrame(s({ type: "viewers", ...bad })).ok).toBe(false);
+    expect(parseConnectorFrame(s({ type: "viewers", count: 1 })).ok).toBe(false);
+    expect(encodeFrame({ type: "viewers", count: 2 }).ok).toBe(true);
   });
   test("req with a non-catalogue action is rejected at frame level", () => {
     for (const action of ["delete_everything", "__proto__", "SEND_MESSAGE", ""]) expect(parseCloudFrame(s({ ...req, action })).ok).toBe(false);

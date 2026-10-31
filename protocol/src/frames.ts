@@ -57,8 +57,10 @@ const JSON_LIMITS = { maxDepth: 32, maxKeys: 50_000 };
  * compose_email attachmentId) and keeps one with a draft (draft_store_set_text attachmentId).
  * "noise.v1": it judges conversations with Jev and keeps the owner's definition and verdicts
  * (get_noise_settings, set_noise_definition, set_noise; ChatSummary.noise).
+ * "viewers.v1" (added 2026-10-31): it takes the cloud's `viewers` frame (how many browser /live
+ * sockets are open) and polls Gmail faster while one is.
  */
-export const CAPABILITIES = { media: "media.v1", gmail: "gmail.v1", drafts: "drafts.v1", delegations: "delegations.v1", attachments: "attachments.v1", noise: "noise.v1" } as const;
+export const CAPABILITIES = { media: "media.v1", gmail: "gmail.v1", drafts: "drafts.v1", delegations: "delegations.v1", attachments: "attachments.v1", noise: "noise.v1", viewers: "viewers.v1" } as const;
 
 export const helloFrame = object({
   type: literal("hello"),
@@ -180,6 +182,14 @@ export const cancelFrame = object({ type: literal("cancel"), id: requestId });
 /** Flow control for get_media: the cloud has written chunk `seq` onward; the connector may send up to seq + MEDIA_WINDOW_CHUNKS. */
 export const ackFrame = object({ type: literal("ack"), id: requestId, seq: integer({ min: 0, max: MAX_CHUNKS }) });
 
+/**
+ * Added 2026-10-31 ("viewers.v1" connectors only): how many of the owner's browser /live sockets
+ * are open, sent after welcome and whenever it changes between none and some. A count, nothing
+ * else (no session, no tab). The connector polls Gmail every GMAIL_POLL_ACTIVE_INTERVAL_MS while
+ * count > 0, else every GMAIL_POLL_INTERVAL_MS; a connector that never got one assumes none.
+ */
+export const viewersFrame = object({ type: literal("viewers"), count: integer({ min: 0, max: 1000 }) });
+
 export const cloudFrame = discriminated("type", {
   welcome: welcomeFrame,
   req: reqFrame,
@@ -187,6 +197,7 @@ export const cloudFrame = discriminated("type", {
   ack: ackFrame,
   ping: pingFrame,
   pong: pongFrame,
+  viewers: viewersFrame,
 });
 
 export type HelloFrame = Infer<typeof helloFrame>;
@@ -202,6 +213,7 @@ export type ConnectorFrame = Infer<typeof connectorFrame>;
 export type WelcomeFrame = Infer<typeof welcomeFrame>;
 export type ReqFrame = Infer<typeof reqFrame>;
 export type CancelFrame = Infer<typeof cancelFrame>;
+export type ViewersFrame = Infer<typeof viewersFrame>;
 export type AckFrame = Infer<typeof ackFrame>;
 export type CloudFrame = Infer<typeof cloudFrame>;
 export type AnyFrame = ConnectorFrame | CloudFrame;

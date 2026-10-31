@@ -9,6 +9,7 @@
 // With no Gmail account on this computer everything is the Beeper path, unchanged.
 import {
   GMAIL_NETWORK,
+  READ_CHAT_DEFAULT_LIMIT,
   gmailAccountID,
   gmailChatID,
   makeError,
@@ -295,7 +296,7 @@ export function createRouter(o: RouterOptions) {
     const g = gmailChat(p.chatID);
     if ("ok" in g) return g;
     return guarded(async () => {
-      const r = await g.s.readThread(g.threadId, p.cursor, p.limit ?? 30, ctx);
+      const r = await g.s.readThread(g.threadId, p.cursor, p.limit ?? READ_CHAT_DEFAULT_LIMIT, ctx);
       if (!r.ok) return r;
       const { chat, items, offsets, urls, chatURLs } = r.data;
       // items are oldest first; a smaller page keeps the newest ones.

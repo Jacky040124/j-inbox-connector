@@ -7,6 +7,21 @@ import { createGmailSource, listFilterFor } from "../src/gmail/source.ts";
 const okToken = async () => ({ ok: true as const, accessToken: "at_123456789", expiresIn: 3600 });
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
+/** A Gmail batch answer: each inner GET (request line) handed to `one`, its answers as application/http parts. */
+async function batchAnswer(req: Request, one: (url: URL) => Response | Promise<Response>): Promise<Response> {
+  const boundary = /boundary=([^;\s]+)/.exec(req.headers.get("content-type") ?? "")![1]!;
+  const text = await req.text();
+  const out: string[] = [];
+  for (const part of text.split(`--${boundary}`).slice(1)) {
+    if (part.startsWith("--")) break;
+    const id = /Content-ID: <([^>]+)>/i.exec(part)![1]!;
+    const path = /\r\n\r\nGET (\S+) HTTP\/1\.1/.exec(part)![1]!;
+    const r = await one(new URL(path, "https://gmail.test"));
+    out.push(`--zz\r\nContent-Type: application/http\r\nContent-ID: <response-${id}>\r\n\r\nHTTP/1.1 ${r.status} X\r\nContent-Type: application/json\r\n\r\n${await r.text()}\r\n`);
+  }
+  return new Response(out.join("") + "--zz--\r\n", { headers: { "content-type": "multipart/mixed; boundary=zz" } });
+}
+
 describe("Gmail quota", () => {
   test("requests start at most N per second (real clock)", async () => {
     const startedAt: number[] = [];
@@ -59,12 +74,15 @@ describe("Gmail quota", () => {
       email: "a@gmail.com",
       refreshToken: async () => "rt_123456789",
       refresh: okToken,
-      fetchImpl: (async (u: URL) => {
+      fetchImpl: (async (u: URL, init?: RequestInit) => {
+        const one = (url: URL) => {
+          if (url.pathname.endsWith("/threads")) return json(200, { threads: [{ id: "t1", historyId: hist }, { id: "t2", historyId: "50" }] });
+          const id = url.pathname.split("/").pop()!;
+          gets.push(id);
+          return json(200, thread(id));
+        };
         const url = new URL(String(u));
-        if (url.pathname.endsWith("/threads")) return json(200, { threads: [{ id: "t1", historyId: hist }, { id: "t2", historyId: "50" }] });
-        const id = url.pathname.split("/").pop()!;
-        gets.push(id);
-        return json(200, thread(id));
+        return url.pathname === "/batch/gmail/v1" ? batchAnswer(new Request(url, init), one) : one(url);
       }) as unknown as typeof fetch,
     });
     const src = createGmailSource({ email: "a@gmail.com", client });
@@ -78,4 +96,31 @@ describe("Gmail quota", () => {
     await src.listThreads(f, null, 10, {});
     expect(gets).toEqual(["t1"]);
   });
+
+  test("a batch counts as all its calls in the per-second window, and is not starved by a stream of small calls", async () => {
+    const startedAt: { at: number; n: number }[] = [];
+    const client = createGmailClient({
+      email: "a@gmail.com",
+      refreshToken: async () => "rt_123456789",
+      refresh: okToken,
+      maxRequestsPerSecond: 4,
+      fetchImpl: (async (u: URL, init?: RequestInit) => {
+        const url = new URL(String(u));
+        if (url.pathname !== "/batch/gmail/v1") return startedAt.push({ at: Date.now(), n: 1 }), json(200, {});
+        const req = new Request(url, init);
+        const n = ((await req.clone().text()).match(/Content-ID/g) ?? []).length;
+        startedAt.push({ at: Date.now(), n });
+        return batchAnswer(req, () => json(200, { ok: 1 }));
+      }) as unknown as typeof fetch,
+    });
+    const small = Array.from({ length: 3 }, () => client.get(client.path(["profile"])));
+    const batch = client.batchGet(Array.from({ length: 6 }, (_, i) => client.path(["threads", `t${i}`])));
+    const after = client.get(client.path(["profile"]));
+    const [r] = await Promise.all([batch, ...small, after]);
+    expect(r.every((x) => x.ok)).toBe(true);
+    expect(startedAt.map((s) => s.n)).toEqual([1, 1, 1, 6, 1]);
+    // The batch (worth the whole window of 4) waited for the 3 small calls to leave it; the call after it waited for the batch.
+    expect(startedAt[3]!.at - startedAt[0]!.at).toBeGreaterThanOrEqual(990);
+    expect(startedAt[4]!.at - startedAt[3]!.at).toBeGreaterThanOrEqual(990);
+  }, 10_000);
 });

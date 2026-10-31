@@ -70,6 +70,8 @@ export type CloudLinkOptions = {
   dispatcher: { dispatch(action: string, params: unknown, ctx?: { signal?: AbortSignal; deadline?: number }): Promise<DispatchResult>; isWrite(action: string): boolean };
   /** After every welcome (first connect and reconnects): re-sync, Beeper events are at-most-once. */
   onWelcome?: () => void;
+  /** The cloud's `viewers` frame ("viewers.v1"): how many browser pages are open; 0 again when the link drops. */
+  onViewers?: (count: number) => void;
   onState?: (s: LinkState) => void;
   onRequest?: (r: RequestLog) => void;
   log?: (msg: string, fields?: Record<string, string | number | boolean | null>) => void;
@@ -278,7 +280,15 @@ export class CloudLink {
         return this.onCancel(f.id);
       case "ack":
         return this.pending.get(f.id)?.window?.ack(f.seq);
+      case "viewers":
+        return this.viewers(f.count);
     }
+  }
+
+  private viewers(count: number) {
+    try {
+      this.o.onViewers?.(count);
+    } catch {}
   }
 
   /** Answer what can be addressed (a req with a valid id), drop the rest. */
@@ -344,6 +354,8 @@ export class CloudLink {
     const wasWelcomed = !!this.welcome;
     this.welcome = null;
     this.abandonAll();
+    // Nobody can be watching through a link that is gone; the next welcome brings a fresh count.
+    if (wasWelcomed) this.viewers(0);
     if (this.stopping) return;
     // A 4401 can come from a cloud that closed a slow hello with it (older clouds) or a passing
     // fault: only the same answer several times in a row means the credential is really rejected.

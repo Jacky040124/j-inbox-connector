@@ -248,6 +248,53 @@ describe("unread right after unarchive (real Beeper quirk)", () => {
   });
 });
 
+describe("mark unread archives a WhatsApp chat a moment later (real Beeper quirk, 2026-10-31)", () => {
+  const chatPath = (id: string) => `/v1/chats/${enc(id)}`;
+  const state = async (id: string) => {
+    const c = (await get(chatPath(id))).body;
+    return [c.isArchived === true, c.isMarkedUnread === true];
+  };
+  test("WhatsApp: unread, then archived after the delay; read un-archives", async () => {
+    fb.controls.unreadArchiveDelayMs = 80;
+    const id = CHAT_IDS.pinnedUnread;
+    await send("POST", chatPath(id) + "/unread", {});
+    expect(await state(id)).toEqual([false, true]);
+    await Bun.sleep(150);
+    expect(await state(id)).toEqual([true, true]);
+    await send("POST", chatPath(id) + "/read", {});
+    expect(await state(id)).toEqual([false, false]);
+  });
+  test("an unarchive in between does not stop it; a read in between does; other networks never", async () => {
+    fb.controls.unreadArchiveDelayMs = 80;
+    const id = CHAT_IDS.pinnedUnread;
+    await send("POST", chatPath(id) + "/unread", {});
+    await send("POST", chatPath(id) + "/archive", { archived: false });
+    await Bun.sleep(150);
+    expect(await state(id)).toEqual([true, true]);
+    await send("POST", chatPath(id) + "/archive", { archived: false });
+    expect(await state(id)).toEqual([false, true]);
+    await send("POST", chatPath(id) + "/unread", {});
+    await send("POST", chatPath(id) + "/read", {});
+    await Bun.sleep(150);
+    expect(await state(id)).toEqual([false, false]);
+    const other = CHAT_IDS.imessageAlice;
+    await send("POST", chatPath(other) + "/unread", {});
+    await Bun.sleep(150);
+    expect(await state(other)).toEqual([false, true]);
+    fb.controls.unreadArchives = [];
+    await send("POST", chatPath(id) + "/unread", {});
+    await Bun.sleep(150);
+    expect(await state(id)).toEqual([false, true]);
+  });
+  test("a reset in between: nothing happens to the fresh state", async () => {
+    fb.controls.unreadArchiveDelayMs = 60;
+    await send("POST", chatPath(CHAT_IDS.pinnedUnread) + "/unread", {});
+    fb.reset();
+    await Bun.sleep(120);
+    expect(await state(CHAT_IDS.pinnedUnread)).toEqual([false, false]);
+  });
+});
+
 describe("files: POST /v1/assets/upload, then a message with attachment {uploadID}", () => {
   const pdf = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37, 0x0a, 0x25]);
   const upload = async (fields: Record<string, string> = {}) => {

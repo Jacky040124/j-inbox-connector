@@ -169,6 +169,13 @@ describe("the noise store", () => {
     expect(s.decisions()).toHaveLength(MAX_NOISE_DECISIONS);
     expect(s.decisions()[0]!.chatID).toBe("c29");
   });
+  test("two different verdicts on one chat in the same millisecond are both in Recent decisions", () => {
+    const s = new NoiseStore({ now: () => 1_700_000_000_000 });
+    s.setDefinition(DEFINITION);
+    s.setJev([jevVerdict("c1", true, NEWSLETTERS)]);
+    s.setJev([jevVerdict("c1", false)]);
+    expect(s.decisions().map((d) => [d.noise, d.reason])).toEqual([[false, null], [true, NEWSLETTERS]]);
+  });
   test("a garbled or hostile file is ignored or cleaned, never trusted", () => {
     const path = join(dir, "noise.json");
     writeFileSync(path, "{not json");

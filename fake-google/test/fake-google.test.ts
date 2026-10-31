@@ -234,6 +234,98 @@ describe("query language", () => {
   });
 });
 
+describe("batch (POST /batch/gmail/v1)", () => {
+  const batchBody = (calls: { id?: string; line: string; headers?: string[] }[], boundary = "b0und") =>
+    calls.map((c) => `--${boundary}\r\nContent-Type: application/http\r\n${c.id ? `Content-ID: <${c.id}>\r\n` : ""}\r\n${c.line}\r\n${(c.headers ?? []).map((h) => h + "\r\n").join("")}\r\n`).join("") + `--${boundary}--\r\n`;
+  const send = (body: string, token: string | null, ct = "multipart/mixed; boundary=b0und") => call("/batch/gmail/v1", { method: "POST", headers: { "content-type": ct, ...(token ? { authorization: `Bearer ${token}` } : {}) }, body });
+  async function parts(res: Response) {
+    const boundary = /boundary=([^;\s]+)/.exec(res.headers.get("content-type") ?? "")![1]!;
+    const text = await res.text();
+    return text
+      .split(`--${boundary}`)
+      .slice(1)
+      .filter((p) => !p.startsWith("--"))
+      .map((p) => {
+        const [outer, rest] = p.replace(/^\r\n/, "").split("\r\n\r\n", 2) as [string, string];
+        const httpPart = p.slice(p.indexOf("HTTP/1.1"));
+        const status = Number(/^HTTP\/1\.1 (\d{3})/.exec(httpPart)![1]);
+        const body = httpPart.slice(httpPart.indexOf("\r\n\r\n") + 4).replace(/\r\n$/, "");
+        return { id: /Content-ID: <([^>]+)>/i.exec(outer)?.[1] ?? null, status, body: JSON.parse(body), rest };
+      });
+  }
+
+  test("each call answered in its own part, in order, with response- Content-IDs; calls are logged inBatch", async () => {
+    const t = await accessToken();
+    const res = await send(
+      batchBody([
+        { id: "a1", line: `GET /gmail/v1/users/me/threads/${THREADS.lunch}?format=metadata&metadataHeaders=Subject HTTP/1.1` },
+        { id: "a2", line: `GET /gmail/v1/users/me/threads/nosuchthread?format=metadata HTTP/1.1` },
+        { id: "a3", line: `GET /gmail/v1/users/me/profile HTTP/1.1` },
+      ]),
+      t,
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toMatch(/^multipart\/mixed; boundary=/);
+    const p = await parts(res);
+    expect(p.map((x) => [x.id, x.status])).toEqual([
+      ["response-a1", 200],
+      ["response-a2", 404],
+      ["response-a3", 200],
+    ]);
+    expect(p[0]!.body.id).toBe(THREADS.lunch);
+    // metadata: headers only, never a body
+    expect(JSON.stringify(p[0]!.body)).not.toContain('"data"');
+    expect(p[2]!.body.emailAddress).toBe(OWNER_EMAIL);
+    const logged = g.requests.slice(-4);
+    expect(logged.map((r) => [r.path, r.status, r.inBatch ?? false])).toEqual([
+      [`/gmail/v1/users/me/threads/${THREADS.lunch}`, 200, true],
+      ["/gmail/v1/users/me/threads/nosuchthread", 404, true],
+      ["/gmail/v1/users/me/profile", 200, true],
+      ["/batch/gmail/v1", 200, false],
+    ]);
+  });
+
+  test("the batch's token applies to calls without one; no token: every call is 401; a call's own header wins", async () => {
+    const t = await accessToken();
+    const other = await accessToken("other@example.com");
+    const none = await parts(await send(batchBody([{ id: "x", line: "GET /gmail/v1/users/me/profile HTTP/1.1" }]), null));
+    expect(none.map((x) => x.status)).toEqual([401]);
+    const own = await parts(await send(batchBody([{ id: "x", line: "GET /gmail/v1/users/me/profile HTTP/1.1", headers: [`Authorization: Bearer ${other}`] }]), t));
+    expect(own[0]!.body.emailAddress).toBe("other@example.com");
+  });
+
+  test("fault rules hit calls inside a batch; latency is paid once per batch", async () => {
+    const t = await accessToken();
+    g.failNext({ path: `/gmail/v1/users/me/threads/${THREADS.kickoff}`, status: 429 });
+    g.latencyMs = 40;
+    const t0 = Date.now();
+    const p = await parts(
+      await send(
+        batchBody([
+          { id: "1", line: `GET /gmail/v1/users/me/threads/${THREADS.lunch}?format=minimal HTTP/1.1` },
+          { id: "2", line: `GET /gmail/v1/users/me/threads/${THREADS.kickoff}?format=minimal HTTP/1.1` },
+          { id: "3", line: `GET /gmail/v1/users/me/threads/${THREADS.html}?format=minimal HTTP/1.1` },
+        ]),
+        t,
+      ),
+    );
+    expect(Date.now() - t0).toBeLessThan(110);
+    expect(p.map((x) => x.status)).toEqual([200, 429, 200]);
+    expect(p[1]!.body.error.code).toBe(429);
+  });
+
+  test("refused: not multipart, no calls, more than 100 calls, a nested batch, a bad request line", async () => {
+    const t = await accessToken();
+    expect((await send("x", t, "application/json")).status).toBe(400);
+    expect((await send("--b0und--\r\n", t)).status).toBe(400);
+    const many = batchBody(Array.from({ length: 101 }, (_, i) => ({ id: `i${i}`, line: "GET /gmail/v1/users/me/profile HTTP/1.1" })));
+    expect((await send(many, t)).status).toBe(400);
+    expect((await call("/batch/gmail/v1", { headers: { authorization: `Bearer ${t}` } })).status).toBe(405);
+    const p = await parts(await send(batchBody([{ id: "n", line: "POST /batch/gmail/v1 HTTP/1.1" }, { id: "b", line: "garbage" }]), t));
+    expect(p.map((x) => x.status)).toEqual([400, 400]);
+  });
+});
+
 test("startFakeGoogle serves the same handler over HTTP", async () => {
   const s = await startFakeGoogle({ redirectUris: [REDIRECT] });
   try {

@@ -9,6 +9,8 @@ import {
   isActionName,
   parseActionParams,
   parseActionResult,
+  BEEPER_MESSAGES_PAGE,
+  READ_CHAT_DEFAULT_LIMIT,
   type ActionName,
 } from "../src/actions.ts";
 import { MAX_PAGE_LIMIT, MAX_SEND_TEXT_LENGTH } from "../src/limits.ts";
@@ -109,7 +111,7 @@ const VALID: Record<ActionName, unknown[]> = {
   gmail_connect: [{ email: "jacky@example.com", refreshToken: "1//0gFAKE-refresh_token.xyz" }],
   snooze_chat: [{ chatID, until: "2026-10-30T09:00:00.000Z" }, { chatID: "gmail:jacky@example.com:18c2f0a1b2c3d4e5", until: "2026-10-30T09:00:00+02:00" }],
   unsnooze_chat: [{ chatID }],
-  list_snoozed: [{}],
+  list_snoozed: [{}, { details: true }, { details: false }],
   request_draft: [{ chatID, agentID: "bbbbbbbb-0000-4000-8000-000000000001", instruction: "Say yes, Friday works.\nKeep it short 🙂" }, { chatID: "gmail:jacky@example.com:18c2f0a1b2c3d4e5", agentID: "agent_x", instruction: "x".repeat(2000) }],
   cancel_draft: [{ requestId: "drq_0123456789abcdef" }],
   discard_draft: [{ requestId: "drq_0123456789abcdef" }],
@@ -167,7 +169,7 @@ const INVALID: Record<ActionName, unknown[]> = {
   gmail_connect: [{}, { email: "jacky@example.com" }, { email: "jacky@example.com", refreshToken: "has space in it" }, { email: "nope", refreshToken: "1//0gFAKE-refresh" }],
   snooze_chat: [{}, { chatID }, { until: "2026-10-30T09:00:00.000Z" }, { chatID: "", until: "2026-10-30T09:00:00.000Z" }, { chatID: "a b", until: "2026-10-30T09:00:00.000Z" }, { chatID: "x".repeat(513), until: "2026-10-30T09:00:00.000Z" }, { chatID, until: "tomorrow" }, { chatID, until: "2026-10-30T09:00:00" }, { chatID, until: "2026-13-30T09:00:00Z" }, { chatID, until: 1793350800000 }, { chatID, until: "2026-10-30T09:00:00Z", archived: true }],
   unsnooze_chat: [{}, { chatID: "" }, { chatID: 5 }, { chatID, until: "2026-10-30T09:00:00Z" }],
-  list_snoozed: [{ chatID }, null, []],
+  list_snoozed: [{ chatID }, null, [], { details: "false" }, { details: 0 }, { details: null }],
   request_draft: [{}, { chatID, agentID: "a" }, { chatID, instruction: "x" }, { chatID, agentID: "a", instruction: "" }, { chatID, agentID: "a", instruction: "   \n " }, { chatID, agentID: "a", instruction: "x".repeat(2001) }, { chatID, agentID: "a b", instruction: "x" }, { chatID, agentID: "", instruction: "x" }, { chatID, agentID: "x".repeat(129), instruction: "x" }, { chatID: "a b", agentID: "a", instruction: "x" }, { chatID, agentID: "a", instruction: "x", send: true }],
   cancel_draft: [{}, { requestId: "apr_0123456789abcdef" }, { requestId: "drq_" }, { requestId: "drq_has space" }, { requestId: "drq_" + "a".repeat(64) }],
   discard_draft: [{}, { requestId: 5 }],
@@ -240,6 +242,18 @@ describe("parseActionParams", () => {
     expect(m.ok && m.value.read).toBe(true);
     const a = parseActionParams("archive", { chatID });
     expect(a.ok && a.value.archived).toBe(true);
+  });
+  test("read_chat keeps its default of 30 (the web relies on it) and names one Beeper page (20); list_snoozed defaults to details", () => {
+    expect(READ_CHAT_DEFAULT_LIMIT).toBe(30);
+    expect(BEEPER_MESSAGES_PAGE).toBe(20);
+    const r = parseActionParams("read_chat", { chatID });
+    expect(r.ok && r.value.limit).toBe(30);
+    expect(ACTIONS.read_chat.paramDocs.limit).toContain("default 30; 20 or fewer is the quickest");
+    const l = parseActionParams("list_snoozed", {});
+    expect(l.ok && l.value.details).toBe(true);
+    const off = parseActionParams("list_snoozed", { details: false });
+    expect(off.ok && off.value.details).toBe(false);
+    expect(ACTIONS.list_snoozed.description).toMatch(/details:false/);
   });
   test("explicit values beat defaults", () => {
     const r = parseActionParams("list_chats", { limit: 5 });

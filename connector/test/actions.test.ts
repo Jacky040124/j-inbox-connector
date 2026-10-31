@@ -2,7 +2,7 @@
 // quirks (TQ4), page shrinking (TQ5), draft safety (F3) and write deduplication (R1-01).
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { CHAT_IDS, startFakeBeeper, type FakeBeeper } from "@j-inbox/fake-beeper";
-import { MAX_FRAME_BYTES, encodeFrame, isRetryable, parseActionResult } from "@j-inbox/protocol";
+import { BEEPER_MESSAGES_PAGE, MAX_FRAME_BYTES, encodeFrame, isRetryable, parseActionResult } from "@j-inbox/protocol";
 import { createBeeperClient, beeperErrorCode } from "../src/beeper-client.ts";
 import { createActions, createWriteDedupe } from "../src/actions.ts";
 import { FileIdempotencyJournal } from "../src/idempotency.ts";
@@ -401,6 +401,71 @@ describe("unread_summary scan budget", () => {
   });
 });
 
+// perf 2026-10-31: opening a chat and status are one round trip to Beeper, not two or three.
+describe("round trips", () => {
+  const routes = () => fb.state.calls.map((c) => c.route);
+  test("read_chat asks for the chat and the first history page at once; a limit of one Beeper page (20) is one round trip", async () => {
+    fb.controls.latencyMs = 150;
+    const a = make();
+    const t0 = performance.now();
+    const p = ok(await a.read_chat({ chatID: CHAT_IDS.longHistory, limit: BEEPER_MESSAGES_PAGE }));
+    const ms = performance.now() - t0;
+    expect(p.items.length).toBe(20);
+    expect(p.hasMore).toBe(true);
+    expect(routes().sort()).toEqual(["GET /v1/chats/{chatID}", "GET /v1/chats/{chatID}/messages"]);
+    // Both calls overlapped: well under two Beeper round trips.
+    expect(ms).toBeLessThan(280);
+    const [c1, c2] = fb.state.calls;
+    expect(Math.abs(c1!.at - c2!.at)).toBeLessThan(60);
+  });
+  test("read_chat with a cursor also overlaps the chat and the page the cursor names; the default (30) takes two pages", async () => {
+    const a = make();
+    const p1 = ok(await a.read_chat({ chatID: CHAT_IDS.longHistory }));
+    expect(p1.items.length).toBe(30);
+    expect(fb.state.calls.filter((c) => c.route === "GET /v1/chats/{chatID}/messages").length).toBe(2);
+    fb.state.calls.length = 0;
+    fb.controls.latencyMs = 150;
+    const t0 = performance.now();
+    const p2 = ok(await a.read_chat({ chatID: CHAT_IDS.longHistory, limit: 5, cursor: p1.nextCursor! }));
+    expect(performance.now() - t0).toBeLessThan(280);
+    expect(p2.items.length).toBe(5);
+    expect(new Set([...p1.items, ...p2.items].map((m: any) => m.id)).size).toBe(35);
+    const page = fb.state.calls.find((c) => c.route === "GET /v1/chats/{chatID}/messages")!;
+    expect(page.query.cursor?.length).toBe(1);
+  });
+  test("read_chat of an unknown chat is NOT_FOUND (the chat's answer wins) and leaves nothing unhandled", async () => {
+    fb.controls.latencyMs = 20;
+    const r = await make().read_chat({ chatID: "imsg##thread:nope" });
+    expect(r.error?.code).toBe("NOT_FOUND");
+    fb.failNext({ method: "GET", route: "/v1/chats/{chatID}", status: 500 });
+    const down = await make().read_chat({ chatID: CHAT_IDS.longHistory });
+    expect(down.error?.code).toBe("BEEPER_DOWN");
+    await Bun.sleep(60);
+  });
+  test("read_chat: the history failing after the chat answered is that failure", async () => {
+    fb.failNext({ method: "GET", route: "/v1/chats/{chatID}/messages", status: 401 });
+    const r = await make().read_chat({ chatID: CHAT_IDS.longHistory });
+    expect(r.error?.code).toBe("BEEPER_UNAUTHORIZED");
+  });
+  test("status asks /v1/info, /v1/accounts and /v1/chats at once, with the same answers as before", async () => {
+    fb.controls.latencyMs = 150;
+    const a = make();
+    const t0 = performance.now();
+    const st = ok(await a.status());
+    expect(performance.now() - t0).toBeLessThan(280);
+    expect(routes().sort()).toEqual(["GET /v1/accounts", "GET /v1/chats", "GET /v1/info"]);
+    expect(st.beeper).toEqual({ reachable: true, version: expect.any(String), tokenValid: true });
+    expect(st.networks!.length).toBeGreaterThan(2);
+    fb.controls.latencyMs = 0;
+    fb.failNext({ method: "GET", route: "/v1/accounts", status: 401 });
+    expect(ok(await a.status()).beeper).toEqual({ reachable: true, version: expect.any(String), tokenValid: false });
+    fb.failNext({ method: "GET", route: "/v1/info", status: 500 });
+    expect(ok(await a.status())).toMatchObject({ beeper: { reachable: false, version: null }, accounts: [], networks: [] });
+    fb.failNext({ method: "GET", route: "/v1/chats", status: 500 });
+    expect((await a.status()).error?.code).toBe("BEEPER_DOWN");
+  });
+});
+
 // stability-r2-R2-3: one deadline and one cancel signal per request, across every Beeper call.
 import { requestContext } from "../src/actions.ts";
 describe("request deadline and cancel", () => {
@@ -424,8 +489,13 @@ describe("request deadline and cancel", () => {
     cancel.abort();
     const r = await done;
     expect(r.ok).toBe(false);
-    await Bun.sleep(700);
-    expect(callsTo(CHAT_IDS.longHistory)).toBeLessThanOrEqual(2);
+    // The fake logs a call once its latency passed: what was sent before the cancel shows up by now.
+    await Bun.sleep(250);
+    const settled = callsTo(CHAT_IDS.longHistory);
+    await Bun.sleep(500);
+    // The chat and the first page went out together, then page 2; nothing after the cancel.
+    expect(settled).toBeLessThanOrEqual(3);
+    expect(callsTo(CHAT_IDS.longHistory)).toBe(settled);
   });
   test("draft_reply: when the deadline passes during the GET, the PATCH is never dispatched", async () => {
     fb.controls.latencyMs = 600;

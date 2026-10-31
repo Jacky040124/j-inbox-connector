@@ -48,9 +48,10 @@ j-inbox run          # the service in the foreground (what launchd runs)
 | What | Where |
 |---|---|
 | Config (no secrets: cloud URL, Beeper URL, engine, device id and name) | `~/.config/j-inbox/config.json` (0600) |
-| Beeper token, device token, Gmail refresh tokens, the Jev key | login Keychain, service `build.jsuite.j-inbox`, accounts `beeper-token` / `device-token` / `gmail:<address>` / `typesafe-api-key`, written with `security -i` on stdin (never in argv) |
+| Beeper token, device token, Gmail refresh tokens, the Jev key, the Gmail cache key | login Keychain, service `build.jsuite.j-inbox`, accounts `beeper-token` / `device-token` / `gmail:<address>` / `typesafe-api-key` / `gmail-cache-key` (32 random bytes, made when the first Gmail account is added), written with `security -i` on stdin (never in argv) |
 | Gmail accounts (addresses and connected / reconnect_required; never tokens or mail) | `~/Library/Application Support/j-inbox/gmail.json` (0600) |
 | Idempotency journal (key hashes, parameter digests, result ids; never text or chat ids), asset allowlist (URL hashes) | `~/Library/Application Support/j-inbox/` |
+| Gmail list cache `gmail-cache.json`: per thread what Gmail's `format=metadata` gives the lists (ids, labels, dates, the From/To/Cc/Subject/Date/Message-ID headers, Gmail's snippet; never a body, never a draft's snippet), valid while the thread's `historyId` is unchanged, so a restart lists without fetching every thread again; at most 3000 threads and 6 MiB, least recently used out; AES-256-GCM sealed with the Keychain's `gmail-cache-key` (no email text on disk in the clear; without the key it stays in memory); forgotten with its account | `~/Library/Application Support/j-inbox/` (0600) |
 | Request store `drafts.json`: for "ask an agent to draft a reply", each request's chat id, the owner's instruction and the agent's draft; for "delegate to an agent as a Raft task", each request's chat id and the owner's instruction (the cloud keeps none of them); at most 200, each forgotten when the owner handles it (a delegation: when the task is created, or it is cancelled or dismissed) or 7 days after it was made | `~/Library/Application Support/j-inbox/` (0600) |
 | Upload store `uploads/`: files being sent through J-Inbox (the owner's from the web page, an agent's on its draft), one `upl_*.bin` per file plus `index.json` (name, type, size, an owner tag that is a digest of the caller, never a sub); at most 60 files and 256 MiB; a file is forgotten once sent, discarded or handled with its draft, 1 hour after it began unless it is on a draft, with its draft (7 days at the latest) | `~/Library/Application Support/j-inbox/uploads/` (0700; files 0600) |
 | Noise store `noise.json`: the owner's definition of noise, the verdicts (chat id, noise or not, the definition line Jev chose, its confidence, Jev's or the owner's, the newest message id Jev saw; at most 5000, the least recently judged go first), the owner's corrections with a one-line summary of the conversation (shown to Jev as examples), and the 20 latest decisions with the conversation's title (the cloud keeps none of it) | `~/Library/Application Support/j-inbox/` (0600) |
@@ -80,11 +81,13 @@ shorter noise collection window): refused without `J_INBOX_CONFIG_DIR`.
 | `src/merge.ts` | k-way merge of newest-first sources with the `jm.` cursor (each source's own position, the boundary already returned, the last keys per source); failed sources reported, the others answer |
 | `src/gmail/client.ts` | Gmail REST client per account: access tokens from the cloud's `/google/token` proxy (`cloudTokenRefresher`, memory only), one refresh and retry on 401, capped bodies, no redirects, error mapping (`gmailErrorCode`: reads `UPSTREAM_DOWN`, lost writes `UNKNOWN_OUTCOME`, `invalid_grant` `REAUTH_REQUIRED`); `revokeAtGoogle` |
 | `src/gmail/source.ts`, `src/gmail/map.ts`, `src/gmail/mime.ts` | one account as a source (lists, threads, search, writes, attachments); Gmail JSON -> protocol shapes (drafts never leave the Mac); decoding (charsets, RFC 2047, address lists, email HTML -> text) and writing (reply-all recipients, `Re:`, `In-Reply-To`/`References`, UTF-8 base64 body, RFC 2047 headers, no header injection) |
-| `src/gmail/accounts.ts`, `src/gmail/service.ts`, `src/gmail/poller.ts` | `gmail.json` + Keychain; `gmail_connect` (one `users.getProfile`: the address must match, else nothing is stored) and removal (revoke at Google, forget); history polling every 30 s -> metadata-only events, re-sync on a history reset |
+| `src/gmail/batch.ts`, `src/gmail/meta-cache.ts` | thread and message metadata for lists and search in Gmail batch requests (`POST /batch/gmail/v1`, `multipart/mixed`, 20 calls each; a call Gmail asked to slow down, or answered unreadably, is fetched again on its own; the per-second pacing counts every call of a batch and serves callers in order); the thread metadata cache (see "Where things live") |
+| `src/gmail/accounts.ts`, `src/gmail/service.ts`, `src/gmail/poller.ts` | `gmail.json` + Keychain; `gmail_connect` (one `users.getProfile`: the address must match, else nothing is stored) and removal (revoke at Google, forget); history polling every 30 s, every 10 s while the cloud says a J-Inbox page is open (`viewers`), -> metadata-only events, re-sync on a history reset. The history position moves on only once a poll's events went out on a connected link; while the link is down accounts are not polled, and the poll after the welcome starts from the last position handed over |
 | `src/drafts.ts` | the request store behind the cloud-only `draft_store_put` / `_get` / `_set_text` / `_delete` (never Beeper): drafts (`drq_`) and delegations (`dlg_`, no text), one 0600 JSON file written atomically, validated on load, bounded, purged after 7 days; a draft may carry one upload (`attachmentId`), forgotten with it |
 | `src/uploads.ts` | the upload store behind the cloud-only `upload_store_begin` / `_chunk` / `_commit` / `_delete` and the owner's `discard_upload` ("attachments.v1"): chunks only from the upload's owner tag, in order, never past the declared size; `claim` puts a finished upload on a draft (only its owner's, the agent that uploaded it); purged every minute (1 h, or with the draft). A send with `attachmentId` (`send_message`, `compose_email`) reads it here: Beeper gets `POST /v1/assets/upload` (multipart) then the message with `attachment {uploadID, fileName, mimeType}`, Gmail a multipart/mixed reply-all (RFC 2231 file names); it is deleted once sent; a 400/422 from Beeper (or Gmail) is `NOT_SUPPORTED` with Beeper's own reason. Such sends get `SEND_WITH_FILE_TIMEOUT_MS` (2 min) instead of the usual request time |
 | `src/noise/store.ts`, `src/noise/jev.ts`, `src/noise/judge.ts` | noise ("noise.v1", protocol README "Noise"): the noise store behind `get_noise_settings`, `set_noise_definition` and `set_noise` (0600, bounded, validated on load; an empty definition applies nothing; the owner's verdicts stick); Jev's request (one `choice` question per conversation, the criteria "Not noise" plus one per definition line, the owner's last 20 corrections as examples in `state`, the last 5 messages cut to 300 characters, a size budget) and verdict (a line chosen with confidence 0.7 or more, else not noise), `callJev` (`POST /v1/systemone`, 20 s timeout, capped answer, no redirects); the judge: `message` upserted events (Beeper and Gmail) queue a conversation, 5 s later up to 40 are read (`read_chat` limit 5) and asked about in one call, at most 6 calls a minute, unchanged conversations and the owner's own skipped, failures keep the verdicts and retry from 5 s doubling to 10 min. The Beeper actions and the router keep noise chats out of `inbox: "primary"` and `unread_summary` and add them to `inbox: "low-priority"` (Beeper: one walk over every chat; Gmail: a second lane per account over its Primary tab); the dispatcher marks every chat it returns (`isLowPriority`, `noise`). Nothing is ever written to Beeper or Gmail for it |
 | `src/media.ts`, `src/assets.ts` | `get_media`: only URLs a returned result carried (`AssetAllowlist`, hashes, bounded, persisted); head, then 256 KiB chunks under `ChunkWindow`, capped at 25 MiB or the declared size |
+| `src/event-buffer.ts` | Beeper `chat`/`message` events (and noise verdict changes) while the cloud link is down: at most 200, one per chat, kind and op (message ids merged, the newest `othersAt`), oldest out; sent after the next welcome (status events are not kept: every welcome sends one) |
 | `src/events.ts`, `src/beeper-ws.ts` | Beeper `/v1/ws` subscription per the spec: wait for `ready`, send `subscriptions.set` with a `requestID`, connected only when `subscriptions.updated` echoes `["*"]`; an `INVALID_PAYLOAD`/`INVALID_COMMAND` error is retried once without the `app` key; no confirmed subscription within 20 s of opening the socket (or a socket that never opens): close and retry with backoff. Resubscribe after drops, 30 s health checks (status events; `reachable:false` = Beeper down, `tokenValid:false`), re-sync after reconnects |
 | `src/beeper-client.ts`, `src/beeper-map.ts`, `src/pager.ts`, `src/idempotency.ts` | Beeper HTTP client (encoded ids, no redirects, timeouts, capped bodies), mapping and sanitizing, `j2.` cursors, write dedupe that survives restarts |
 | `src/pairing-client.ts` | device-code pairing: start, show code + URL, poll (`slow_down`, expiry), token once |
@@ -100,7 +103,11 @@ Request handling (`CloudLink`):
   `TIMEOUT` and never dispatched.
 - `get_media`: at most `MAX_CONCURRENT_MEDIA_STREAMS` (4) streams; the head within 60 s, then
   chunks only while the cloud acks (`ChunkWindow`), whole stream bounded by `mediaDeadlineMs(size)`.
-- `cancel` aborts the request (no answer is sent). A duplicate `req` id is ignored.
+- `cancel` aborts the request (no answer is sent): every Beeper and Gmail call of it is aborted and
+  no further one starts. The cloud sends it when its own deadline passes, and (since 2026-10-31) when
+  the browser that asked for a read went away. A duplicate `req` id is ignored.
+- `viewers {count}` ("viewers.v1"): Gmail is polled every 10 s while `count > 0` (and at once when it
+  becomes > 0), else every 30 s; a dropped link counts as 0.
 - A frame that does not parse: if it is a `req` with a usable id, the answer is `NOT_ALLOWED`
   (unknown action) or `BAD_PARAMS`; everything else is dropped. The link stays up.
 - Socket loss: reads are aborted, writes run to their deadline (aborting a POST in flight helps
@@ -115,9 +122,11 @@ Request handling (`CloudLink`):
 - Reconnect: `backoffDelay` (1 s, 2 s, 4 s ... 60 s, +/-20 % jitter); the attempt counter resets
   only after a connection stayed up 30 s (a cloud that accepts and drops at once cannot cause a
   reconnect storm).
-- After every `welcome`: a `status` event and re-sync (recent chats that changed since the last
-  sync, as metadata-only `chat` events). After every Beeper `/v1/ws` subscription, the first one
-  too (Beeper may have started after the connector): re-sync too.
+- After every `welcome`: a `status` event, the events kept while the link was down
+  (`event-buffer.ts`), re-sync (recent chats that changed since the last sync, as metadata-only
+  `chat` events; a change of last activity, unread count, archived, marked unread, low priority,
+  muted or pinned counts) and a Gmail history poll. After every Beeper `/v1/ws` subscription, the
+  first one too (Beeper may have started after the connector): re-sync too.
 - Beeper health: a `status` event on every change and again every 10 checks (5 min), in case one
   was lost. Under backpressure (more than 4 MiB unsent) chat/message events are dropped, never a
   `status` event.
@@ -136,6 +145,15 @@ Request handling (`CloudLink`):
   its `dlg_` id (`request_delegation` and the other owner actions are `NOT_ALLOWED` here). The
   connector never creates the Raft task: the agent does, with its own Raft CLI. The chat is marked
   read through the ordinary `mark_read`.
+- `read_chat` asks Beeper for the chat and the first history page at once (a `limit` of 20 or less,
+  one Beeper page, is then one round trip; the default 30 is two); `status` asks `/v1/info`,
+  `/v1/accounts` and `/v1/chats` at once.
+- Mark unread (`mark_read {read: false}`) on Beeper: real Beeper (WhatsApp, 2026-10-31) archives a
+  chat about 0.5 s after it was marked unread. When the chat was in the inbox before, the connector
+  watches it for 1.5 s (a `GET` every 250 ms, inside the request's deadline) and un-archives it once
+  if Beeper did; an unarchive within 5 s of the connector's own unread (a snooze coming back:
+  unread, then unarchive) is watched the same way, after the unarchive has answered. So a mark
+  unread answers after about 1.5 s.
 - `list_chats` with `inbox: "primary"` (the web's All chats and Unread) reads `GET /v1/chats`
   (`ChatWithPreview`) and filters archived/low-priority (and unread) chats here, so every row has
   its last message; text queries, chat types and the other inboxes use `/v1/chats/search` (no

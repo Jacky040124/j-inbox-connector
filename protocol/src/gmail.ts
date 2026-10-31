@@ -119,5 +119,7 @@ export type GmailConnectError = (typeof GMAIL_CONNECT_ERRORS)[number];
 
 /** The connector polls Gmail history this often per account. */
 export const GMAIL_POLL_INTERVAL_MS = 30_000;
+/** ... and this often while the owner has a J-Inbox page open (the cloud's `viewers` frame, count > 0; added 2026-10-31). */
+export const GMAIL_POLL_ACTIVE_INTERVAL_MS = 10_000;
 /** /google/token refreshes per device per minute; more answer RATE_LIMITED. */
 export const GOOGLE_TOKEN_REFRESHES_PER_MINUTE = 30;
