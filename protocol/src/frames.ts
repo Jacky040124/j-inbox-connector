@@ -59,8 +59,9 @@ const JSON_LIMITS = { maxDepth: 32, maxKeys: 50_000 };
  * (get_noise_settings, set_noise_definition, set_noise; ChatSummary.noise).
  * "viewers.v1" (added 2026-10-31): it takes the cloud's `viewers` frame (how many browser /live
  * sockets are open) and polls Gmail faster while one is.
+ * "list-source.v1" (added 2026-10-31): list_chats takes `source` (beeper or gmail, first page only).
  */
-export const CAPABILITIES = { media: "media.v1", gmail: "gmail.v1", drafts: "drafts.v1", delegations: "delegations.v1", attachments: "attachments.v1", noise: "noise.v1", viewers: "viewers.v1" } as const;
+export const CAPABILITIES = { media: "media.v1", gmail: "gmail.v1", drafts: "drafts.v1", delegations: "delegations.v1", attachments: "attachments.v1", noise: "noise.v1", viewers: "viewers.v1", listSource: "list-source.v1" } as const;
 
 export const helloFrame = object({
   type: literal("hello"),

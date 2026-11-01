@@ -385,6 +385,62 @@ describe("mixed lists", () => {
     expect(fb.state.calls.filter((c) => c.route === "GET /v1/chats" || c.route === "GET /v1/chats/search")).toHaveLength(1);
   });
 
+  test("source beeper: Beeper's first page alone, Gmail never asked, no cursor (the web's quick first look)", async () => {
+    const t = await make();
+    const before = fg.google.requests.length;
+    const merged = await t.ok("list_chats", { inbox: "archive", limit: 50 });
+    expect(merged.items.some((c: ChatSummary) => c.id.startsWith("gmail:"))).toBe(true);
+    const asked = fg.google.requests.length;
+    expect(asked).toBeGreaterThan(before);
+    const b = await t.ok("list_chats", { inbox: "archive", limit: 50, source: "beeper" });
+    expect(fg.google.requests.length).toBe(asked);
+    expect(b.items.length).toBeGreaterThan(0);
+    expect(b.items.every((c: ChatSummary) => !c.id.startsWith("gmail:") && c.isArchived)).toBe(true);
+    expect(b.nextCursor).toBeNull();
+    expect(b.items.map((c: ChatSummary) => c.id).sort()).toEqual(merged.items.filter((c: ChatSummary) => !c.id.startsWith("gmail:")).map((c: ChatSummary) => c.id).sort());
+    // A network filter still applies; a Gmail-only list has no Beeper part.
+    const wa = await t.ok("list_chats", { network: "WhatsApp", source: "beeper", limit: 5 });
+    expect(wa.items.every((c: ChatSummary) => c.network === "WhatsApp")).toBe(true);
+    expect(wa.nextCursor).toBeNull();
+    const none = await t.ok("list_chats", { network: "Gmail", source: "beeper" });
+    expect(none).toMatchObject({ items: [], hasMore: false, nextCursor: null });
+    expect(fg.google.requests.length).toBe(asked);
+  });
+
+  test("source gmail: Gmail's threads alone, Beeper never asked, no cursor", async () => {
+    const t = await make();
+    fb.state.calls.length = 0;
+    const g = await t.ok("list_chats", { inbox: "primary", limit: 50, source: "gmail" });
+    expect(g.items.length).toBeGreaterThan(0);
+    expect(g.items.every((c: ChatSummary) => c.id.startsWith("gmail:") && !c.isArchived && !c.isLowPriority)).toBe(true);
+    expect(g.nextCursor).toBeNull();
+    expect(fb.state.calls.filter((c) => c.route.startsWith("GET /v1/chats"))).toHaveLength(0);
+    const wa = await t.ok("list_chats", { network: "WhatsApp", source: "gmail" });
+    expect(wa).toMatchObject({ items: [], hasMore: false, nextCursor: null });
+    expect(fb.state.calls.filter((c) => c.route.startsWith("GET /v1/chats"))).toHaveLength(0);
+  });
+
+  test("source with a cursor is refused (first page only), and a failing Gmail with source gmail is the error", async () => {
+    const t = await make();
+    const p = await t.ok("list_chats", { limit: 3 });
+    expect(p.nextCursor).toBeTruthy();
+    for (const source of ["beeper", "gmail"]) expect((await t.call("list_chats", { limit: 3, cursor: p.nextCursor, source })).error.code).toBe("BAD_PARAMS");
+    expect((await t.call("list_chats", { source: "both" })).error.code).toBe("BAD_PARAMS");
+    fg.google.revokeAll(OWNER_EMAIL);
+    expect((await t.call("list_chats", { inbox: "archive", source: "gmail" })).error.code).toBe("REAUTH_REQUIRED");
+    const b = await t.ok("list_chats", { inbox: "archive", source: "beeper" });
+    expect(b.items.length).toBeGreaterThan(0);
+    expect(b.failedSources).toBeUndefined();
+  });
+
+  test("source without any Gmail account: beeper is the Beeper list, gmail is empty", async () => {
+    const t = await make({ accounts: [] });
+    const b = await t.ok("list_chats", { inbox: "archive", source: "beeper", limit: 5 });
+    expect(b.items.length).toBeGreaterThan(0);
+    expect(b.nextCursor).toBeNull();
+    expect(await t.ok("list_chats", { inbox: "archive", source: "gmail" })).toMatchObject({ items: [], hasMore: false, nextCursor: null });
+  });
+
   test("unread_summary adds Gmail's unread primary threads to Beeper's", async () => {
     const t = await make();
     const beeperOnly = await (async () => {

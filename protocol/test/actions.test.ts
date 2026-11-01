@@ -465,3 +465,28 @@ describe("chat summary and status shapes (round 2)", () => {
     expect(parseActionResult("status", { online: true, lastSeenAt: null, connectorVersion: null, beeper: null, accounts: [], networks: Array.from({ length: 51 }, (_, i) => `n${i}`) }).ok).toBe(false);
   });
 });
+
+// 2026-10-31 loading states: the web shows Beeper's part of a slow merged list first.
+import { CAPABILITIES } from "../src/frames.ts";
+describe("list_chats source (first page of one source)", () => {
+  test("source beeper or gmail is accepted on a first page, default is both (absent)", () => {
+    for (const source of ["beeper", "gmail"] as const) {
+      const r = parseActionParams("list_chats", { inbox: "archive", source, limit: 50 });
+      expect(r.ok && r.value.source).toBe(source);
+    }
+    const none = parseActionParams("list_chats", {});
+    expect(none.ok && none.value.source).toBeUndefined();
+  });
+  test("an unknown source, a non-string, and source with a cursor are refused", () => {
+    expect(parseActionParams("list_chats", { source: "slack" }).ok).toBe(false);
+    expect(parseActionParams("list_chats", { source: "BEEPER" }).ok).toBe(false);
+    expect(parseActionParams("list_chats", { source: 1 }).ok).toBe(false);
+    const r = parseActionParams("list_chats", { source: "beeper", cursor: "j2.abc" });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(JSON.stringify(r.issues)).toContain("first page");
+  });
+  test("documented, and the connector says it knows it (list-source.v1)", () => {
+    expect(ACTIONS.list_chats.paramDocs.source).toMatch(/first page/);
+    expect(CAPABILITIES.listSource).toBe("list-source.v1");
+  });
+});

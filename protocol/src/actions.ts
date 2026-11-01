@@ -193,6 +193,7 @@ export const ACTIONS = {
       query: optional(query),
       limit: optional(limit(MAX_PAGE_LIMIT)),
       cursor: optional(pageCursor),
+      source: optional(enumOf(["beeper", "gmail"] as const)),
     }),
     paramDocs: {
       network: "Chat network name as shown on chats, e.g. WhatsApp, Instagram, LinkedIn, Twitter/X, iMessage, Gmail (case-insensitive)",
@@ -204,9 +205,12 @@ export const ACTIONS = {
       query: "Words that must appear in the chat title or network (email: in the subject)",
       limit: `Chats per page, 1-${MAX_PAGE_LIMIT} (default 25)`,
       cursor: "nextCursor from the previous page",
+      source:
+        "Only this source's chats (beeper or gmail; default both, merged), for a quick first page while the other source is slow. First page only: no cursor with it, and its answer has none (page the merged list instead)",
     },
     defaults: { limit: 25 },
     result: object({ ...page(chatSummary, MAX_PAGE_LIMIT), failedSources }),
+    check: (p) => (p.source !== undefined && p.cursor !== undefined ? "source is for the first page only: page the merged list with its cursor" : null),
     write: false,
     needsApprovalForAgents: false,
     streamed: false,

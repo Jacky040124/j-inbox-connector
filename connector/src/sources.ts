@@ -124,9 +124,23 @@ export function createRouter(o: RouterOptions) {
 
   // ---------------------------------------------------------------- lists
 
-  async function list_chats(p: Partial<ActionParams<"list_chats">>, ctx: RequestContext = {}): Promise<Outcome<ActionResult<"list_chats">>> {
-    const sel = select(p);
-    if (beeperOnly(sel) || !gmail) return b.list_chats({ ...p, ...(sel.beeperAccountIDs ? { accountIDs: sel.beeperAccountIDs } : {}) }, ctx);
+  /**
+   * list_chats over the sources the filters pick. With `source` (the web's quick first page of a
+   * slow merged list): only that source is asked, the other one never is, and the answer has no
+   * cursor (the merged list is paged instead).
+   */
+  async function list_chats(p0: Partial<ActionParams<"list_chats">>, ctx: RequestContext = {}): Promise<Outcome<ActionResult<"list_chats">>> {
+    const { source, ...p } = p0;
+    if (source !== undefined && p.cursor !== undefined) return err("BAD_PARAMS", "source is for the first page only: page the merged list with its cursor.");
+    const picked = select(p);
+    const sel: Selection = source === "beeper" ? { ...picked, gmail: [] } : source === "gmail" ? { ...picked, beeper: false } : picked;
+    if (source && !sel.beeper && (!gmail || !sel.gmail.length)) return { ok: true, data: { items: [], hasMore: false, nextCursor: null } };
+    const firstOnly = (r: Outcome<ActionResult<"list_chats">>): Outcome<ActionResult<"list_chats">> => (source && r.ok ? { ok: true, data: { ...r.data, nextCursor: null } } : r);
+    if (beeperOnly(sel) || !gmail) return firstOnly(await b.list_chats({ ...p, ...(sel.beeperAccountIDs ? { accountIDs: sel.beeperAccountIDs } : {}) }, ctx));
+    return firstOnly(await mergedList(p, sel, ctx));
+  }
+
+  async function mergedList(p: Partial<ActionParams<"list_chats">>, sel: Selection, ctx: RequestContext): Promise<Outcome<ActionResult<"list_chats">>> {
     return guarded(async (): Promise<Outcome<ActionResult<"list_chats">>> => {
       const limit = p.limit ?? 25;
       const noise = o.noise?.active() ? o.noise : null;
