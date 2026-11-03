@@ -1,9 +1,10 @@
 // Cloud link: device-token upgrade, hello/welcome, request handling with deadlines, bounded
 // concurrency and queue, cancel, heartbeat, reconnect with backoff, stop codes, graceful shutdown.
 import { afterEach, describe, expect, test } from "bun:test";
-import { CLOSE_CODES, makeError, parseConnectorFrame, type ErrorCode } from "@j-inbox/protocol";
+import { CAPABILITIES, CLOSE_CODES, encodeBase64, makeError, parseConnectorFrame, type ErrorCode } from "@j-inbox/protocol";
 import { CloudLink, type CloudLinkOptions } from "../src/cloud-link.ts";
 import type { DispatchResult } from "../src/dispatcher.ts";
+import { UploadStore } from "../src/uploads.ts";
 import { startFakeCloud, type FakeCloud } from "./helpers/fake-cloud.ts";
 
 const TOKEN = "jid_" + "A".repeat(43);
@@ -269,6 +270,52 @@ describe("media", () => {
     for (let i = 0; i < 4; i++) cloud.send({ type: "req", id: `ms${i}`, action: "get_media", params: { url: "mxc://x/y" } });
     await cloud.waitFor(() => cloud.frames.filter((f) => f.frame.type === "res").length === 4, 2000, "heads");
     const r = await cloud.req("get_media", { url: "mxc://x/y" });
+    expect(r.res.error?.code).toBe("RATE_LIMITED");
+  });
+});
+
+describe("upload_store_read over the link (the owner's preview)", () => {
+  const OWNER = "o_owner_000000000000";
+  const U = "upl_0123456789abcdef";
+  const bytes = new Uint8Array(30 * 256 * 1024 + 17).map((_, i) => i % 251);
+  const store = () => {
+    const s = new UploadStore();
+    s.begin({ uploadId: U, owner: OWNER, fileName: "q.pdf", mimeType: "application/pdf", size: bytes.length });
+    for (let i = 0; i * 256 * 1024 < bytes.length; i++) s.chunk({ uploadId: U, owner: OWNER, index: i, data: encodeBase64(bytes.subarray(i * 256 * 1024, (i + 1) * 256 * 1024)) });
+    s.commit({ uploadId: U, owner: OWNER });
+    return s;
+  };
+  const impl = (s: UploadStore): Impl => async (_a, p) => {
+    const f = s.open((p as { uploadId: string }).uploadId, (p as { owner: string }).owner);
+    return { kind: "media", head: { mimeType: f.info.mimeType, size: f.info.size, fileName: f.info.fileName }, body: f.body, cancel: f.cancel };
+  };
+  test("the connector says it can (hello lists upload-read.v1)", async () => {
+    const { cloud } = await setup({ impl: impl(store()) });
+    expect((cloud.hello() as { capabilities: string[] }).capabilities).toContain(CAPABILITIES.uploadRead);
+  });
+  test("head, then chunks under flow control that add up to the file", async () => {
+    const { cloud, link } = await setup({ impl: impl(store()) });
+    const r = await cloud.req("upload_store_read", { uploadId: U, owner: OWNER });
+    expect(r.res.data).toEqual({ mimeType: "application/pdf", size: bytes.length, fileName: "q.pdf" });
+    for (const c of r.chunks) expect(Buffer.from(c.data, "base64").length).toBeLessThanOrEqual(256 * 1024);
+    expect(Buffer.concat(r.chunks.map((c) => Buffer.from(c.data, "base64"))).equals(Buffer.from(bytes))).toBe(true);
+    await cloud.waitFor(() => link.pendingCount === 0, 1000, "drain");
+  });
+  test("a cloud that goes away or cancels (the preview was closed) stops the read at the window, and the slot is free again", async () => {
+    const { cloud, link } = await setup({ cloud: { autoAck: false }, impl: impl(store()) });
+    cloud.send({ type: "req", id: "p1", action: "upload_store_read", params: { uploadId: U, owner: OWNER } });
+    await cloud.waitFor(() => cloud.frames.filter((f) => f.frame.type === "chunk").length === 8, 2000, "window");
+    await Bun.sleep(100);
+    expect(cloud.frames.filter((f) => f.frame.type === "chunk").length).toBe(8);
+    cloud.send({ type: "cancel", id: "p1" });
+    await cloud.waitFor(() => link.pendingCount === 0, 1000, "drain");
+    expect(link.stats().media).toBe(0);
+  });
+  test("reads share the media slots: a fifth at once is refused, not queued", async () => {
+    const { cloud } = await setup({ cloud: { autoAck: false }, impl: impl(store()) });
+    for (let i = 0; i < 4; i++) cloud.send({ type: "req", id: `pr${i}`, action: "upload_store_read", params: { uploadId: U, owner: OWNER } });
+    await cloud.waitFor(() => cloud.frames.filter((f) => f.frame.type === "res").length === 4, 2000, "heads");
+    const r = await cloud.req("upload_store_read", { uploadId: U, owner: OWNER });
     expect(r.res.error?.code).toBe("RATE_LIMITED");
   });
 });

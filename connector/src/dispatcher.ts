@@ -3,7 +3,8 @@
 // checked with parseActionResult before it may leave the Mac. Anything else (the cloud's own
 // actions included: the snooze store and the draft requests live in the cloud) is NOT_ALLOWED.
 // The draft_store_* actions never reach Beeper: they keep draft texts in this computer's draft store;
-// the upload_store_* actions and discard_upload keep files being sent in its upload store; the noise
+// the upload_store_* actions and discard_upload keep files being sent in its upload store (and
+// upload_store_read streams one back for the owner's preview); the noise
 // actions keep the owner's definition and verdicts in its noise store. Chats in every result carry
 // their noise mark (noise/store.ts decorate).
 import {
@@ -166,6 +167,15 @@ export function createDispatcher(o: {
     upload_store_chunk: async (p: { uploadId: string; owner: string; index: number; data: string }) => upload(() => checked("upload_store_chunk", { uploadId: p.uploadId, index: p.index, received: uploads.chunk(p).received })),
     upload_store_commit: async (p: { uploadId: string; owner: string }) => upload(() => checked("upload_store_commit", uploads.commit(p))),
     upload_store_delete: async (p: { uploadIds: string[] }) => checked("upload_store_delete", { deleted: uploads.delete(p.uploadIds) }),
+    upload_store_read: async (p: { uploadId: string; owner: string }): Promise<DispatchResult> => {
+      try {
+        const f = uploads.open(p.uploadId, p.owner);
+        return { kind: "media", head: { mimeType: f.info.mimeType, size: f.info.size, fileName: f.info.fileName }, body: f.body, cancel: f.cancel };
+      } catch (e) {
+        if (e instanceof UploadError) return { kind: "res", ok: false, error: e.body };
+        throw e;
+      }
+    },
     discard_upload: async (p: { uploadId: string }) => checked("discard_upload", { uploadId: p.uploadId, deleted: uploads.discard(p.uploadId) }),
     get_noise_settings: async () => checked("get_noise_settings", await noiseSettings()),
     set_noise_definition: async (p: { definition: string }) => {

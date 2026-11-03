@@ -790,6 +790,21 @@ export const ACTIONS = {
     beeper: "none (the connector's local upload store)",
   }),
 
+  upload_store_read: define({
+    description: "Internal: stream a finished upload's bytes for the owner's preview (chunks under flow control, like get_media). Only the owner's own upload or one on a draft; NOT_FOUND otherwise. Reads nothing else and changes nothing.",
+    params: object({ uploadId: uploadID, owner: uploadOwner }),
+    paramDocs: { uploadId: "The upload id", owner: "uploadOwnerTag of the caller (always the owner: it is cloud-only)" },
+    defaults: {},
+    result: mediaHead,
+    write: false,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    cloudOnly: true,
+    streamed: true,
+    timeoutMs: MEDIA_TIMEOUT_MS,
+    beeper: "none (the connector's local upload store)",
+  }),
+
   discard_upload: define({
     description: "Forget a file the owner attached in the web page and then removed (one on an agent's draft stays with the draft). Owner only.",
     params: object({ uploadId: uploadID }),

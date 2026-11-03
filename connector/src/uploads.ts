@@ -5,13 +5,15 @@
 // One .bin file per upload and an index.json (name, type, size, owner tag, times), each 0600 in a
 // 0700 directory; bounded in count and bytes. An upload is forgotten once it is sent, discarded or
 // handled with its draft, UPLOAD_TTL_MS (1 h) after it began unless it is on a draft, and with its
-// draft at the latest DRAFT_KEEP_MS (7 days) after that was made.
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeSync } from "node:fs";
+// draft at the latest DRAFT_KEEP_MS (7 days) after that was made. The owner can read a finished one
+// back to preview it (upload_store_read, "upload-read.v1"): a read changes nothing, not even its time.
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import {
   DRAFT_KEEP_MS,
   MAX_STORED_UPLOADS,
   MAX_UPLOAD_STORE_BYTES,
+  UPLOAD_CHUNK_BYTES,
   UPLOAD_TTL_MS,
   decodeBase64,
   makeError,
@@ -216,6 +218,61 @@ export class UploadStore {
     }
     if (bytes.length !== e.size) throw refuse("NOT_FOUND", GONE);
     return { ...infoOf(e), bytes };
+  }
+
+  /**
+   * upload_store_read: a finished upload's bytes as a stream, for the owner's preview. The caller's own
+   * upload or one on a draft (an agent's file the owner was given): never an agent's file not yet on one,
+   * and the same answer for all that is not here. Read from disk as asked, one piece at a time; a file
+   * deleted meanwhile still reads to its end, as it was when asked for.
+   */
+  open(id: string, owner: string): { info: UploadInfo; body: ReadableStream<Uint8Array>; cancel(): void } {
+    this.purge();
+    const e = this.entries.get(id);
+    if (!e || !e.ready || this.now() >= e.expiresAt || (e.owner !== owner && e.draftId === undefined)) throw refuse("NOT_FOUND", GONE);
+    if (!this.o.dir) {
+      const parts = [...(this.memory.get(id) ?? [])];
+      if (parts.reduce((n, b) => n + b.length, 0) !== e.size) throw refuse("NOT_FOUND", GONE);
+      const body = new ReadableStream<Uint8Array>({
+        pull(c) {
+          const b = parts.shift();
+          if (b) c.enqueue(b);
+          else c.close();
+        },
+      });
+      return { info: infoOf(e), body, cancel: () => void body.cancel().catch(() => {}) };
+    }
+    let fd: number | null;
+    try {
+      fd = openSync(this.file(id), "r");
+      if (fstatSync(fd).size !== e.size) {
+        closeSync(fd);
+        throw new Error("size");
+      }
+    } catch {
+      throw refuse("NOT_FOUND", GONE);
+    }
+    const shut = () => {
+      if (fd !== null) closeSync(fd);
+      fd = null;
+    };
+    const body = new ReadableStream<Uint8Array>({
+      pull(c) {
+        if (fd === null) return c.close();
+        const buf = new Uint8Array(UPLOAD_CHUNK_BYTES);
+        let n: number;
+        try {
+          n = readSync(fd, buf, 0, buf.length, null);
+        } catch (err) {
+          shut();
+          throw err;
+        }
+        if (n > 0) c.enqueue(buf.subarray(0, n));
+        else (shut(), c.close());
+      },
+      cancel: shut,
+    });
+    return { info: infoOf(e), body, cancel: () => void body.cancel().catch(shut) };
   }
 
   /**

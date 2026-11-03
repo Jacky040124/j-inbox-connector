@@ -49,6 +49,7 @@ const CASES: Record<ConnectorActionName, { params: () => Record<string, unknown>
   upload_store_chunk: { params: () => ({ uploadId: "upl_0123456789abcdef", owner: "o_0123456789abcdef", index: 0, data: "JVBE" }), routes: [], error: "NOT_FOUND" },
   upload_store_commit: { params: () => ({ uploadId: "upl_0123456789abcdef", owner: "o_0123456789abcdef" }), routes: [], error: "NOT_FOUND" },
   upload_store_delete: { params: () => ({ uploadIds: ["upl_0123456789abcdef"] }), routes: [] },
+  upload_store_read: { params: () => ({ uploadId: "upl_0123456789abcdef", owner: "o_0123456789abcdef" }), routes: [], error: "NOT_FOUND" },
   discard_upload: { params: () => ({ uploadId: "upl_0123456789abcdef" }), routes: [] },
   // The noise store is local; set_noise reads the chat for the owner's example (noise.test.ts runs Jev).
   get_noise_settings: { params: () => ({}), routes: [] },

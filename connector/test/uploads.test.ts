@@ -2,7 +2,7 @@
 // directory, bounded, purged), the cloud's chunks arrive in order from their owner only, and a send
 // uploads the file to Beeper (multipart) or into a multipart/mixed email, then forgets it.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CHAT_IDS, startFakeBeeper, type FakeBeeper } from "@j-inbox/fake-beeper";
@@ -51,6 +51,171 @@ function fill(s: UploadStore, id = U, bytes = PDF, owner = OWNER) {
   chunks(bytes).forEach((data, index) => s.chunk({ uploadId: id, owner, index, data }));
   return s.commit({ uploadId: id, owner });
 }
+
+async function drain(body: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+  return new Uint8Array(await new Response(body).arrayBuffer());
+}
+
+describe("UploadStore read path (the owner's preview)", () => {
+  const AGENT = "o_agent_000000000000";
+  for (const where of ["on disk", "in memory"] as const) {
+    const store = (o: Partial<ConstructorParameters<typeof UploadStore>[0]> = {}) => new UploadStore({ ...(where === "on disk" ? { dir: join(tmp(), "uploads") } : {}), ...o });
+    test(`${where}: its own upload reads back byte for byte; a read changes nothing`, async () => {
+      const s = store();
+      fill(s);
+      const f = s.open(U, OWNER);
+      expect(f.info).toEqual({ uploadId: U, fileName: NAME, mimeType: "application/pdf", size: PDF.length });
+      expect(await drain(f.body)).toEqual(PDF);
+      // Still there, and again.
+      expect(await drain(s.open(U, OWNER).body)).toEqual(PDF);
+      expect(s.read(U).bytes).toEqual(PDF);
+    });
+    test(`${where}: an empty file reads as nothing`, async () => {
+      const s = store();
+      fill(s, U, new Uint8Array(0));
+      expect((await drain(s.open(U, OWNER).body)).length).toBe(0);
+    });
+    test(`${where}: an agent's file is the owner's to read only once it is on a draft; another's upload never`, async () => {
+      const s = store();
+      fill(s, U, PDF, AGENT);
+      expect(errCode(() => s.open(U, OWNER))).toBe("NOT_FOUND");
+      expect(s.claim(U, AGENT, "drq_0123456789abcdef", Date.now())).toBe(true);
+      expect(await drain(s.open(U, OWNER).body)).toEqual(PDF);
+      const other = "upl_fedcba9876543210";
+      fill(s, other, PDF, OWNER);
+      expect(errCode(() => s.open(other, OTHER))).toBe("NOT_FOUND");
+    });
+    test(`${where}: unfinished, unknown, expired and draft-gone uploads are NOT_FOUND, all in the same words`, () => {
+      let now = 1_000_000;
+      let alive = true;
+      const s = store({ now: () => now, draftAlive: () => alive });
+      s.begin({ uploadId: U, owner: OWNER, fileName: NAME, mimeType: "application/pdf", size: 10 });
+      const words = (fn: () => unknown) => {
+        try {
+          fn();
+        } catch (e) {
+          return (e as UploadError).body;
+        }
+        return null;
+      };
+      const unfinished = words(() => s.open(U, OWNER));
+      expect(unfinished?.code).toBe("NOT_FOUND");
+      expect(words(() => s.open("upl_nothing_here_0000", OWNER))).toEqual(unfinished);
+      const late = "upl_late000000000000";
+      fill(s, late);
+      now += UPLOAD_TTL_MS;
+      expect(words(() => s.open(late, OWNER))).toEqual(unfinished);
+      const onDraft = "upl_draft00000000000";
+      fill(s, onDraft);
+      expect(s.claim(onDraft, OWNER, "drq_0123456789abcdef", now)).toBe(true);
+      expect(s.open(onDraft, OWNER).info.uploadId).toBe(onDraft);
+      alive = false;
+      expect(words(() => s.open(onDraft, OWNER))).toEqual(unfinished);
+    });
+    test(`${where}: 25 MiB reads in pieces no larger than a chunk`, async () => {
+      const big = new Uint8Array(25 * 1024 * 1024).map((_, i) => i % 253);
+      const s = store({ maxBytes: 64 * 1024 * 1024 });
+      fill(s, U, big);
+      const reader = s.open(U, OWNER).body.getReader();
+      let total = 0;
+      let largest = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.length;
+        largest = Math.max(largest, value.length);
+        expect(value[0]).toBe(big[total - value.length]!);
+      }
+      expect(total).toBe(big.length);
+      expect(largest).toBeLessThanOrEqual(256 * 1024);
+    }, 60_000);
+    test(`${where}: a file deleted during the read still reads to its end; cancel lets it go`, async () => {
+      const s = store();
+      fill(s);
+      const f = s.open(U, OWNER);
+      s.delete([U]);
+      expect(await drain(f.body)).toEqual(PDF);
+      expect(errCode(() => s.open(U, OWNER))).toBe("NOT_FOUND");
+      fill(s);
+      const g = s.open(U, OWNER);
+      g.cancel();
+      g.cancel();
+      s.delete([U]);
+    });
+  }
+  test("on disk: a file cut short on disk is gone, never a part of it; nothing else is read from the name", async () => {
+    const dir = join(tmp(), "uploads");
+    const s = new UploadStore({ dir });
+    fill(s);
+    writeFileSync(join(dir, `${U}.bin`), PDF.subarray(0, 100));
+    expect(errCode(() => s.open(U, OWNER))).toBe("NOT_FOUND");
+    rmSync(join(dir, `${U}.bin`));
+    expect(errCode(() => s.open(U, OWNER))).toBe("NOT_FOUND");
+    expect(errCode(() => s.open("upl_../../etc/passwd", OWNER))).toBe("NOT_FOUND");
+  });
+  test("on disk: no descriptor stays open after reads, cancels and reads to the end", async () => {
+    if (!existsSync("/dev/fd")) return;
+    const dir = join(tmp(), "uploads");
+    const s = new UploadStore({ dir });
+    fill(s);
+    const count = () => readdirSync("/dev/fd").length;
+    const before = count();
+    for (let i = 0; i < 40; i++) {
+      await drain(s.open(U, OWNER).body);
+      s.open(U, OWNER).cancel();
+      const r = s.open(U, OWNER).body.getReader();
+      await r.read();
+      await r.cancel();
+    }
+    expect(count()).toBeLessThanOrEqual(before + 2);
+  });
+});
+
+describe("dispatcher: upload_store_read", () => {
+  const AGENT = "o_agent_000000000000";
+  const dispatcher = () => {
+    const drafts = new DraftStore();
+    const uploads = new UploadStore({ draftAlive: (id) => drafts.has(id) });
+    const d = createDispatcher({ actions: {} as never, client: {} as never, assets: new AssetAllowlist(), drafts, uploads });
+    return { d, uploads, drafts };
+  };
+  test("a stream with the head as the file is kept; its bytes whole; never a write", async () => {
+    const { d, uploads } = dispatcher();
+    fill(uploads);
+    const r = await d.dispatch("upload_store_read", { uploadId: U, owner: OWNER });
+    expect(r.kind).toBe("media");
+    if (r.kind !== "media") return;
+    expect(r.head).toEqual({ mimeType: "application/pdf", size: PDF.length, fileName: NAME });
+    expect(parseActionResult("upload_store_read", r.head).ok).toBe(true);
+    expect(await drain(r.body)).toEqual(PDF);
+    expect(d.isWrite("upload_store_read")).toBe(false);
+  });
+  test("refused as a store refuses: gone, or another's; bad params never reach it", async () => {
+    const { d, uploads } = dispatcher();
+    fill(uploads, U, PDF, AGENT);
+    const wrong = await d.dispatch("upload_store_read", { uploadId: U, owner: OWNER });
+    expect(wrong.kind === "res" && wrong.error?.code).toBe("NOT_FOUND");
+    const none = await d.dispatch("upload_store_read", { uploadId: "upl_nothing_here_0000", owner: OWNER });
+    expect(none.kind === "res" && none.error?.code).toBe("NOT_FOUND");
+    for (const bad of [{ uploadId: U }, { uploadId: "../x", owner: OWNER }, { uploadId: U, owner: "sub-of-someone" }, { uploadId: U, owner: OWNER, path: "/etc/passwd" }]) {
+      const b = await d.dispatch("upload_store_read", bad);
+      expect(b.kind === "res" && b.error?.code).toBe("BAD_PARAMS");
+    }
+  });
+  test("a draft's file reads for the owner with the agent's owner tag on it, and goes with the draft", async () => {
+    const { d, uploads, drafts } = dispatcher();
+    const req = "drq_0123456789abcdef";
+    drafts.put({ requestId: req, chatID: CHAT_IDS.imessageAlice, instruction: "x", deadline: new Date(Date.now() + 60_000).toISOString() });
+    fill(uploads, U, PDF, AGENT);
+    expect(await d.dispatch("draft_store_set_text", { requestId: req, text: "the quote", attachmentId: U, owner: AGENT })).toMatchObject({ ok: true });
+    const r = await d.dispatch("upload_store_read", { uploadId: U, owner: OWNER });
+    expect(r.kind).toBe("media");
+    if (r.kind === "media") expect(await drain(r.body)).toEqual(PDF);
+    await d.dispatch("draft_store_delete", { requestIds: [req] });
+    const gone = await d.dispatch("upload_store_read", { uploadId: U, owner: OWNER });
+    expect(gone.kind === "res" && gone.error?.code).toBe("NOT_FOUND");
+  });
+});
 
 describe("UploadStore", () => {
   test("a file in 256 KiB chunks, kept in a 0600 file in a 0700 directory; a new process reads the same", () => {

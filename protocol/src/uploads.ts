@@ -85,6 +85,10 @@ export type UploadInfo = Infer<typeof uploadInfo>;
 export const uploadHead = object({ fileName, mimeType, size: integer({ min: 0, max: MAX_UPLOAD_BYTES }) });
 export type UploadHead = Infer<typeof uploadHead>;
 
+/** POST /api/upload/read: which upload's bytes the owner wants to see. */
+export const uploadReadRequest = object({ uploadId: uploadID });
+export type UploadReadRequest = Infer<typeof uploadReadRequest>;
+
 /** An agent's upload_begin. mimeType defaults to application/octet-stream. */
 export const uploadBeginParams = object({ fileName: string({ min: 1, max: 1024 }), mimeType: optional(string({ min: 1, max: 255 })), size: integer({ min: 0, max: MAX_UPLOAD_BYTES }) });
 export const uploadChunkData = base64({ max: UPLOAD_CHUNK_BASE64_LENGTH });

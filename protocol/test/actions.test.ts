@@ -17,12 +17,12 @@ import { MAX_PAGE_LIMIT, MAX_SEND_TEXT_LENGTH } from "../src/limits.ts";
 import { account, chat, chatID, message } from "./fixtures/examples.ts";
 import { parse } from "../src/schema.ts";
 
-const EXPECTED = ["status", "list_chats", "unread_summary", "read_chat", "search_messages", "draft_reply", "send_message", "react", "mark_read", "archive", "remove_account", "compose_email", "gmail_connect", "snooze_chat", "unsnooze_chat", "list_snoozed", "request_draft", "cancel_draft", "discard_draft", "mark_draft_sent", "list_drafts", "list_raft_agents", "set_draft_agents", "request_delegation", "cancel_delegation", "dismiss_delegation", "list_delegations", "draft_store_put", "draft_store_get", "draft_store_set_text", "draft_store_delete", "upload_store_begin", "upload_store_chunk", "upload_store_commit", "upload_store_delete", "discard_upload", "get_noise_settings", "set_noise_definition", "set_noise", "get_media"];
+const EXPECTED = ["status", "list_chats", "unread_summary", "read_chat", "search_messages", "draft_reply", "send_message", "react", "mark_read", "archive", "remove_account", "compose_email", "gmail_connect", "snooze_chat", "unsnooze_chat", "list_snoozed", "request_draft", "cancel_draft", "discard_draft", "mark_draft_sent", "list_drafts", "list_raft_agents", "set_draft_agents", "request_delegation", "cancel_delegation", "dismiss_delegation", "list_delegations", "draft_store_put", "draft_store_get", "draft_store_set_text", "draft_store_delete", "upload_store_begin", "upload_store_chunk", "upload_store_commit", "upload_store_delete", "upload_store_read", "discard_upload", "get_noise_settings", "set_noise_definition", "set_noise", "get_media"];
 const NOISE_OWNER: string[] = ["get_noise_settings", "set_noise_definition", "set_noise"];
 const DRAFT_OWNER: string[] = ["request_draft", "cancel_draft", "discard_draft", "mark_draft_sent", "list_drafts", "list_raft_agents", "set_draft_agents"];
 const DELEGATION_OWNER: string[] = ["request_delegation", "cancel_delegation", "dismiss_delegation", "list_delegations"];
 const DRAFT_STORE: string[] = ["draft_store_put", "draft_store_get", "draft_store_set_text", "draft_store_delete"];
-const UPLOAD_STORE: string[] = ["upload_store_begin", "upload_store_chunk", "upload_store_commit", "upload_store_delete"];
+const UPLOAD_STORE: string[] = ["upload_store_begin", "upload_store_chunk", "upload_store_commit", "upload_store_delete", "upload_store_read"];
 const UPL = "upl_0123456789abcdef";
 const OWNER = "o_0123456789abcdefABCDEF_-";
 
@@ -61,7 +61,7 @@ describe("catalogue", () => {
     for (const n of CONNECTOR_ACTION_NAMES) expect(isCloudAction(n)).toBe(false);
     for (const n of ["__proto__", "whoami", "", null]) expect(isCloudAction(n)).toBe(false);
   });
-  test("only get_media streams", () => expect(ACTION_NAMES.filter((n) => ACTIONS[n].streamed)).toEqual(["get_media"]));
+  test("only get_media and the owner's upload_store_read stream", () => expect(ACTION_NAMES.filter((n) => ACTIONS[n].streamed)).toEqual(["upload_store_read", "get_media"]));
   test("every param is documented and every action has a description", () => {
     for (const n of ACTION_NAMES) {
       const a = ACTIONS[n];
@@ -134,6 +134,7 @@ const VALID: Record<ActionName, unknown[]> = {
   upload_store_chunk: [{ uploadId: UPL, owner: OWNER, index: 0, data: "" }, { uploadId: UPL, owner: OWNER, index: 99, data: "AAEC" }],
   upload_store_commit: [{ uploadId: UPL, owner: OWNER }],
   upload_store_delete: [{ uploadIds: [UPL, "upl_fedcba9876543210"] }],
+  upload_store_read: [{ uploadId: UPL, owner: OWNER }],
   discard_upload: [{ uploadId: UPL }],
   get_noise_settings: [{}],
   set_noise_definition: [{ definition: "Newsletters, ads, app notifications\nCold emails I sent that nobody has replied to yet" }, { definition: "" }],
@@ -213,6 +214,7 @@ const INVALID: Record<ActionName, unknown[]> = {
   upload_store_chunk: [{ uploadId: UPL, owner: OWNER, index: -1, data: "" }, { uploadId: UPL, owner: OWNER, index: 100, data: "" }, { uploadId: UPL, owner: OWNER, index: 0, data: "not base64!" }, { uploadId: UPL, owner: OWNER, index: 0, data: "A".repeat(349_532) }, { uploadId: UPL, index: 0, data: "" }],
   upload_store_commit: [{ uploadId: UPL }, { owner: OWNER }],
   upload_store_delete: [{ uploadIds: [] }, { uploadIds: ["x"] }],
+  upload_store_read: [{}, { uploadId: UPL }, { owner: OWNER }, { uploadId: "x", owner: OWNER }, { uploadId: UPL, owner: "sub" }, { uploadId: UPL, owner: OWNER, offset: 0 }],
   discard_upload: [{}, { uploadId: "upl_" }, { uploadId: UPL, owner: OWNER }],
   get_noise_settings: [{ definition: "x" }],
   set_noise_definition: [{}, { definition: "x".repeat(4001) }, { definition: 1 }],
@@ -312,6 +314,7 @@ const RESULTS: Record<ActionName, unknown> = {
   upload_store_chunk: { uploadId: UPL, index: 3, received: 1024 * 1024 },
   upload_store_commit: { uploadId: UPL, fileName: "报价 – Quote.pdf", mimeType: "application/pdf", size: 1234 },
   upload_store_delete: { deleted: 1 },
+  upload_store_read: { mimeType: "application/pdf", size: 1024, fileName: "quote.pdf" },
   discard_upload: { uploadId: UPL, deleted: true },
   get_noise_settings: { definition: "Newsletters", enabled: true, keySet: false, problem: "no_key", noiseCount: 0, decisions: [] },
   set_noise_definition: { definition: "", enabled: false, keySet: true, problem: null, noiseCount: 0, decisions: [{ chatID, title: "Weekly digest", network: "Gmail", noise: true, reason: "Newsletters", confidence: 0.9, source: "jev", at: "2026-10-29T10:00:00.000Z" }] },

@@ -5,6 +5,7 @@ import { draftView, storedDraft } from "../src/drafts.ts";
 import { CAPABILITIES, encodeFrame } from "../src/frames.ts";
 import { MAX_CHUNK_BYTES, MAX_FRAME_BYTES, MAX_MEDIA_BYTES } from "../src/limits.ts";
 import { parse, type Schema } from "../src/schema.ts";
+import { API_ROUTES } from "../src/web.ts";
 import {
   AGENT_UPLOAD_FILE_BASE64_LENGTH,
   AGENT_UPLOAD_FILE_MAX_BYTES,
@@ -18,6 +19,7 @@ import {
   fileSizeLabel,
   sanitizeFileName,
   uploadHead,
+  uploadReadRequest,
   uploadID,
   uploadInfo,
   uploadOwnerTag,
@@ -122,17 +124,28 @@ describe("actions", () => {
     expect(parseActionParams("draft_store_set_text", { requestId: "drq_0123456789abcdef", text: "x", attachmentId: UPL, owner: "o_0123456789abcdef" }).ok).toBe(true);
     expect(parseActionParams("draft_store_set_text", { requestId: "drq_0123456789abcdef", text: "x", attachmentId: UPL }).ok).toBe(false);
   });
+  test("the read path is cloud-only, owner-only, streamed like get_media and no write; the page's route keeps the id out of the URL", () => {
+    const a = ACTIONS.upload_store_read as unknown as { humanOnly: boolean; cloudOnly: boolean; write: boolean; streamed: boolean; needsApprovalForAgents: boolean };
+    expect([a.humanOnly, a.cloudOnly, a.write, a.streamed, a.needsApprovalForAgents]).toEqual([true, true, false, true, false]);
+    expect(API_ROUTES.uploadRead).toEqual({ method: "POST", path: "/api/upload/read" });
+    expect(parse(uploadReadRequest, { uploadId: "upl_0123456789abcdef" }).ok).toBe(true);
+    for (const bad of [{}, { uploadId: "x" }, { uploadId: "../../etc/passwd" }, { uploadId: "upl_0123456789abcdef", owner: "o_0123456789abcdef" }]) expect(parse(uploadReadRequest, bad).ok).toBe(false);
+    expect(CAPABILITIES.uploadRead).toBe("upload-read.v1");
+    // A frame like any other to the connector: it is the cloud that sends it, never the page or an agent.
+    expect(encodeFrame({ type: "req", id: "r1", action: "upload_store_read", params: { uploadId: "upl_0123456789abcdef", owner: "o_0123456789abcdef" } }).ok).toBe(true);
+  });
   test("capability attachments.v1", () => expect(CAPABILITIES.attachments).toBe("attachments.v1"));
 });
 
 describe("agents", () => {
   test("upload_file, upload_begin, upload_chunk, upload_commit are agent meta actions in the manifest; the store is not", () => {
     for (const n of ["upload_file", "upload_begin", "upload_chunk", "upload_commit"]) expect(isAgentActionName(n)).toBe(true);
-    for (const n of ["upload_store_begin", "upload_store_chunk", "upload_store_commit", "upload_store_delete", "discard_upload"]) expect(isAgentActionName(n)).toBe(false);
+    for (const n of ["upload_store_begin", "upload_store_chunk", "upload_store_commit", "upload_store_delete", "upload_store_read", "discard_upload"]) expect(isAgentActionName(n)).toBe(false);
     const m = buildRaftManifest({ origin: "https://inbox.example.com", service: "j-inbox" });
     const names = m.actions.map((a) => a.name);
     for (const n of ["upload_file", "upload_begin", "upload_chunk", "upload_commit"]) expect(names).toContain(n);
     expect(names).not.toContain("upload_store_chunk");
+    expect(names).not.toContain("upload_store_read");
     expect(m.description).toContain("attachmentId");
     const draft = m.actions.find((a) => a.name === "draft_reply")!;
     expect(draft.parameters.attachmentId).toEqual({ type: "string", description: expect.stringContaining("upload_file"), required: false });

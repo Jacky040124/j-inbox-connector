@@ -310,6 +310,14 @@ Object storage, logs or the audit log (`upload.begin` / `upload.commit` as metad
   text?, attachmentId}` or `compose_email {..., attachmentId}`; `discard_upload {uploadId}` when the
   owner removes the file. The cloud gives such a send `SEND_WITH_FILE_TIMEOUT_MS` (2 min; the
   connector too) since the computer uploads the file to Beeper or Gmail first.
+- **The owner reads one back** (2026-11-03, `"upload-read.v1"`): `POST /api/upload/read`
+  (`API_ROUTES.uploadRead`; owner session, CSRF header; body `{uploadId}`, never in the URL) answers the
+  bytes with `mediaResponseHeaders`, or a JSON error, like `/api/media`. The room sends the cloud-only
+  streamed `upload_store_read {uploadId, owner}` (`mediaHead`, then chunks under `ack` flow control) and
+  keeps nothing. The connector answers only for the caller's own upload or one on a draft; anything
+  else, an unfinished or expired upload: `NOT_FOUND`. A connector without the capability:
+  `NOT_SUPPORTED`. Agents cannot ask: the action is not in the manifest and `cloudOnly` refuses it on
+  every other path. What an agent could read before is unchanged.
 - **Agents** (meta actions, owner's agent access on, the agent allowed in Settings > Agents, the
   computer online with `"attachments.v1"`): `upload_file {fileName, mimeType?, data}` (base64, at
   most `AGENT_UPLOAD_FILE_MAX_BYTES` 512 KiB raw: one `--data-json` fits a macOS command line), or
@@ -491,6 +499,7 @@ both                 ping {t} / pong {t}                    every 25 s; 60 s sil
   the connector keeps draft requests' texts (`draft_store_*`); `"delegations.v1"` = its store also
   takes delegation requests (`dlg_` ids). The cloud gates `request_draft` / `request_delegation` on them;
   `"attachments.v1"` = it keeps and sends files (`upload_store_*`, `discard_upload`, `attachmentId`; see "Files");
+  `"upload-read.v1"` (2026-11-03) = it answers `upload_store_read`, so the owner can preview a file on a draft (see "Files");
   `"noise.v1"` = it judges conversations with Jev and keeps the noise store (see "Noise");
   `"viewers.v1"` (2026-10-31) = it takes the `viewers {count}` frame: the cloud sends it after every
   `welcome` and whenever the owner's open `/live` sockets go from none to some or back; the connector

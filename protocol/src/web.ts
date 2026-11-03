@@ -68,6 +68,13 @@ export const API_ROUTES = {
    * Response: apiResponse(uploadInfo). Owner only; needs "attachments.v1" (NOT_SUPPORTED otherwise).
    */
   upload: { method: "POST", path: "/api/upload" },
+  /**
+   * Body: uploadReadRequest {uploadId}. Response: the file's raw bytes with mediaResponseHeaders(its
+   * type), or a JSON error, like media. The owner's preview of a file in the connector's upload store
+   * (a draft's, or the composer's): relayed chunk by chunk, keeping none of it. Owner only; needs
+   * "upload-read.v1" (NOT_SUPPORTED otherwise). The id stays out of the URL.
+   */
+  uploadRead: { method: "POST", path: "/api/upload/read" },
   devices: { method: "GET", path: "/api/devices" },
   /**
    * Before answering {revoked:true} the room closes the device's live /connect socket with 4403
@@ -188,6 +195,18 @@ export const WEB_HTML_HEADERS = {
   "X-Content-Type-Options": "nosniff",
   "Cache-Control": "no-store",
 } as const;
+
+/**
+ * On the file preview's own files (/preview.js, /pdfjs/*). The page's CSP is not changed for them: a worker from
+ * 'self' falls under its script-src 'self'. A worker takes its CSP from its own response, not the page's, so this
+ * holds pdf.js's workers, which parse hostile bytes, to no more than the page: nothing runs but our files, no eval
+ * and no WebAssembly, and nothing is asked of anyone but us.
+ */
+export const PREVIEW_ASSET_CSP = "default-src 'none'; script-src 'self'; connect-src 'self'";
+
+export function isPreviewAsset(pathname: string): boolean {
+  return pathname === "/preview.js" || pathname.startsWith("/pdfjs/");
+}
 
 /**
  * On an HTML page's response, Server-Timing: no live session came with this request. All the first frame may know before /api/me says more: a word, not a fact about anyone, and it opens nothing (it only keeps a frame for the signed-in from being drawn). The page reads it from its navigation's timing entry: no cookie, nothing in the page, the CSP as it is.
