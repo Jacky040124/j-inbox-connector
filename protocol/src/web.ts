@@ -189,6 +189,11 @@ export const WEB_HTML_HEADERS = {
   "Cache-Control": "no-store",
 } as const;
 
+/**
+ * On an HTML page's response, Server-Timing: no live session came with this request. All the first frame may know before /api/me says more: a word, not a fact about anyone, and it opens nothing (it only keeps a frame for the signed-in from being drawn). The page reads it from its navigation's timing entry: no cookie, nothing in the page, the CSP as it is.
+ */
+export const NO_SESSION_TIMING = "jinbox-no-session";
+
 // ---- session cookies ----
 // Two kinds, two names, two server-side stores (or a stored kind that is checked): the web surface
 // reads only the human cookie, /api/raft/actions/* only the agent cookie, and authorizeSurface()
