@@ -30,7 +30,7 @@ import {
 import { errorBody, errorCode } from "./errors.ts";
 import { beeperHealth, chatID, ownId, versionString } from "./model.ts";
 import { SNOOZE_REASONS } from "./snooze.ts";
-import { draftMeta, raftAgentID } from "./drafts.ts";
+import { draftMeta, MAX_ACTIVE_DRAFTS, raftAgentID } from "./drafts.ts";
 import { delegationMeta } from "./delegations.ts";
 import { approvalView, canonicalOrigin } from "./agent.ts";
 import { eventFrame } from "./frames.ts";
@@ -294,6 +294,8 @@ export const meResponse = object({
     }),
   ),
   pendingApprovals: integer({ min: 0, max: 10_000 }),
+  /** Each active draft request's metadata (added 2026-11-03), from the cloud alone: what a chat's first frame needs of them, with the account confirmed and nothing read from the computer. Absent: a cloud that does not say yet; list_drafts then has the first word. */
+  drafts: optional(array(draftMeta, { max: MAX_ACTIVE_DRAFTS })),
 });
 
 export const deviceView = object({
