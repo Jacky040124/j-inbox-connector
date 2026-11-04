@@ -1,29 +1,121 @@
-# J-Inbox connector
+<p align="center">
+  <img src="docs/assets/banner.svg" alt="J-Inbox: every chat in one inbox. AI agents draft, you decide what gets sent." width="100%">
+</p>
 
-![License: MIT](https://img.shields.io/badge/license-MIT-blue) ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white) ![Bun](https://img.shields.io/badge/Bun-1.3-000000?logo=bun&logoColor=white) ![Tests](https://img.shields.io/badge/tests-1216%20passing-brightgreen) ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
+<p align="center">
+  <a href="https://inbox.jackyzhonghq.com"><b>Website</b></a> &nbsp;·&nbsp;
+  <a href="#what-you-get"><b>Features</b></a> &nbsp;·&nbsp;
+  <a href="#how-your-data-stays-yours"><b>Privacy</b></a> &nbsp;·&nbsp;
+  <a href="#install"><b>Install</b></a> &nbsp;·&nbsp;
+  <a href="#built-with-ai"><b>Built with AI</b></a>
+</p>
 
-**Every chat in one inbox, and an AI agent that can help with it without ever sending on its own.**
+<p align="center">
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT">
+  <img src="https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white" alt="TypeScript">
+  <img src="https://img.shields.io/badge/Bun-1.3-000000?logo=bun&logoColor=white" alt="Bun">
+  <img src="https://img.shields.io/badge/tests-1%2C216-brightgreen" alt="1,216 tests">
+  <img src="https://img.shields.io/badge/platform-macOS-lightgrey?logo=apple" alt="macOS">
+</p>
 
-The open-source half of [J-Inbox](https://inbox.jackyzhonghq.com): one inbox for WhatsApp,
-Instagram, LinkedIn, X, iMessage, Gmail and more, for people (a small web page) and for AI agents
-(a [Raft](https://raft.build) App).
+J-Inbox puts WhatsApp, iMessage, Instagram, LinkedIn, X, Telegram, Signal, SMS and Gmail in one fast inbox. Your AI agents can read a chat when you ask, draft a reply or take on the task, but **nothing is sent until a person approves it**.
 
-The chats themselves never leave your Mac except to answer a request. J-Inbox uses the
-[Beeper](https://www.beeper.com) Client API (Beeper Server or Beeper Desktop) running on your own
-Mac. This connector is a small background service that links it to the J-Inbox cloud:
+This repo is the open-source half: the connector that runs on your Mac, so you can check exactly what it does.
 
+<p align="center">
+  <img src="docs/assets/demo.gif" alt="Open a chat, ask an agent for a draft, review it and send it" width="100%">
+</p>
+<p align="center"><sub>Every name and message in these images is invented demo data.</sub></p>
+
+## What you get
+
+### One inbox for everything
+
+Every network in one list, with filters for each network, Unread, Noise, Snoozed and Archived. Each conversation still looks like its own app, so a WhatsApp chat reads like WhatsApp and a Gmail thread reads like Gmail.
+
+<table>
+  <tr>
+    <td width="33%"><img src="docs/assets/skin-whatsapp.png" alt="A WhatsApp chat in J-Inbox"><p align="center"><sub>WhatsApp</sub></p></td>
+    <td width="33%"><img src="docs/assets/skin-linkedin.png" alt="A LinkedIn chat in J-Inbox"><p align="center"><sub>LinkedIn</sub></p></td>
+    <td width="33%"><img src="docs/assets/skin-gmail.png" alt="A Gmail thread in J-Inbox"><p align="center"><sub>Gmail</sub></p></td>
+  </tr>
+</table>
+
+### Agents that help, and never send on their own
+
+Press <kbd>D</kbd> in any chat and tell an agent what you want to say. Its draft comes back as a card you can **send, edit, rewrite or discard**. If an agent asks to send something itself, you see the exact text on an approval page first.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/assets/draft-card.png" alt="A draft from an agent, with Send, Edit, Rewrite and Discard"><p align="center"><sub>Review every draft</sub></p></td>
+    <td width="50%"><img src="docs/assets/approval.png" alt="The approval page, showing the exact text an agent wants to send"><p align="center"><sub>Approve the exact text</sub></p></td>
+  </tr>
+</table>
+
+### Hand a chat to an agent as a task
+
+Press <kbd>T</kbd> to turn a conversation into a [Raft](https://raft.build) task. The agent creates it in the channel you pick and takes it, and you follow the work there. You choose which agents may be asked at all.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/assets/delegate.png" alt="Delegating a chat to an agent as a Raft task"><p align="center"><sub>Delegate a chat</sub></p></td>
+    <td width="50%"><img src="docs/assets/agents.png" alt="Settings, choosing which agents can be asked"><p align="center"><sub>Choose your agents</sub></p></td>
+  </tr>
+</table>
+
+### Built to be fast
+
+Search all your chats and messages with <kbd>⌘</kbd> <kbd>K</kbd>, and clear your inbox from the keyboard.
+
+| Key | Action | Key | Action |
+|---|---|---|---|
+| <kbd>⌘</kbd> <kbd>K</kbd> | Search | <kbd>S</kbd> | Snooze |
+| <kbd>↑</kbd> <kbd>↓</kbd> | Move through chats | <kbd>U</kbd> | Mark read or unread |
+| <kbd>E</kbd> | Archive | <kbd>D</kbd> | Ask an agent for a draft |
+| <kbd>⌘</kbd> <kbd>Enter</kbd> | Send | <kbd>T</kbd> | Delegate as a task |
+
+<p align="center">
+  <img src="docs/assets/search.png" alt="Searching chats and messages" width="80%">
+</p>
+
+### Also included
+
+- **Snooze:** a chat leaves your inbox and comes back when you want it.
+- **Noise (optional):** with your own TypeSafe key, conversations that match your definition of noise move to Low priority. You write the definition, and you can correct any decision. The short excerpts it needs go straight from your Mac to TypeSafe.
+- **Files:** send and preview attachments up to 25 MB.
+- **Activity log:** see what you and your agents did. It records the action, who, when and the result, never message text or chat names.
+
+### Light, dark and on your phone
+
+<table>
+  <tr>
+    <td width="70%"><img src="docs/assets/inbox-dark.png" alt="J-Inbox in dark mode"></td>
+    <td width="30%"><img src="docs/assets/phone.png" alt="J-Inbox on a phone"></td>
+  </tr>
+</table>
+
+## How it works
+
+The chats themselves stay on your Mac except to answer a request. J-Inbox uses the [Beeper](https://www.beeper.com) Client API (Beeper Server or Beeper Desktop) running on your own Mac, and this connector is a small background service that links it to the J-Inbox cloud.
+
+```mermaid
+flowchart LR
+    B["Beeper and Gmail<br/>on your Mac"] <-->|localhost| C["j-inbox connector<br/>(this repo)"]
+    C <-->|outbound WSS only| R["J-Inbox cloud<br/>pass-through relay"]
+    R <--> W["Web app<br/>for you"]
+    R <--> A["Raft agents<br/>draft, never send"]
 ```
-Beeper on your Mac  <-- localhost -->  j-inbox connector  <-- outbound WSS -->  J-Inbox cloud  <-->  web page / Raft agents
-```
 
-- **Outbound only.** The connector dials out to the cloud. No open ports, no tunnels.
-- **Whitelist.** The cloud can only ask for the actions in the protocol catalogue
-  (`protocol/src/actions.ts`): list, read and search chats, get media, draft, send, react, mark
-  read, archive. An agent's send waits for a person to approve it in J-Inbox. Anything else is refused here, on your Mac.
-- **Your keys stay here.** The Beeper token and your Gmail access live in the macOS Keychain. The cloud never stores them.
-- **No chat content in logs.** The local audit log records the action name, time and result only.
-- **Pass-through cloud.** The J-Inbox cloud relays requests and stores no messages. (The cloud is
-  closed source; this repo is the part that runs on your machine, so you can check what it does.)
+## How your data stays yours
+
+| Rule | What it means |
+|---|---|
+| **Outbound only** | The connector dials out to the cloud. No open ports, no tunnels. |
+| **Whitelist** | The cloud can only ask for the actions in the protocol catalogue (`protocol/src/actions.ts`). Anything else is refused here, on your Mac. |
+| **A person approves** | An agent's send waits for a person to approve it in J-Inbox. |
+| **Your keys stay here** | The Beeper token and your Gmail access live in the macOS Keychain. The cloud never stores them. |
+| **No chat content in logs** | The local audit log records the action name, time and result only. |
+| **Pass-through cloud** | The J-Inbox cloud relays requests and stores no messages. The cloud is closed source; this repo is the part that runs on your machine, so you can check what it does. |
 
 ## Built with AI
 
