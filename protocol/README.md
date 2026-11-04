@@ -137,7 +137,11 @@ Notes for implementers:
   to agents. `isLowPriority` is passed through. `list_chats` with `unreadOnly` and no `inbox`
   covers every inbox (archived and low priority too); pass `inbox: "primary"` for Beeper's main
   inbox.
-  `REACTION` messages in history are passed through as `type: "REACTION"`.
+  `REACTION` messages in history are passed through as `type: "REACTION"`. A message Beeper marks
+  `isHidden` (iMessage's tapback as a message of its own) is left out of history and search; as a
+  chat's preview it stays, without Beeper's `{{sender}}` template. A number or address given as a
+  name or title becomes the name in the owner's Contacts when the optional helper is installed
+  (`connector/src/contacts.ts`), and a group titled with numbers loses the owner's own.
 - **Big pages** (`connector/src/pager.ts` `fitToFrame`): a valid page can serialize to more than
   `MAX_FRAME_BYTES` (long CJK texts, many attachments and reactions). The connector then returns
   fewer items (newest kept), `hasMore: true` and a cursor that continues exactly after the last item

@@ -34,9 +34,12 @@ import {
   type MessageItem,
   type Reaction,
 } from "@j-inbox/protocol";
+import { contactName, isAddress, sameAddress } from "./contacts.ts";
 
 type Raw = Record<string, any>;
 export type MapOptions = {
+  /** Keep a message Beeper hides (a chat's preview may be one: iMessage's tapback). History drops them. */
+  keepHidden?: boolean;
   /** Called with every asset URL put into a result; get_media serves only these. */
   onAsset?: (url: string) => void;
   /** The owner's own user IDs: reactions from them get isSelf. */
@@ -133,6 +136,8 @@ const MATRIX_USER_ID = /^@[^\s:]+:[A-Za-z0-9.-]+$/;
 
 export function mapMessage(raw: unknown, opts: MapOptions = {}): MessageItem | null {
   if (!isObj(raw)) return null;
+  // iMessage's tapback, as a message of its own ("{{sender}} liked ..."): Beeper marks it hidden, and the reaction is on the message it was for.
+  if (raw.isHidden === true && !opts.keepHidden) return null;
   const id = ok(idSchema, raw.id);
   const chatID = ok(chatIDSchema, raw.chatID);
   const accountID = ok(idSchema, raw.accountID);
@@ -143,9 +148,11 @@ export function mapMessage(raw: unknown, opts: MapOptions = {}): MessageItem | n
   const out: MessageItem = { id, chatID, accountID, senderID, timestamp, sortKey, type: messageTypeOf(raw), isSender: raw.isSender === true };
   // Beeper sometimes gives the sender's Matrix ID as the name ("@whatsapp_lid-123:beeper.local" in
   // chat-list previews): no name is better than an ID.
-  if (typeof raw.senderName === "string" && !MATRIX_USER_ID.test(raw.senderName.trim())) out.senderName = sanitizeLine(raw.senderName, MAX_NAME_LENGTH);
+  if (typeof raw.senderName === "string" && !MATRIX_USER_ID.test(raw.senderName.trim())) out.senderName = sanitizeLine(contactName(raw.senderName) ?? raw.senderName, MAX_NAME_LENGTH);
   if (typeof raw.text === "string") {
-    const t = truncateText(sanitizeText(htmlToPlainText(raw.text)), MAX_RESULT_TEXT_LENGTH);
+    // Beeper's own template for a hidden tapback: the row already says who.
+    const body = raw.isHidden === true ? raw.text.replace(/\{\{sender\}\}\s*/g, "") : raw.text;
+    const t = truncateText(sanitizeText(htmlToPlainText(body)), MAX_RESULT_TEXT_LENGTH);
     out.text = t.text;
     if (t.truncated) out.textTruncated = true;
     const post = parseSharedPost(raw.text);
@@ -187,6 +194,22 @@ function otherParticipantImage(raw: Raw): unknown {
   return items.find((u: unknown) => isObj(u) && u.isSelf !== true && typeof u.imgURL === "string" && u.imgURL.length > 0)?.imgURL;
 }
 
+/**
+ * iMessage names a chat after its people's numbers. Each becomes the name it has in the owner's Contacts; a
+ * group's title made of nothing but numbers and addresses also loses the owner's own, which Beeper lists too.
+ */
+function chatTitle(raw: Raw): string {
+  const title = line(raw.title, MAX_TITLE_LENGTH) ?? "";
+  if (raw.type !== "group") return contactName(title) ?? title;
+  const parts = title.split(/, | & /);
+  if (parts.length < 2 || !parts.every(isAddress)) return title;
+  const items: unknown[] = Array.isArray(raw.participants?.items) ? raw.participants.items : [];
+  const self = items.filter((u): u is Raw => isObj(u) && u.isSelf === true).flatMap((u) => [u.phoneNumber, u.email]).filter((v): v is string => typeof v === "string");
+  const others = parts.filter((p) => !self.some((v) => sameAddress(v, p)));
+  const names = (others.length ? others : parts).map((p) => contactName(p) ?? p);
+  return names.length > 1 ? `${names.slice(0, -1).join(", ")} & ${names[names.length - 1]}` : names[0]!;
+}
+
 export function mapChat(raw: unknown, opts: MapOptions = {}): ChatSummary | null {
   if (!isObj(raw)) return null;
   const id = ok(chatIDSchema, raw.id);
@@ -196,7 +219,7 @@ export function mapChat(raw: unknown, opts: MapOptions = {}): ChatSummary | null
     id,
     accountID,
     network: line(raw.network, 64) || "Unknown",
-    title: line(raw.title, MAX_TITLE_LENGTH) ?? "",
+    title: line(chatTitle(raw), MAX_TITLE_LENGTH) ?? "",
     type: raw.type === "group" ? "group" : "single",
     unreadCount: int(raw.unreadCount, 1_000_000_000) ?? 0,
     isPinned: raw.isPinned === true,
@@ -218,7 +241,7 @@ export function mapChat(raw: unknown, opts: MapOptions = {}): ChatSummary | null
   if (avatar) out.avatarURL = avatar;
   // Only whether a draft exists: the owner's unsent text never leaves the Mac.
   if (isObj(raw.draft)) out.hasDraft = typeof raw.draft.text === "string" && raw.draft.text.length > 0;
-  if ("preview" in raw) out.preview = raw.preview ? mapMessage(raw.preview, opts) : null;
+  if ("preview" in raw) out.preview = raw.preview ? mapMessage(raw.preview, { ...opts, keepHidden: true }) : null;
   return out;
 }
 

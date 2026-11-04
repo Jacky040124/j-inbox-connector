@@ -54,6 +54,7 @@ export async function uninstallCommand(ctx: Ctx): Promise<number> {
   deps.out("Removed the tokens from the Keychain.");
   const rm = (p: string) => rmSync(p, { recursive: true, force: true });
   rm(paths.dataDir);
+  rm(paths.contactsHelperApp);
   rm(paths.logDir);
   rm(paths.stateFile);
   if (!flags["keep-config"]) {

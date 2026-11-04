@@ -2,6 +2,7 @@
 // + cloud link + Beeper events + health checks + re-sync + the noise judge (every conversation with
 // new activity, Beeper's or Gmail's, is asked about), with the local audit log and a small
 // metadata-only state file that `j-inbox status` reads.
+import { watchContacts } from "./contacts.ts";
 import { readFileSync } from "node:fs";
 import type { EventFrame } from "@j-inbox/protocol";
 import { createActions, createWriteDedupe } from "./actions.ts";
@@ -141,6 +142,7 @@ export async function startService(o: ServiceOptions): Promise<Service> {
   const beeperToken = await o.secrets.get("beeper-token");
   if (!beeperToken) return exitNow("no_beeper_token");
 
+  const contacts = watchContacts({ file: o.paths.contactsFile, helperApp: o.paths.contactsHelperApp, run: (cmd) => Bun.spawn(cmd, { stdout: "ignore", stderr: "ignore" }) });
   const audit = new AuditLog({ path: o.paths.auditFile });
   const startedAt = new Date().toISOString();
   const client = createBeeperClient({ baseURL: config.beeperURL, token: beeperToken });
@@ -297,6 +299,7 @@ export async function startService(o: ServiceOptions): Promise<Service> {
   let stopping: Promise<void> | null = null;
   const stopAll = (graceMs: number) =>
     (stopping ??= (async () => {
+      contacts.stop();
       events.stop();
       health.stop();
       gmail.stopPolling();

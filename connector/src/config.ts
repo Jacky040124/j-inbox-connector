@@ -23,6 +23,9 @@ export type Paths = {
   secretsFile: string;
   idempotencyFile: string;
   assetsFile: string;
+  /** Names for numbers (contacts.ts): written by the helper app, which alone may read Contacts. */
+  contactsFile: string;
+  contactsHelperApp: string;
   /** Gmail accounts this connector runs (addresses and status; the tokens are in the Keychain). */
   gmailFile: string;
   /** Draft requests' instructions and drafts (drafts.ts): kept here, never in the cloud. */
@@ -66,6 +69,8 @@ export function resolvePaths(env: Record<string, string | undefined>): Paths {
     secretsFile: join(configDir, "dev-secrets.json"),
     idempotencyFile: join(dataDir, "idempotency.json"),
     assetsFile: join(dataDir, "assets.json"),
+    contactsFile: join(dataDir, "contacts.json"),
+    contactsHelperApp: override !== undefined ? join(override, "J-Inbox Contacts.app") : join(home!, "Applications", "J-Inbox Contacts.app"),
     gmailFile: join(dataDir, "gmail.json"),
     draftsFile: join(dataDir, "drafts.json"),
     uploadsDir: join(dataDir, "uploads"),
