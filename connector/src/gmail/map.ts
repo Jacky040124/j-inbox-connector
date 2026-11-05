@@ -9,6 +9,7 @@
 // unread_summary ask Gmail (`category:primary`) and set it from the query, because Gmail shows
 // most CATEGORY_UPDATES mail in Primary; isPinned = STARRED; type = group when more than one other
 // person is on the thread; lastActivity = the newest message that is not a draft.
+import { isOwnAddress } from "./own.ts";
 import {
   GMAIL_ATTACHMENT_ID_RE,
   GMAIL_ID_RE,
@@ -185,7 +186,7 @@ export function mapGmailMessage(raw: unknown, email: string, o: GmailMapOptions 
   const at = dateOf(m);
   if (typeof m.id !== "string" || !GMAIL_ID_RE.test(m.id) || typeof m.threadId !== "string" || !GMAIL_ID_RE.test(m.threadId) || at === null) return null;
   const headers = emailHeadersOf(m.payload);
-  const self = headers.from.address === email;
+  const self = isOwnAddress(headers.from.address, email);
   const out: MessageItem = {
     id: m.id,
     chatID: gmailChatID(email, m.threadId),
@@ -256,7 +257,7 @@ export function mapGmailThread(raw: unknown, email: string, o: GmailMapOptions =
     preview: last ? mapGmailMessage(last, email, o) : null,
   };
   // Who wrote last, whatever the owner has sent since: To do (todo/store.ts) needs no other read for it.
-  const fromOthers = msgs.filter((m) => !has(m, "SENT") && parseAddressList(header(m.payload, "From"), 1)[0]?.address !== email);
+  const fromOthers = msgs.filter((m) => !has(m, "SENT") && !isOwnAddress(parseAddressList(header(m.payload, "From"), 1)[0]?.address, email));
   noteThreadOthers(chat, fromOthers.length ? Math.max(...fromOthers.map((m) => dateOf(m)!)) : null, fromOthers.map((m) => m.id).filter((id): id is string => typeof id === "string"));
   return chat;
 }

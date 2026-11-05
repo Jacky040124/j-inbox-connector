@@ -1,6 +1,7 @@
 // The connector's Gmail side: the accounts (gmail.json + Keychain), one client and source per
 // account, connecting a new account (gmail_connect), removing one (revoke at Google, forget),
 // and the history poller.
+import { aliasesOf, forgetOwnAddresses, setOwnAddresses } from "./own.ts";
 import { GMAIL_NETWORK, gmailAccountID, makeError, normalizeGmailAddress, type Account, type ErrorBody, type EventFrame } from "@j-inbox/protocol";
 import type { RequestContext } from "../actions.ts";
 import type { SecretStore } from "../secrets.ts";
@@ -34,6 +35,9 @@ const err = (code: ErrorBody["code"], message: string) => ({ ok: false as const,
 
 export type GmailService = ReturnType<typeof createGmailService>;
 
+/** Aliases change rarely. */
+const OWN_ADDRESSES_REFRESH_MS = 6 * 60 * 60_000;
+
 export function createGmailService(o: GmailServiceOptions) {
   const accounts = new GmailAccounts({ path: o.path, secrets: o.secrets, now: o.now });
   const sources = new Map<string, GmailSource>();
@@ -64,8 +68,19 @@ export function createGmailService(o: GmailServiceOptions) {
     return s;
   }
 
+  /** Each connected account and its aliases (own.ts). An alias Gmail will not list costs nothing: the address itself still counts. */
+  async function refreshOwnAddresses(): Promise<void> {
+    for (const { email } of accounts.list()) {
+      setOwnAddresses(email, []);
+      const s = sourceFor(email);
+      const r = await s.sendAs().catch(() => null);
+      if (r?.ok) setOwnAddresses(email, aliasesOf(r.data));
+    }
+  }
+
   return {
     accounts,
+    refreshOwnAddresses,
     emails(): string[] {
       return accounts.list().map((a) => a.email);
     },
@@ -109,6 +124,7 @@ export function createGmailService(o: GmailServiceOptions) {
       // A fresh client (a reconnect replaces the token) and a fresh history start.
       sources.delete(email);
       poller?.forget(email);
+      void refreshOwnAddresses();
       o.onLifecycle?.("gmail.connected");
       void poller?.pollAll();
       return { ok: true, data: { accountID: gmailAccountID(email), connected: true } };
@@ -127,12 +143,16 @@ export function createGmailService(o: GmailServiceOptions) {
       sources.delete(email);
       poller?.forget(email);
       metaCache.forget(email);
+      forgetOwnAddresses(email);
       o.onLifecycle?.("gmail.removed");
       return { ok: true, revoked };
     },
 
     /** `send` true = handed to a connected cloud link; `canSend` false while the link is down (see GmailPoller). */
     startPolling(send: (f: EventFrame) => boolean, canSend?: () => boolean) {
+      for (const { email } of accounts.list()) setOwnAddresses(email, []);
+      void refreshOwnAddresses();
+      setInterval(() => void refreshOwnAddresses(), OWN_ADDRESSES_REFRESH_MS).unref?.();
       poller ??= new GmailPoller({ sources: () => this.sources(), send, canSend, intervalMs: o.pollIntervalMs, activeIntervalMs: o.activePollIntervalMs, log: o.log, skip: (e) => accounts.get(e)?.status === "reconnect_required" });
       poller.start();
     },

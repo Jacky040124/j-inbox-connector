@@ -607,6 +607,12 @@ export function createGmailSource(o: { email: string; client: GmailClient; scan?
     return { ok: true, data: bytes };
   }
 
+  /** "Send mail as": the account's aliases (own.ts). */
+  async function sendAs(): Promise<{ ok: true; data: unknown } | { ok: false }> {
+    const r = await client.get(client.path(["settings", "sendAs"]));
+    return r.ok ? { ok: true, data: r.body } : { ok: false };
+  }
+
   async function profile(ctx: RequestContext): Promise<Out<{ emailAddress: string; historyId: string }>> {
     const r = await client.get(client.path(["profile"]), opts(ctx));
     if (!r.ok) return r;
@@ -616,5 +622,5 @@ export function createGmailSource(o: { email: string; client: GmailClient; scan?
     return { ok: true, data: { emailAddress: e, historyId: h } };
   }
 
-  return { email, client, listThreads, threadIDs, primaryPage, unread, readThread, readCursor, search, markRead, modifyThread, draftReply, sendReply, compose, attachment, emailHtml, profile };
+  return { email, client, sendAs, listThreads, threadIDs, primaryPage, unread, readThread, readCursor, search, markRead, modifyThread, draftReply, sendReply, compose, attachment, emailHtml, profile };
 }

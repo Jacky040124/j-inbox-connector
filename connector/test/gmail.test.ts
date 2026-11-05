@@ -1,6 +1,7 @@
 // Every action on Gmail chats, end to end through the connector's own dispatcher, against
 // fake-google (OAuth + Gmail) and fake-beeper, with access tokens refreshed through a fake of the
 // cloud's /google/token proxy (production cloudTokenRefresher).
+import { clearOwnAddresses } from "../src/gmail/own.ts";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { FAKE_GOOGLE_CLIENT, OTHER_EMAIL, OWNER_EMAIL, PDF_BYTES, PNG_BYTES, THREADS, decodeHeader, startFakeGoogle, type RunningFakeGoogle } from "@j-inbox/fake-google";
 import { startFakeBeeper, type FakeBeeper } from "@j-inbox/fake-beeper";
@@ -546,6 +547,8 @@ describe("accounts", () => {
 });
 
 describe("live updates", () => {
+  beforeEach(clearOwnAddresses);
+
   test("history polling turns new mail and label changes into metadata-only events", async () => {
     const t = await make();
     const events: EventFrame[] = [];

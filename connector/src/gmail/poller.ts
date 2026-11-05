@@ -7,6 +7,7 @@
 // every event of the poll was handed to the cloud (send true); while the link is down (canSend
 // false) nothing is polled, and the poll after the next welcome reads from the last position that
 // was handed over, so a change is announced late rather than never.
+import { hasOtherOwnAddresses } from "./own.ts";
 import { GMAIL_POLL_ACTIVE_INTERVAL_MS, GMAIL_POLL_INTERVAL_MS, MAX_EVENT_IDS, eventFrame, gmailChatID, parse, type EventFrame } from "@j-inbox/protocol";
 import type { GmailSource } from "./source.ts";
 
@@ -151,7 +152,8 @@ export class GmailPoller {
               into.set(m.threadId, set);
             }
             if (into === added) {
-              const who = !Array.isArray(m.labelIds) ? "unknown" : m.labelIds.includes("SENT") ? "self" : "others";
+              // No SENT label may still be the owner's, from another of their mailboxes: then only a read can tell.
+              const who = !Array.isArray(m.labelIds) ? "unknown" : m.labelIds.includes("SENT") ? "self" : hasOtherOwnAddresses(s.email) ? "unknown" : "others";
               const was = senders.get(m.threadId);
               if (was === undefined || SENDER_RANK[who] > SENDER_RANK[was]) senders.set(m.threadId, who);
             }
