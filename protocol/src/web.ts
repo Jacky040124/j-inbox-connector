@@ -129,13 +129,20 @@ export const WEB_PAGES = {
   pair: "/pair",
   approvals: "/approvals",
   approval: "/approvals/{id}",
-  accounts: "/settings/accounts",
+  email: "/settings/email",
+  chats: "/settings/chats",
   devices: "/settings/devices",
-  /** The Raft server's agents that may draft replies (added 2026-10-28). */
-  agents: "/settings/agents",
+  behavior: "/settings/behavior",
   /** The owner's definition of noise and Jev's latest decisions (added 2026-10-29). */
   noise: "/settings/noise",
+  /** The Raft server's agents that may draft replies (added 2026-10-28). */
+  agents: "/settings/agents",
   activity: "/settings/activity",
+  appearance: "/settings/appearance",
+  account: "/settings/account",
+  /** An older address of Settings > Email (until 2026-11-04): it still opens, and the UI puts the new one in the address bar. Build no new link to it. */
+  accounts: "/settings/accounts",
+  /** An older address of Settings > Behavior, the same way. */
   general: "/settings/general",
 } as const;
 export type WebPage = keyof typeof WEB_PAGES;

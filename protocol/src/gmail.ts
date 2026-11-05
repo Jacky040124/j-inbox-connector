@@ -107,7 +107,7 @@ export type GoogleTokenResponse = Infer<typeof googleTokenResponse>;
 /** Where the connector's Settings link sends the owner after a Gmail account was added (or not). */
 export const GMAIL_ADDED_QUERY = "added=gmail";
 /**
- * `?gmail_error=<code>` on /settings/accounts: why adding a Gmail account failed (a code, never
+ * `?gmail_error=<code>` on /settings/email: why adding a Gmail account failed (a code, never
  * content). offline: the computer is not connected; update: its connector is too old for Gmail;
  * refused: the connector did not accept the account; denied: the owner cancelled at Google; scope:
  * Gmail access was not granted; state: the sign-in expired, was replayed or belongs to another

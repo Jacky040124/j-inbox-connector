@@ -100,7 +100,21 @@ describe("settings route", () => {
 
 describe("web page paths (shared by the cloud's links and the UI router)", () => {
   test("constants", () => {
-    expect(WEB_PAGES).toEqual({ inbox: "/", pair: "/pair", approvals: "/approvals", approval: "/approvals/{id}", accounts: "/settings/accounts", devices: "/settings/devices", agents: "/settings/agents", noise: "/settings/noise", activity: "/settings/activity", general: "/settings/general" });
+    expect(WEB_PAGES).toEqual({ inbox: "/", pair: "/pair", approvals: "/approvals", approval: "/approvals/{id}", email: "/settings/email", chats: "/settings/chats", devices: "/settings/devices", behavior: "/settings/behavior", noise: "/settings/noise", agents: "/settings/agents", activity: "/settings/activity", appearance: "/settings/appearance", account: "/settings/account", accounts: "/settings/accounts", general: "/settings/general" });
+  });
+  test("the root README's changelog says which Settings pages came and which are older addresses", () => {
+    const log = readFileSync(join(import.meta.dir, "..", "..", "README.md"), "utf8").split("## Protocol changelog")[1];
+    // The public connector repo's root README is its own, with no changelog.
+    if (log === undefined) return;
+    const row = log.split("\n").find((l) => l.includes("| Settings |") && l.includes("WEB_PAGES gains"))!;
+    expect(row).toBeDefined();
+    const said = (key: string) => new RegExp(`\\b${key}\\b`).test(row);
+    for (const page of ["email", "chats", "behavior", "appearance", "account", "accounts", "general"] as const) {
+      expect(page in WEB_PAGES).toBe(true);
+      expect(said(page)).toBe(true);
+    }
+    // In the table, not after it.
+    expect(log.trimEnd().endsWith(row)).toBe(true);
   });
   test("webPagePath fills only J-Inbox's own ids", () => {
     expect(webPagePath("approval", "apr_1-x")).toBe("/approvals/apr_1-x");

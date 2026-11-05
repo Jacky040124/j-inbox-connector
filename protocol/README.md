@@ -59,7 +59,7 @@ Changes must be **additive** and recorded in the root README changelog (see "Rul
 | `UNKNOWN_OUTCOME` | 502 | **no** | A write was dispatched and its answer was lost (timeout, socket drop, crash). It may have happened: read back (e.g. `read_chat`) before trying again, or retry with the same `idempotencyKey` |
 | `CONFLICT` | 409 | no | The target's state forbids it, e.g. `draft_reply` when the chat already has a draft; a second owner trying to bind a server |
 | `NOT_SUPPORTED` | 422 | no | The chat's network cannot do this (e.g. `react` on an email thread) |
-| `REAUTH_REQUIRED` | 502 | **no** | Google refused the Gmail account's refresh token (`invalid_grant`, revoked access, or Gmail scope missing). The owner reconnects the account in Settings > Accounts; `status.accounts` shows it `reconnect_required`. Not 401 (the web UI signs out on 401) |
+| `REAUTH_REQUIRED` | 502 | **no** | Google refused the Gmail account's refresh token (`invalid_grant`, revoked access, or Gmail scope missing). The owner reconnects the account in Settings > Email; `status.accounts` shows it `reconnect_required`. Not 401 (the web UI signs out on 401) |
 | `UPSTREAM_DOWN` | 502 | yes | Connector up, Gmail (Google) unreachable or failing: the request never reached Gmail, or a read failed there. A Gmail 5xx or lost answer on a write is `UNKNOWN_OUTCOME`, like Beeper's |
 
 Error messages are for humans and agents; never put message text, tokens or chat names in them.
@@ -526,7 +526,7 @@ The connector runs Gmail accounts next to Beeper. Rules every peer relies on:
   online with `"gmail.v1"`) -> Google with exactly `GOOGLE_SCOPES`, `access_type=offline`,
   `prompt=consent`, PKCE S256 and `state`, sealed with the human session into a 10-minute cookie ->
   `GET /auth/google/callback` (same session, state once only) -> `gmail_connect {email,
-  refreshToken}` to the connector once -> `/settings/accounts?added=gmail`, or
+  refreshToken}` to the connector once -> `/settings/email?added=gmail`, or
   `?gmail_error=<GMAIL_CONNECT_ERRORS>` with the token revoked at Google.
 - **Token proxy** (`POST /google/token`, connector surface): `Authorization: Bearer <deviceToken>`,
   body `googleTokenRequest {refreshToken}` -> bare `googleTokenResponse {accessToken, expiresIn}` or
@@ -684,7 +684,7 @@ query): URLs are written to Worker logs, browser history and proxies.
 | GET | `/api/settings` | | `settingsResponse {agentAccess}` |
 | POST | `/api/settings` | `settingsRequest {agentAccess}` | `settingsResponse`; the owner's switch for agent access (on by default after pairing) |
 | POST | `/auth/logout` | | `{ok:true}`; expires the cookie (`expiredSessionCookie`), drops the server session, sends `LOGOUT_RESPONSE_HEADERS` (`Clear-Site-Data: "cache", "storage"`) |
-| GET | `/auth/google/start` | | a top-level navigation (no CSRF header): 302 to Google, or to `/settings/accounts?gmail_error=<code>` (see "Gmail") |
+| GET | `/auth/google/start` | | a top-level navigation (no CSRF header): 302 to Google, or to `/settings/email?gmail_error=<code>` (see "Gmail") |
 
 Cloud-only actions (`gmail_connect`) are `NOT_FOUND` on `POST /api/actions/{action}`. The cloud's
 own actions (`snooze_chat`, `unsnooze_chat`, `list_snoozed`) are answered there like the others.
@@ -697,8 +697,8 @@ unknown) is `application/octet-stream` with `Content-Disposition: attachment`. N
 headers. A contact can send any file, so nothing they send may run on the app origin.
 
 Pages (`WEB_PAGES`, `webPagePath`, `webPageURL`): `/`, `/pair`, `/approvals`, `/approvals/{id}`,
-`/settings/accounts`, `/settings/devices`, `/settings/agents`, `/settings/noise`, `/settings/activity`,
-`/settings/general`. The cloud serves `index.html` for each and builds every
+`/settings/email`, `/settings/chats`, `/settings/devices`, `/settings/behavior`, `/settings/noise`, `/settings/agents`, `/settings/activity`,
+`/settings/appearance`, `/settings/account`, and the older `/settings/accounts` and `/settings/general` (they still open; the UI puts the new address in their place). The cloud serves `index.html` for each and builds every
 link from them (`approveURL` = `webPageURL(APP_ORIGIN, "approval", id)`, `approvals_pending` ->
 `approvals`, `connector_replaced` -> `devices`); the UI routes on the same paths.
 

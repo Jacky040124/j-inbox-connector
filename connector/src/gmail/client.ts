@@ -22,7 +22,7 @@ const err = (code: ErrorCode, message: string): { ok: false; error: ErrorBody } 
 
 const MESSAGES: Partial<Record<ErrorCode, string>> = {
   UPSTREAM_DOWN: "Gmail is not reachable right now.",
-  REAUTH_REQUIRED: "Google no longer accepts J-Inbox's access to this Gmail account. Reconnect it in Settings > Accounts.",
+  REAUTH_REQUIRED: "Google no longer accepts J-Inbox's access to this Gmail account. Reconnect it in Settings > Email.",
   UNKNOWN_OUTCOME: "Gmail did not confirm the change. It may or may not have happened; check before trying again.",
   TIMEOUT: "Gmail did not answer within the request's time.",
   NOT_FOUND: "Not found in Gmail.",
