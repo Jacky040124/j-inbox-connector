@@ -19,7 +19,7 @@ const PROPERTIES = new Set(
   border border-width border-style border-color border-collapse border-spacing border-radius border-top border-right border-bottom border-left
   border-top-width border-right-width border-bottom-width border-left-width border-top-style border-right-style border-bottom-style border-left-style border-top-color border-right-color border-bottom-color border-left-color
   border-top-left-radius border-top-right-radius border-bottom-left-radius border-bottom-right-radius
-  background background-color background-image background-position background-repeat background-size background-clip background-origin
+  background background-color background-image background-position background-repeat background-size background-origin
   font font-family font-size font-style font-variant font-weight font-stretch line-height letter-spacing word-spacing white-space word-break word-wrap overflow-wrap hyphens tab-size
   text-align text-decoration text-decoration-color text-decoration-line text-decoration-style text-indent text-overflow text-shadow text-transform text-size-adjust box-shadow
   table-layout empty-cells caption-side list-style list-style-image list-style-position list-style-type object-fit object-position aspect-ratio
@@ -108,6 +108,13 @@ function cleanValue(raw: string, image: ImageCheck, limit: number): string | nul
         out += word + "(";
         i = j + 1;
       } else {
+        // A hex colour is no number: #111111 is not past any limit, and must not be read as one.
+        if (out.endsWith("#")) {
+          if (!/^[\da-f]{3,8}$/i.test(word)) return null;
+          out += word;
+          i = j;
+          continue;
+        }
         if (word.length > 64 || VIEWPORT_HEIGHT_UNIT.test(word) || CONTENT_SIZES.has(word.toLowerCase())) return null;
         const n = word[0]! >= "0" && word[0]! <= "9" ? parseFloat(word) : word[0] === "." || word[0] === "-" ? parseFloat(word) : 0;
         if (Math.abs(n) > limit) return null;
@@ -177,14 +184,27 @@ export function rawDeclarations(css: string): [string, string][] {
   });
 }
 
+const CLEAR_COLOR = /^\s*(?:transparent\b|rgba\([^)]*[,/]\s*0(?:\.0*)?\s*\))/i;
+/** background-clip, -webkit-background-clip or the shorthand, asking for text. The clip is no property kept here: a dark frame could not read such text. */
+function asksClipToText(part: string): boolean {
+  const colon = part.indexOf(":");
+  const prop = part.slice(0, colon).trim().toLowerCase();
+  if (colon <= 0 || (prop !== "background" && prop !== "background-clip" && prop !== "-webkit-background-clip")) return false;
+  return /\btext\b/i.test(part.slice(colon + 1).replace(/url\([^)]*\)/gi, ""));
+}
+
 /** An inline style or a rule's block, as it may stay: `a:b;c:d`, or "" when nothing does. */
 export function cleanDeclarations(css: string, image: ImageCheck = noImages): string {
   const out: string[] = [];
-  for (const part of splitDeclarations(stripComments(css))) {
+  const parts = splitDeclarations(stripComments(css));
+  const clipped = parts.some(asksClipToText);
+  for (const part of parts) {
     const colon = part.indexOf(":");
     if (colon <= 0 || colon > 64) continue;
     const prop = part.slice(0, colon).trim().toLowerCase();
     if (!PROPERTIES.has(prop)) continue;
+    // Words drawn by their background: without the clip they would be a bar, or nothing. They fall back to a plain readable colour.
+    if (clipped && (prop.startsWith("background") || (prop === "color" && CLEAR_COLOR.test(part.slice(colon + 1))))) continue;
     const limit = FONT_PROPERTIES.has(prop) ? MAX_FONT_NUMBER : SHADOW_PROPERTIES.has(prop) ? MAX_SHADOW_NUMBER : MAX_NUMBER;
     const value = cleanValue(part.slice(colon + 1), IMAGE_PROPERTIES.has(prop) ? image : noImages, limit);
     if (value === null) continue;
@@ -202,7 +222,7 @@ export function declarationsOf(cleaned: string): [string, string][] {
   });
 }
 
-// Tags, classes, ids, descendants, the plain pseudo classes. No [attr], no functions, no escapes.
+// Tags, classes, ids, descendants, the plain pseudo classes. No [attr], no functions, no escapes, no pseudo elements.
 const SELECTOR = /^[A-Za-z0-9_\-#.>+~*: ]+$/;
 const cleanSelector = (s: string) => s.replace(/\s+/g, " ").trim();
 const MEDIA_QUERY = /^[A-Za-z0-9 ():,.\-/]+$/;
@@ -265,6 +285,8 @@ export function cleanStylesheet(css: string, image: ImageCheck = noImages, nesti
       if (inner) rules.push(`@media ${query}{${inner}}`);
       continue;
     }
+    // Nor a pseudo element: its colour is not the element's, so a dark frame cannot read it. The whole rule goes: a browser ignores all of a list with one it does not know, and the rest of it must not come alive here.
+    if (/::|:first-(?:line|letter)|:before|:after/i.test(prelude)) continue;
     const selectors = prelude.split(",").map(cleanSelector).filter((x) => x && SELECTOR.test(x) && !/:visited/i.test(x));
     if (!selectors.length) continue;
     // A pseudo class loads what it names only when it comes true: a beacon. Only plain rules load images.

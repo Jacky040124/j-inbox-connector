@@ -15,6 +15,7 @@ import {
   emailFrameClose,
   emailFrameCsp,
   emailFrameFailure,
+  emailFrameFragment,
   emailFrameHeaders,
   emailFrameOpen,
   emailFramePath,
@@ -27,6 +28,7 @@ import {
   parseEmailFrameMessage,
   surfaceForPath,
 } from "../src/index.ts";
+import { EMAIL_FRAME_DARK_SOURCE } from "../src/email-frame-dark.ts";
 
 const TICKET = "A".repeat(43);
 const NONCE = "bm9uY2Utbm9uY2Utbm9uY2U";
@@ -80,6 +82,36 @@ describe("the frame's document", () => {
     expect(open).toContain('byId("end-mark-1")');
     expect(open).toContain("e.isTrusted");
   });
+  test("the script is real JS, and nothing in it can end its element or open a comment", () => {
+    const script = open.slice(open.indexOf(">", open.indexOf("<script")) + 1, -"</script>".length);
+    expect(() => new Function(script)).not.toThrow();
+    expect(script).not.toContain("</");
+    expect(script).not.toContain("<!--");
+    expect(EMAIL_FRAME_DARK_SOURCE).not.toMatch(/[`\\]|\$\{/);
+  });
+  test("only the exact flag asks for dark, its token apart; the document is the same for both, as no server knows the mode", () => {
+    expect(emailFrameFragment("tok", true)).toBe("tok.d");
+    expect(emailFrameFragment("tok", false)).toBe("tok");
+    expect(open).toContain('F=location.hash.slice(1).split("."),T=F[0],D=F.length===2&&F[1]==="d"');
+  });
+  test("what is decided in the frame is said before it is measured", () => {
+    expect(open).toContain('function go(){var L=dress();if(L)send({type:"look",look:L});fit();');
+    // Without the flag, in that handler and at once, as it ever was.
+    expect(open).toContain("if(!D||w.innerWidth)return go();");
+    expect(open.indexOf('var L=dress()')).toBeGreaterThan(open.indexOf('byId("end-mark-1")'));
+  });
+  test("the dark code is in the document only when there is an email to dress: all it holds is held before one", () => {
+    expect(open).toContain("gcs=w.getComputedStyle.bind(w)");
+    expect(open.indexOf("gcs=")).toBeLessThan(open.indexOf("</script>"));
+    expect(emailFrameFailure({ nonce: NONCE, code: "NOT_FOUND", appOrigin: "https://inbox.example" })).not.toContain("gcs=");
+  });
+  test("no new way out: nothing in the dark code reaches for the network but a picture already in the email", () => {
+    expect(EMAIL_FRAME_DARK_SOURCE).not.toMatch(/fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon|location\.|\.open\(|\beval\b|Function\(|\bparent\b|\btop\.|opener/);
+    expect(EMAIL_FRAME_DARK_SOURCE.match(/new Pic\(\)/g)).toHaveLength(1);
+    expect(EMAIL_FRAME_DARK_SOURCE).toContain("var s=e.currentSrc||e.src");
+    expect(EMAIL_FRAME_DARK_SOURCE).toContain("a.src=s");
+    expect(EMAIL_FRAME_DARK_SOURCE.match(/\.src=/g)).toHaveLength(1);
+  });
   test("a failure says its code, cleaned, and carries no marker", () => {
     const f = emailFrameFailure({ nonce: NONCE, code: 'TOO_LARGE"><img src=x>', appOrigin: "https://inbox.example" });
     expect(f).toContain('code:"TOO_LARGE"');
@@ -105,6 +137,12 @@ describe("what the parent believes", () => {
     expect(parseEmailFrameMessage(msg({ type: "height", height: 412.2 }), T)).toEqual({ type: "height", height: 413 });
     expect(parseEmailFrameMessage(msg({ type: "fail", code: "NOT_FOUND" }), T)).toEqual({ type: "fail", code: "NOT_FOUND" });
     expect(parseEmailFrameMessage(msg({ type: "key", key: "j", code: "KeyJ", shiftKey: true }), T)).toEqual({ type: "key", init: { key: "j", code: "KeyJ", repeat: false, metaKey: false, ctrlKey: false, altKey: false, shiftKey: true, bubbles: true, cancelable: true } });
+  });
+  test("the look: one of three, and nothing else of the message", () => {
+    for (const look of ["dark", "own", "paper"]) expect(parseEmailFrameMessage(msg({ type: "look", look, url: "https://evil.example" }), T)).toEqual({ type: "look", look } as never);
+    for (const look of ["DARK", "light", "", null, undefined, 1, {}, ["dark"], "paper "]) expect(parseEmailFrameMessage(msg({ type: "look", look }), T)).toBeNull();
+    expect(parseEmailFrameMessage({ type: "look", look: "dark" }, T)).toBeNull();
+    expect(parseEmailFrameMessage(msg({ type: "look", look: "dark" }, "other"), T)).toBeNull();
   });
   test("a wrong or missing token is nothing, and no token is never a match", () => {
     expect(parseEmailFrameMessage(msg({ type: "ready" }, "other"), T)).toBeNull();

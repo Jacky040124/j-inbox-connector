@@ -64,6 +64,42 @@ function hazards(out: string): string[] {
   return found;
 }
 
+describe("what a dark frame could not read", () => {
+  test("words drawn by their background fall back to a plain readable colour, however it is asked, in a style or a sheet", () => {
+    const g = "linear-gradient(90deg,#f00,#00f)";
+    for (const ask of [`background:${g};background-clip:text;color:transparent`, `background:${g};-webkit-background-clip:text;-webkit-text-fill-color:transparent;color:transparent`, `background:${g} text;color:transparent`, `background:${g}text;color:transparent`, `background:${g} text,transparent;color:transparent`, `background-image:${g};background-color:#fff;background-clip:TEXT;color:rgba(0,0,0,0)`]) {
+      expect(cleanDeclarations(`font-size:30px;${ask}`)).toBe("font-size:30px");
+      expect(cleanStylesheet(`h1{font-size:30px;${ask}}`)).toBe("h1{font-size:30px}");
+    }
+    expect(sanitizeEmailHtml(`<h1 style="background:${g};background-clip:text;color:transparent">WORDS</h1>`)).toBe("<h1>WORDS</h1>");
+    // A colour of its own stays; other backgrounds, a picture named text, another clip are nothing to do with it.
+    expect(cleanDeclarations("background-clip:text;background:#111;color:red")).toBe("color:red");
+    expect(cleanDeclarations("background:#fff;background-origin:border-box;color:transparent")).toBe("background:#fff;background-origin:border-box;color:transparent");
+    expect(cleanDeclarations("background:#fff;background-clip:padding-box")).toBe("background:#fff");
+    const image = (u: string) => u;
+    expect(cleanDeclarations('background:url("https://a.example/text.png")', image)).toBe('background:url("https://a.example/text.png")');
+  });
+  test("a pseudo element's rule goes, and with it all of its list: a browser ignores a list with one it does not know", () => {
+    for (const sel of ["p::first-line", "p:first-line", "p::first-letter", "P:FIRST-LETTER", "li::marker", "a::before", "a:after", "p::selection", "p::-moz-foo,.y", ".y,p::first-line"]) expect(cleanStylesheet(`${sel}{display:none}`)).toBe("");
+    expect(cleanStylesheet("a:hover{color:#000}p{color:#111}")).toBe("a:hover{color:#000}p{color:#111}");
+  });
+});
+
+describe("hex colours", () => {
+  test("a colour written in digits is a colour, not a number past the limit: dark backgrounds must not vanish and leave light text on white", () => {
+    for (const c of ["#111111", "#121212", "#333333", "#12e456", "#000000", "#123", "#12345678", "#abcdef"]) expect(cleanDeclarations(`background:${c};color:${c}`)).toBe(`background:${c};color:${c}`);
+    expect(sanitizeEmailHtml('<div style="background:#111111;color:#ffffff">x</div>')).toContain("background:#111111");
+  });
+
+  test("what follows a # is hex or the declaration goes", () => {
+    for (const v of ["#xyz", "#12", "#123456789", "#12vh"]) expect(cleanDeclarations(`color:${v}`)).toBe("");
+  });
+
+  test("numbers are still limited", () => {
+    expect(cleanDeclarations("width:999999px")).toBe("");
+  });
+});
+
 describe("the hostile corpus", () => {
   for (const c of HOSTILE_EMAILS) {
     test(c.name, () => {

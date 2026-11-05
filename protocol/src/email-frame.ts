@@ -4,7 +4,9 @@
 // no cookie, no storage, no parent. The frame is a real URL with its own policy (a srcdoc or blob
 // frame would inherit the app's), reached by a ticket: POST by the logged-in page, GET once.
 // The cloud passes the bytes through and keeps none. Everything here runs in Workers and browsers.
-// No schema here: dist/email-frame.js (the page's frame code) imports this file and nothing else of the protocol.
+// No schema here: dist/email-frame.js (the page's frame code) imports this file and nothing else of the protocol; of
+// email-frame-dark.ts, which is only the Worker's to serve, it keeps nothing.
+import { EMAIL_FRAME_DARK_SOURCE } from "./email-frame-dark.ts";
 
 /** Where the frame lives; the app's frame-src names exactly this path (appHtmlHeaders). */
 export const EMAIL_FRAME_PATH = "/email-frame/";
@@ -28,6 +30,8 @@ export const EMAIL_FRAME_SANDBOX = "allow-scripts allow-popups allow-popups-to-e
 export const EMAIL_FRAME_TICKET_RE = /^[A-Za-z0-9_-]{43}$/;
 export const isEmailFrameTicket = (t: unknown): t is string => typeof t === "string" && EMAIL_FRAME_TICKET_RE.test(t);
 export const emailFramePath = (ticket: string): string => EMAIL_FRAME_PATH + ticket;
+/** The frame URL's fragment: the parent's token, and whether to make the email dark. A fragment reaches no server, which cannot know the mode. */
+export const emailFrameFragment = (token: string, dark: boolean): string => (dark ? `${token}.d` : token);
 /** The ticket in a frame URL's path, or null. */
 export function emailFrameTicketOf(pathname: string): string | null {
   const t = pathname.startsWith(EMAIL_FRAME_PATH) ? pathname.slice(EMAIL_FRAME_PATH.length) : "";
@@ -51,6 +55,14 @@ export function emailFrameHeaders(nonce: string): Record<string, string> {
   };
 }
 
+/**
+ * Sandboxed, the frame can be in a process of its own, and then a quick document is done before it has a size: 0 wide, so the narrowest of the
+ * email's @media rules. A dark frame reads colours under those rules, so it waits for its size, this long at most, by the clock: a hidden tab's timers
+ * run once a second. By looking, as a frame hidden until ready gets no resize event: Chromium sends those with a frame it draws.
+ */
+const SIZE_WAIT_MS = 300;
+const SIZE_POLL_MS = 10;
+
 const FRAME_STYLE =
   ":root{color-scheme:light}html{background:#fff}body{font:14px/1.5 Arial,Helvetica,sans-serif;color:#202124;overflow-wrap:break-word}img{max-width:100%;height:auto}a{color:#1a56c4}" +
   "details.jinbox-quote>summary{list-style:none;display:inline-block;margin:8px 0;padding:0 8px;border-radius:9px;background:#e8eaed;color:#5f6368;font-size:12px;line-height:18px;letter-spacing:1px;cursor:pointer}details.jinbox-quote>summary::-webkit-details-marker{display:none}";
@@ -62,15 +74,15 @@ const FRAME_STYLE =
  * forwards keys (Space on a fold or a link is that thing's own). Everything it says goes down a channel it made before any of the
  * email existed: the port stays in this closure, so even a script that had got in, knowing the token, could not say a thing on it. A place
  * in the email is the page's to scroll to, as the frame is as tall as the email. The parent's token comes in the URL's fragment, which reaches no server and no
- * page this frame could be sent to. Done means the marker with this response's own id arrived after the
+ * page this frame could be sent to, and with it the one flag for dark mode (email-frame-dark.ts). Done means the marker with this response's own id arrived after the
  * email: a stream cut short, or markup that swallowed the end, is not done and the page shows the text.
  */
 function frameScript(appOrigin: string, endMark: string, fail?: string): string {
   const failed = fail ? `send({type:"fail",code:${JSON.stringify(fail)}});return;` : "";
-  return `(function(){var d=document,w=window,h=d.documentElement,b=d.body,T=location.hash.slice(1),byId=d.getElementById.bind(d),last=-1,queued=0,told=0,c=new MessageChannel(),post=c.port1.postMessage.bind(c.port1);
+  return `(function(){var d=document,w=window,h=d.documentElement,b=d.body,F=location.hash.slice(1).split("."),T=F[0],D=F.length===2&&F[1]==="d",byId=d.getElementById.bind(d),last=-1,queued=0,told=0,loaded=0,c=new MessageChannel(),post=c.port1.postMessage.bind(c.port1);
 w.parent.postMessage({jinboxEmail:T,type:"hello"},${JSON.stringify(appOrigin)},[c.port2]);
 function send(m){m.jinboxEmail=T;post(m)}
-${failed}function set(e,k,v){e.style.setProperty(k,v,"important")}
+${failed}function set(e,k,v){e.style.setProperty(k,v,"important")}${fail ? "" : EMAIL_FRAME_DARK_SOURCE}
 set(h,"height","auto");set(h,"min-height","0");set(h,"overflow-y","hidden");set(b,"height","auto");set(b,"min-height","0");set(b,"margin","0");set(b,"display","flow-root");
 function fit(){queued=0;set(b,"zoom","1");var W=h.clientWidth,S=h.scrollWidth,z=S>W+1?Math.max(${EMAIL_FRAME_MIN_ZOOM},W/S):1;if(z!==1)set(b,"zoom",String(z));set(h,"overflow-x",S*z>W+1?"auto":"hidden");
 var H=Math.ceil(h.getBoundingClientRect().height);set(h,"overflow-y",H>${EMAIL_FRAME_MAX_HEIGHT}?"auto":"hidden");if(H!==last){last=H;send({type:"height",height:H})}}
@@ -79,8 +91,10 @@ if(w.ResizeObserver){var r=new ResizeObserver(later);r.observe(b);r.observe(h)}
 w.addEventListener("resize",later);d.addEventListener("load",later,true);d.addEventListener("error",later,true);
 d.addEventListener("click",function(e){var t=e.target,a=t&&t.closest&&t.closest('a[href^="#"]');if(!a)return;e.preventDefault();var n=a.getAttribute("href").slice(1),g=byId(n)||h.querySelector('a[name="'+n+'"]');if(g)send({type:"place",top:g.getBoundingClientRect().top})},true);
 d.addEventListener("keydown",function(e){if(!e.isTrusted)return;var t=e.target;if(e.key===" "&&t&&t.closest&&t.closest("summary,a"))return;send({type:"key",key:e.key,code:e.code,repeat:e.repeat,metaKey:e.metaKey,ctrlKey:e.ctrlKey,altKey:e.altKey,shiftKey:e.shiftKey})},true);
-d.addEventListener("DOMContentLoaded",function(){if(!byId(${JSON.stringify(endMark)}))return send({type:"fail",code:"INCOMPLETE"});fit();function ready(){if(!told){told=1;fit();send({type:"ready"})}}
-setTimeout(ready,900);w.addEventListener("load",ready)})})()`;
+w.addEventListener("load",function(){loaded=1});
+d.addEventListener("DOMContentLoaded",function(){if(!byId(${JSON.stringify(endMark)}))return send({type:"fail",code:"INCOMPLETE"});function go(){var L=dress();if(L)send({type:"look",look:L});fit();function ready(){if(!told){told=1;fit();send({type:"ready"})}}
+setTimeout(ready,900);if(loaded)ready();else w.addEventListener("load",ready)}
+if(!D||w.innerWidth)return go();var since=Date.now();(function sized(){if(w.innerWidth||Date.now()-since>=${SIZE_WAIT_MS})go();else setTimeout(sized,${SIZE_POLL_MS})})()})})()`;
 }
 
 /**
@@ -103,7 +117,9 @@ export function emailFrameFailure(o: { nonce: string; code: string; appOrigin: s
 }
 
 export type EmailFrameKey = { key: string; code: string; repeat: boolean; metaKey: boolean; ctrlKey: boolean; altKey: boolean; shiftKey: boolean; bubbles: true; cancelable: true };
-export type EmailFrameMessage = { type: "hello" } | { type: "place"; top: number } | { type: "ready" } | { type: "height"; height: number } | { type: "fail"; code: string } | { type: "key"; init: EmailFrameKey };
+/** What a dark frame made of its email: dark in place, the sender's own dark version, or the white paper of old. */
+export type EmailFrameLook = "dark" | "own" | "paper";
+export type EmailFrameMessage = { type: "hello" } | { type: "place"; top: number } | { type: "ready" } | { type: "height"; height: number } | { type: "fail"; code: string } | { type: "key"; init: EmailFrameKey } | { type: "look"; look: EmailFrameLook };
 
 const short = (v: unknown, max: number): v is string => typeof v === "string" && v.length <= max;
 
@@ -126,6 +142,8 @@ export function parseEmailFrameMessage(data: unknown, token: string): EmailFrame
     case "height":
       if (typeof m.height !== "number" || !Number.isFinite(m.height)) return null;
       return { type: "height", height: Math.min(EMAIL_FRAME_MAX_HEIGHT, Math.max(EMAIL_FRAME_MIN_HEIGHT, Math.ceil(m.height))) };
+    case "look":
+      return m.look === "dark" || m.look === "own" || m.look === "paper" ? { type: "look", look: m.look } : null;
     case "fail":
       return short(m.code, 32) ? { type: "fail", code: m.code } : null;
     case "key":
