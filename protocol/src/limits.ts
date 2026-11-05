@@ -57,6 +57,8 @@ export const MAX_ATTACHMENTS_PER_MESSAGE = 20;
 export const MAX_REACTIONS_PER_MESSAGE = 50;
 export const MAX_EVENT_IDS = 100;
 export const MAX_SEARCH_LIMIT = 20;
+/** To do's first run takes a source's unread chats active this many days before it was first seen (the owner's decision, 2026-11-05). */
+export const TODO_FIRST_RUN_DAYS = 7;
 
 /** Pairing (device-code flow). */
 export const PAIRING_CODE_TTL_SECONDS = 600;

@@ -33,12 +33,16 @@ export type FakeGoogleOptions = {
   /** Redirect URIs for the default client (FAKE_GOOGLE_CLIENT). */
   redirectUris?: string[];
   now?: () => number;
+  /** The fixture mailboxes' "now" (default GMAIL_FIXTURE_NOW, a fixed date): a test whose connector goes by the real clock passes Date.now(). */
+  fixtureNow?: number;
 };
 
 export type FailRule = {
   method?: string;
   /** Matches when the path starts with this string (or matches this RegExp). */
   path?: string | RegExp;
+  /** And the query string matches this (a later page: /pageToken=/). */
+  search?: RegExp;
   status?: number;
   /** JSON body (default: Google's error shape for the status). */
   body?: unknown;
@@ -49,7 +53,10 @@ export type FailRule = {
   times?: number;
 };
 
-export type RequestLog = { method: string; path: string; status: number; email: string | null; grant?: string; /** One call inside a POST /batch/gmail/v1 (logged after it). */ inBatch?: true };
+export type RequestLog = { method: string; path: string; /** Its Gmail search, if it had one. */ q?: string; status: number; email: string | null; grant?: string; /** One call inside a POST /batch/gmail/v1 (logged after it). */ inBatch?: true };
+
+/** threads.list's resultSizeEstimate on a page with more after it, as real Gmail said it on 2026-11-05 (README). */
+const THREADS_ESTIMATE_MORE_PAGES = 201;
 
 /** Gmail refuses a batch of more calls than this (400). */
 export const GMAIL_BATCH_MAX = 100;
@@ -139,8 +146,8 @@ export class FakeGoogle {
   /** Fixture mailboxes (owner@example.com, other@example.com), no tokens, no rules, clock back to real time. */
   reset() {
     this.mailboxes = new Map([
-      [OWNER_EMAIL, buildMailbox()],
-      [OTHER_EMAIL, buildOtherMailbox()],
+      [OWNER_EMAIL, buildMailbox(undefined, undefined, this.opts.fixtureNow)],
+      [OTHER_EMAIL, buildOtherMailbox(this.opts.fixtureNow)],
     ]);
     this.codes.clear();
     this.refresh.clear();
@@ -251,7 +258,7 @@ export class FakeGoogle {
   private async handle(req: Request, inBatch: boolean): Promise<Response> {
     const url = new URL(req.url);
     const path = url.pathname;
-    const rule = this.rules.find((r) => (!r.method || r.method === req.method) && (!r.path || (typeof r.path === "string" ? path.startsWith(r.path) : r.path.test(path))) && (r.times ?? 1) > 0);
+    const rule = this.rules.find((r) => (!r.method || r.method === req.method) && (!r.path || (typeof r.path === "string" ? path.startsWith(r.path) : r.path.test(path))) && (!r.search || r.search.test(url.search)) && (r.times ?? 1) > 0);
     if (rule) {
       rule.times = (rule.times ?? 1) - 1;
       this.rules = this.rules.filter((r) => (r.times ?? 1) > 0);
@@ -267,7 +274,8 @@ export class FakeGoogle {
     }
     // One wait per HTTP request: the calls inside a batch share the batch's.
     if (this.latencyMs && !inBatch) await new Promise((r) => setTimeout(r, this.latencyMs));
-    const log: RequestLog = { method: req.method, path, status: 0, email: null, ...(inBatch ? { inBatch: true as const } : {}) };
+    const q = url.searchParams.get("q");
+    const log: RequestLog = { method: req.method, path, ...(q !== null ? { q } : {}), status: 0, email: null, ...(inBatch ? { inBatch: true as const } : {}) };
     let res: Response;
     try {
       res = await this.route(req, url, log);
@@ -542,7 +550,8 @@ export class FakeGoogle {
         const last = box.thread(id).at(-1)!;
         return { id, snippet: snippet(last), historyId: String(box.historyId) };
       });
-      return json({ ...(threads.length ? { threads } : {}), ...(pg.next ? { nextPageToken: pg.next } : {}), resultSizeEstimate: ids.length });
+      // As Gmail's, measured (README): no count of the whole list. 201 on any page with more after it, whatever the true size; on the last, what that page holds.
+      return json({ ...(threads.length ? { threads } : {}), ...(pg.next ? { nextPageToken: pg.next } : {}), resultSizeEstimate: pg.next ? THREADS_ESTIMATE_MORE_PAGES : threads.length });
     }
 
     if ((m = /^threads\/([^/]+)$/.exec(rest)) && req.method === "GET") {

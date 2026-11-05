@@ -7,14 +7,22 @@
 // chat To do, only if it is later than both. So a chat the store has never heard of is handled unless someone
 // wrote after `since`, and most chats need no entry at all: nothing has to load every chat (see tracker.ts for the
 // first run, which finds what was unread at that moment).
+//
+// A source also has a `cut`, TODO_FIRST_RUN_DAYS before it was first seen, written with it and never moved (`since` can be lifted by
+// eviction, so nothing is worked out from it): what its first run makes To do is what is unread and was active since then. What is
+// older is left out until the owner adds it (`older`), and how many that is was counted by the first run (`olderLeft`). A source whose first run ended before there was a cut has none, and keeps none: nothing was left out of it.
+//
+// A source removed in this run stays out of the store until something that knows the account is live asks for it (`meet`): what was still in flight when it was removed changes nothing.
 import { createHash } from "node:crypto";
 import { readFileSync, renameSync } from "node:fs";
-import { chatID as chatIDSchema, parse, parseGmailChatID, type ChatSummary, type MessageItem } from "@j-inbox/protocol";
+import { TODO_FIRST_RUN_DAYS, chatID as chatIDSchema, parse, parseGmailChatID, type ChatSummary, type MessageItem } from "@j-inbox/protocol";
 import { writeAtomic } from "../config.ts";
 
 export const MAX_TODO_ENTRIES = 5000;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const MAX_SOURCES = 64;
+/** Handled chats per source a later Add older unread must not bring back, as short hashes: the oldest go first. */
+const MAX_FORGOT = MAX_TODO_ENTRIES;
 /** What observations wait before they go to disk: a burst is one write, and what a crash loses is seen again on the next start. */
 const WRITE_DELAY_MS = 1_000;
 /** Messages per chat whose ids are remembered, as short hashes: the same one seen again is not new, whatever its clock says. */
@@ -27,6 +35,7 @@ const SYNC_MARGIN_MS = 60_000;
 const READ_RACE_MS = 30_000;
 /** Two NOT_FOUND answers count only this far apart: one moment of a source's trouble is not a chat gone. */
 export const GONE_APART_MS = 10 * 60_000;
+const FIRST_RUN_WINDOW_MS = TODO_FIRST_RUN_DAYS * 24 * 3_600_000;
 
 export const BEEPER_SOURCE = "beeper";
 /** Which source a chat belongs to: its Gmail account, or Beeper. */
@@ -70,6 +79,14 @@ type SourceState = {
   synced: number;
   /** To do chats had to be left out to stay within the bound: said to the owner until there is room again. */
   full?: boolean;
+  /** Epoch ms: the first run leaves out unread chats whose activity is older than this. One instant, set once. Absent: a first run finished before this rule, which left nothing out. */
+  cut?: number;
+  /** The owner's "Add older unread": asked for (the walk resumes after a restart), or finished, which is for good. */
+  older?: "asked" | "added";
+  /** Short hashes of handled chats that went for the bound while an older walk could still come, each once: it must not bring them back. Goes when that walk is over. */
+  forgot?: string[];
+  /** About this many older unread are left out: what the first run counted (tracker.ts), written with `done`, less what an older walk has taken in. Goes when a walk reaches its end. Absent: not known, the first run not being over or having ended before it counted. */
+  olderLeft?: number;
 };
 
 /** What a chat says about the newest message from someone else: when (null: nothing), whether that is all there is to know, and which messages those are. */
@@ -106,6 +123,10 @@ const ms = (iso: string | null | undefined) => {
   return Number.isFinite(t) ? t : 0;
 };
 const isTime = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 0;
+const cutOf = (firstSeen: number) => Math.max(0, firstSeen - FIRST_RUN_WINDOW_MS);
+const isUnread = (c: ChatSummary) => c.unreadCount > 0 || c.isMarkedUnread === true;
+/** Older than the source's cut, by a time known (0: not known, which is never hidden). */
+const beforeCut = (s: SourceState, at: number) => s.cut !== undefined && at !== 0 && at < s.cut;
 const idHash = (id: string) => createHash("sha256").update(id).digest("base64url").slice(0, 12);
 const knows = (e: TodoEntry | undefined, id: string | undefined) => id !== undefined && !!e?.ids?.includes(idHash(id));
 function remember(e: TodoEntry, ids: readonly (string | undefined)[]): boolean {
@@ -131,6 +152,8 @@ export class TodoStore {
   private dirty = false;
   /** The file is of a version this build does not know, or could not be read: it is left as it is, and To do goes on in memory. */
   private frozen = false;
+  /** Sources forgotten in this run: nothing makes them known again but `meet`. Not on disk: a restart has nothing in flight. */
+  private removed = new Set<string>();
   private readonly now: () => number;
   private readonly max: number;
   /** A To do chat had to leave for the bound (the tracker tells open pages). */
@@ -146,12 +169,12 @@ export class TodoStore {
     this.o.log?.(msg);
   }
 
-  /** What a damaged file held is not known any more: it is put aside, and the first run finds what is unread again (read chats' To do cannot be found again: it is said). */
+  /** What a damaged file held is not known any more: it is put aside, and the first run starts again with a new cut, finding what is unread and active since (read chats' To do cannot be found again: it is said). */
   private setAside(path: string, why: string) {
     const aside = `${path}.corrupt-${this.now()}`;
     try {
       renameSync(path, aside);
-      this.log(`todo: the To do file could not be read (${why}). Kept as ${aside}; what is unread becomes To do again.`);
+      this.log(`todo: the To do file could not be read (${why}). Kept as ${aside}; its first run starts again: what is unread and active in the last ${TODO_FIRST_RUN_DAYS} days becomes To do, older unread can be added in Settings.`);
     } catch {
       this.frozen = true;
       this.log(`todo: the To do file could not be read (${why}), nor moved aside. It is left as it is; To do is in memory only until this is fixed.`);
@@ -186,12 +209,21 @@ export class TodoStore {
     }
     if (!Array.isArray(j.sources) || !Array.isArray(j.entries)) return this.setAside(path, "wrong shape");
     let skipped = 0;
+    let unset = false;
     for (const s of j.sources.slice(0, MAX_SOURCES)) {
       if (!Array.isArray(s) || typeof s[0] !== "string" || s[0].length > 400 || !s[1] || !isTime(s[1].since) || !isTime(s[1].synced)) {
         skipped++;
         continue;
       }
-      this.sources.set(s[0], { since: s[1].since, done: s[1].done === true, synced: s[1].synced, ...(s[1].full === true ? { full: true } : {}) });
+      const done = s[1].done === true;
+      // A first run under way when this rule came: its cut is set now, from the first sight it knows, and stays. One that is done has left nothing out and never gets one.
+      const cut = isTime(s[1].cut) ? s[1].cut : done ? undefined : cutOf(s[1].since);
+      const older = s[1].older === "asked" || s[1].older === "added" ? s[1].older : undefined;
+      if (cut !== s[1].cut && cut !== undefined) unset = true;
+      // Once each, in its last place (a file may hold copies), before the bound: a copy must not take a real one's room.
+      const forgot = cut !== undefined && older !== "added" && Array.isArray(s[1].forgot) ? [...new Set<string>(s[1].forgot.filter((h: unknown): h is string => typeof h === "string" && h.length <= 16).reverse())].reverse().slice(-MAX_FORGOT) : [];
+      const olderLeft = cut !== undefined && older !== "added" && isTime(s[1].olderLeft) ? s[1].olderLeft : undefined;
+      this.sources.set(s[0], { since: s[1].since, done, synced: s[1].synced, ...(s[1].full === true ? { full: true } : {}), ...(cut !== undefined ? { cut } : {}), ...(cut !== undefined && older ? { older } : {}), ...(forgot.length ? { forgot } : {}), ...(olderLeft !== undefined ? { olderLeft } : {}) });
     }
     for (const e of j.entries.slice(-this.max)) {
       const ok = cleanEntry(e);
@@ -200,6 +232,7 @@ export class TodoStore {
     }
     skipped += Math.max(0, j.entries.length - this.max);
     if (skipped) this.log(`todo: ${skipped} damaged or surplus records in the To do file were left out.`);
+    if (unset) this.later();
   }
 
   private save() {
@@ -234,7 +267,7 @@ export class TodoStore {
     let s = this.sources.get(key);
     if (!s) {
       const at = this.now();
-      s = { since: heard !== undefined ? Math.min(at, heard - 1) : at, done: false, synced: at };
+      s = { since: heard !== undefined ? Math.min(at, heard - 1) : at, done: false, synced: at, cut: cutOf(at) };
       this.sources.set(key, s);
       try {
         this.save();
@@ -243,20 +276,30 @@ export class TodoStore {
     return s;
   }
 
-  /** Make the source known now, if it is not (its first run starts from this moment). */
-  meet(key: string): { since: number; done: boolean; synced: number } {
-    const { since, done, synced } = this.source(key);
-    return { since, done, synced };
+  /** Make the source known now, if it is not (its first run starts from this moment). Only for one known to be live: a removed one comes back by this and nothing else. */
+  meet(key: string): { since: number; done: boolean; synced: number; cut?: number } {
+    this.removed.delete(key);
+    const { since, done, synced, cut } = this.source(key);
+    return { since, done, synced, ...(cut !== undefined ? { cut } : {}) };
   }
 
-  finishFirstRun(key: string) {
+  /** The source's cut as it stands, without making it known (a walk's check that what it set out for is still there). */
+  cutNow(key: string): number | undefined {
+    return this.sources.get(key)?.cut;
+  }
+
+  /** `olderLeft`: what its walk counted that the cut leaves out. */
+  finishFirstRun(key: string, olderLeft?: number) {
+    if (this.removed.has(key)) return;
     const s = this.source(key);
     if (s.done) return;
     s.done = true;
+    if (s.cut !== undefined && olderLeft !== undefined) s.olderLeft = olderLeft;
     this.later();
   }
 
   markSynced(key: string, at: number) {
+    if (this.removed.has(key)) return;
     const s = this.source(key);
     if (at > s.synced) (s.synced = at), this.later();
   }
@@ -279,7 +322,7 @@ export class TodoStore {
   /**
    * Over the bound. Fair per source: what goes is the largest source's. A handled chat first, whichever the source, since
    * all that can happen is that it comes back wrongly as To do: its source's `since` moves up, but only past what has been looked at, so nothing
-   * unseen is lost by it. Then a To do chat out of the inbox, then the oldest To do of the largest source. A To do that goes is logged, told to open pages
+   * unseen is lost by it, and an older walk still to come is told not to bring it back (`forgot`). Then a To do chat out of the inbox, then the oldest To do of the largest source. A To do that goes is logged, told to open pages
    * and said to the owner (todoFull); `since` does not move for it, so it comes back when next seen and there is room.
    */
   private evict(incoming: TodoEntry) {
@@ -312,6 +355,11 @@ export class TodoStore {
         const s = this.source(sourceOf(victim.chatID));
         const lifted = Math.min(victim.others, s.synced - SYNC_MARGIN_MS);
         if (lifted > s.since) s.since = lifted;
+        if (s.cut !== undefined && s.older !== "added") {
+          // Once each, the same chat again as the newest: it may go over and over (one with nothing from anyone, at every list), and must not push out a real Done.
+          const h = idHash(victim.chatID);
+          s.forgot = [...(s.forgot ?? []).filter((x) => x !== h), h].slice(-MAX_FORGOT);
+        }
         continue;
       }
       const s = this.source(sourceOf(victim.chatID));
@@ -327,9 +375,12 @@ export class TodoStore {
     return false;
   }
 
-  /** The owner made room: what was left out comes back as it is seen, so nothing more needs saying. */
+  /** There is room (the owner's Done, an account removed, an older walk over): what was left out comes back as it is seen (older unread: from Settings' line), so nothing more needs saying. Only To do chats fill the bound: a handled one makes way for any of them. */
   private roomAgain() {
-    if (!this.overflowed() || this.entries.size > this.max * 0.9) return;
+    if (!this.overflowed()) return;
+    let todo = 0;
+    for (const e of this.entries.values()) if (e.todo) todo++;
+    if (todo > this.max * 0.9) return;
     for (const s of this.sources.values()) delete s.full;
   }
 
@@ -339,6 +390,7 @@ export class TodoStore {
    */
   see(c: ChatSummary, fact: OthersFact = othersFact(c), o: { exactScope?: boolean } = {}): SeeResult {
     const exactScope = o.exactScope ?? true;
+    if (this.removed.has(sourceOf(c.id))) return { changed: false, needsRead: false };
     const s = this.source(sourceOf(c.id));
     const e = this.entries.get(c.id);
     const now = this.now();
@@ -352,8 +404,8 @@ export class TodoStore {
     const isNew = at !== null && !known && at > s.since && (at > (e?.others ?? 0) || (at === e?.others && fact.id !== undefined && !!e?.ids?.length && !e.screen));
     const needsRead = !fact.exact && activity > Math.max(s.since, e?.activity ?? 0);
     if (!e) {
-      // First sight, while the first run has not finished: the same rule it applies. Unread now, in the main inbox: To do.
-      const firstRun = !s.done && !archived && !low && (c.unreadCount > 0 || c.isMarkedUnread === true);
+      // First sight, while the first run has not finished: the same rule it applies. Unread now, in the main inbox, and active since the cut: To do.
+      const firstRun = !s.done && !archived && !low && isUnread(c) && !beforeCut(s, Math.max(activity, at ?? 0));
       const todo = isNew || firstRun;
       // Nothing to remember about a chat nobody wrote in since `since` and that is not To do: most chats.
       if (!todo && activity <= s.since && (at === null || at <= s.since)) return { changed: false, needsRead: false };
@@ -443,6 +495,7 @@ export class TodoStore {
   noteOthers(chatID: string, at: number, o: { low?: boolean; archived?: boolean; out?: boolean; ids?: readonly string[] } = {}): boolean {
     const now = this.now();
     const when = Math.min(at, now);
+    if (this.removed.has(sourceOf(chatID))) return false;
     const s = this.source(sourceOf(chatID), when);
     const e = this.entries.get(chatID);
     const ids = o.ids ?? [];
@@ -462,8 +515,97 @@ export class TodoStore {
 
   /** The first run found this thread unread in the main inbox. An entry already there is what happened since: it stands. */
   markUnreadAtFirstRun(chatID: string): boolean {
-    if (this.entries.has(chatID)) return false;
+    if (this.entries.has(chatID) || this.removed.has(sourceOf(chatID))) return false;
     return this.put({ chatID, todo: true, others: 0, activity: 0, archived: false, low: false, at: 0 });
+  }
+
+  /** Where a source's older unread stand: null when it has none to speak of (not met; its first run left nothing out; already added). */
+  olderOf(key: string): { cut: number; asked: boolean; done: boolean } | null {
+    const s = this.sources.get(key);
+    return s?.cut === undefined || s.older === "added" ? null : { cut: s.cut, asked: s.older === "asked", done: s.done };
+  }
+
+  /** Sources Add older unread is on its way for, whatever else can be said of them. */
+  olderAsked(): string[] {
+    return [...this.sources].filter(([, s]) => s.older === "asked").map(([key]) => key);
+  }
+
+  /** Something is known about this chat, here or (it went for the bound, handled) in its source's `forgot`: Add older unread leaves it as it is. */
+  heardOf(chatID: string): boolean {
+    return this.entries.has(chatID) || !!this.sources.get(sourceOf(chatID))?.forgot?.includes(idHash(chatID));
+  }
+
+  /** What Add older unread would bring in of a chat as a list shows it: nothing known about it, unread now, in the main inbox, last active before the cut. An unknown time is not older (the first run's rule takes it). */
+  isOlder(c: ChatSummary): boolean {
+    const s = this.sources.get(sourceOf(c.id));
+    if (!s || this.heardOf(c.id) || c.isArchived === true || c.isLowPriority === true || !isUnread(c)) return false;
+    const at = othersFact(c).at;
+    return beforeCut(s, Math.max(Math.min(ms(c.lastActivity), this.now()), Math.min(at ?? 0, this.now())));
+  }
+
+  /** The owner asked for the older unread: on disk before it is answered, so a restart goes on with it. Throws if it cannot be written. False: there is nothing to bring in. */
+  askOlder(key: string): boolean {
+    const s = this.sources.get(key);
+    if (s?.cut === undefined || s.older === "added") return false;
+    if (s.older === "asked") return true;
+    s.older = "asked";
+    try {
+      this.save();
+    } catch (err) {
+      delete s.older;
+      throw err;
+    }
+    return true;
+  }
+
+  /**
+   * Add older unread met this chat. What is known about it stands, so the owner's Done stays, gone for the bound or not. A handled chat makes room for it, as for any To do;
+   * another To do does not: older than anything here, it is what is left out. True: To do now. null: To do has filled the bound, and it is said (todoFull).
+   */
+  markOlder(chatID: string): boolean | null {
+    const key = sourceOf(chatID);
+    if (this.removed.has(key) || this.heardOf(chatID)) return false;
+    if (this.entries.size >= this.max && ![...this.entries.values()].some((e) => !e.todo)) {
+      const s = this.source(key);
+      if (!s.full) this.log(`todo: To do has reached its limit of ${this.max} chats; older ones of ${sourceKind(key)} are being left out, and the owner is told.`);
+      s.full = true;
+      this.later();
+      return null;
+    }
+    const kept = this.put({ chatID, todo: true, others: 0, activity: 0, archived: false, low: false, at: 0 });
+    // Only what it took: what the first run counted was neither known nor noise. Here, with the chat, so a restart in the middle of a walk loses neither.
+    const s = this.sources.get(key);
+    if (kept && s?.olderLeft) s.olderLeft--;
+    return kept;
+  }
+
+  /** No room for the rest: not asked any more, so the owner has the line again, and presses it once there is room. `rest`: what of its page the walk could not take, the least that is left, however low the number has come. */
+  releaseOlder(key: string, rest: number) {
+    const s = this.sources.get(key);
+    if (s?.older !== "asked") return;
+    delete s.older;
+    s.olderLeft = Math.max(rest, s.olderLeft ?? 0);
+    this.later();
+  }
+
+  /** About how many older unread are left out, if that is known. */
+  olderLeft(key: string): number | undefined {
+    return this.sources.get(key)?.olderLeft;
+  }
+
+  /** The older unread are in: for good, whatever is unread later. A source forgotten meanwhile stays forgotten. */
+  finishOlder(key: string) {
+    const s = this.sources.get(key);
+    if (!s || s.older === "added") return;
+    s.older = "added";
+    delete s.forgot;
+    delete s.olderLeft;
+    this.roomAgain();
+    try {
+      this.save();
+    } catch {
+      this.later();
+    }
   }
 
   /**
@@ -471,6 +613,7 @@ export class TodoStore {
    * `upTo`: for Done, the newest message on the owner's screen. If this computer knows something newer, the owner has not seen it: it stays To do.
    */
   setOwner(chatID: string, todo: boolean, o: { upTo?: number } = {}): boolean {
+    if (this.removed.has(sourceOf(chatID))) return false;
     const before = this.entries.get(chatID);
     if (!todo && before?.todo && o.upTo !== undefined && before.others > o.upTo) return true;
     const copy = before ? { ...before } : undefined;
@@ -591,10 +734,12 @@ export class TodoStore {
       }
   }
 
-  /** A Gmail account was removed: its chats and its first run go with it. */
+  /** A Gmail account was removed: its chats and its first run go with it, and what was in flight for it brings nothing back (`meet` does, when it is connected again). */
   forgetSource(key: string) {
     for (const id of [...this.entries.keys()]) if (sourceOf(id) === key) this.entries.delete(id);
     this.sources.delete(key);
+    this.removed.add(key);
+    this.roomAgain();
     try {
       this.save();
     } catch {}

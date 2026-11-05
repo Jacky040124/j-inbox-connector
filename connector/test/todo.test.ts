@@ -402,7 +402,8 @@ describe("the tracker with fake sources", () => {
     const gmail = { email: OWNER_EMAIL, threadIDs: async (_q: string, tok: string | null) => (asked.push(tok), tok === null ? { ids: ["a", "b"], next: "n" } : { ids: ["c"], next: null }), primaryPage: async () => ({ items: [], next: null }) };
     const t = new TodoTracker({ store: new TodoStore({ now: () => T0 }), gmail: () => [gmail], now: () => T0, pauseMs: { gmail: 0 } });
     await t.sync();
-    expect(asked).toEqual([null, "n"]);
+    // Unread since the cut, then all that is active since it, then the unread older than it.
+    expect(asked).toEqual([null, "n", null, "n", null, "n"]);
     expect(["a", "b", "c"].map((x) => t.store.isTodo(gmailChatID(OWNER_EMAIL, x)))).toEqual([true, true, true]);
     asked.length = 0;
     await t.sync();
@@ -462,8 +463,9 @@ const TOKEN = "jid_" + "T".repeat(43);
 let fb: FakeBeeper;
 let fg: RunningFakeGoogle;
 beforeAll(async () => {
-  fb = await startFakeBeeper();
-  fg = await startFakeGoogle();
+  // The connector goes by the real clock: the fixtures must be recent to it, or To do's first run leaves them out.
+  fb = await startFakeBeeper({ fixtureNow: Date.now() });
+  fg = await startFakeGoogle({ fixtureNow: Date.now() });
 });
 afterAll(() => {
   fb.stop();
@@ -476,8 +478,9 @@ afterEach(async () => {
   fg.google.reset();
 });
 
-type Booted = { cloud: FakeCloud; svc: Service; paths: ReturnType<typeof resolvePaths>; secrets: FileSecretStore; again: () => Promise<Service> };
+type Booted = { cloud: FakeCloud; svc: Service; paths: ReturnType<typeof resolvePaths>; secrets: FileSecretStore; again: () => Promise<Service>; startedAt: number };
 async function boot(): Promise<Booted> {
+  const startedAt = Date.now();
   const cloud = await startFakeCloud({ token: TOKEN, google: { url: fg.url, clientId: FAKE_GOOGLE_CLIENT.id, clientSecret: FAKE_GOOGLE_CLIENT.secret } });
   cleanup.push(() => cloud.stop());
   const paths = resolvePaths({ HOME: "/nonexistent", J_INBOX_CONFIG_DIR: mkdtempSync(join(tmpdir(), "jinbox-tsvc-")) });
@@ -493,7 +496,7 @@ async function boot(): Promise<Booted> {
     return svc;
   };
   const svc = await start();
-  return { cloud, svc, paths, secrets, again: start };
+  return { cloud, svc, paths, secrets, again: start, startedAt };
 }
 /** The first run over, Beeper's socket up. */
 async function settledService(b: Booted) {
@@ -528,8 +531,14 @@ describe("To do in the service", () => {
   test("the hello says todo.v1; every chat carries the flag; first run: what was unread in the main inbox is To do, nothing else", async () => {
     const b = await boot();
     expect((b.cloud.hello() as any).capabilities).toContain("todo.v1");
+    expect((b.cloud.hello() as any).capabilities).toContain("older-unread.v1");
     await settledService(b);
-    const unreadOnes = ((await b.cloud.req("list_chats", { inbox: "primary", unreadOnly: true, limit: 50 })).res.data as any).items.map((c: any) => c.id).sort();
+    const unread = ((await b.cloud.req("list_chats", { inbox: "primary", unreadOnly: true, limit: 50 })).res.data as any).items;
+    const recent = (c: any) => Date.parse(c.lastActivity) >= b.startedAt - 7 * 24 * 3_600_000;
+    const unreadOnes = unread.filter(recent).map((c: any) => c.id).sort();
+    expect(unreadOnes.length).toBeGreaterThan(0);
+    // Older unread are left out of To do, and stay unread and listed.
+    expect(unread.filter((c: any) => !recent(c)).length).toBeGreaterThan(0);
     expect((await todoIDs(b.cloud)).sort()).toEqual(unreadOnes);
     const all = ((await b.cloud.req("list_chats", { inbox: "primary", limit: 50 })).res.data as any).items;
     for (const c of all) expect(c.todo).toBe(unreadOnes.includes(c.id));
@@ -650,7 +659,9 @@ describe("To do in the service", () => {
     await settledService(b);
     const before = (await b.cloud.req("unread_summary", { limit: 1 })).res.data as any;
     const todo = (await b.cloud.req("unread_summary", { limit: 1, todo: true })).res.data as any;
-    expect(todo.totalUnreadChats).toBe(before.totalUnreadChats);
+    // Older unread stay unread and are left out of To do.
+    expect(todo.totalUnreadChats).toBe((await todoIDs(b.cloud)).length);
+    expect(todo.totalUnreadChats).toBeLessThan(before.totalUnreadChats);
     const id = CHAT_IDS.pinnedUnread;
     const chat = fb.state.chats.get(id)!;
     chat.unreadCount = 0;
@@ -699,6 +710,48 @@ describe("To do with Gmail in the service", () => {
     }
     expect(paged.sort()).toEqual([...ids].sort());
     expect(((await b.cloud.req("unread_summary", { limit: 1, todo: true })).res.data as any).totalUnreadChats).toBe(ids.length);
+  }, 30_000);
+
+  test("older unread through the whole service: left out, counted, added, on after a restart; Gmail and the cloud hear nothing of a message", async () => {
+    const b = await boot();
+    const old = fg.google.deliver(OWNER_EMAIL, { from: "A <a@example.com>", subject: "Old", text: "PRIVATE-OLD", at: Date.now() - 30 * 24 * 3_600_000 }).threadId;
+    const oldDone = fg.google.deliver(OWNER_EMAIL, { from: "A <a@example.com>", subject: "Old too", text: "PRIVATE-OLD", at: Date.now() - 40 * 24 * 3_600_000 }).threadId;
+    const rt = fg.google.issueRefreshToken(OWNER_EMAIL);
+    expect((await b.cloud.req("gmail_connect", { email: OWNER_EMAIL, refreshToken: rt })).res.ok).toBe(true);
+    await waitTodo(b, gmailChatID(OWNER_EMAIL, THREADS.lunch), true);
+    expect(await todoIDs(b.cloud)).not.toContain(gmailChatID(OWNER_EMAIL, old));
+    // Until its first run has ended the number is not known; then it is what that run counted, whatever is asked of Gmail after.
+    const older = async () => ((await b.cloud.req("get_older_unread", { source: "gmail" })).res.data as any).items;
+    for (let i = 0; i < 200 && (await older())[0]?.counting; i++) await Bun.sleep(50);
+    const items = await older();
+    expect(items.length).toBe(1);
+    expect(items[0].counting).toBe(false);
+    expect(items[0].count).toBeGreaterThanOrEqual(2);
+    expect((await b.cloud.req("set_todo", { chatID: gmailChatID(OWNER_EMAIL, oldDone), todo: false })).res.ok).toBe(true);
+    const writes = () => fg.google.requests.filter((r) => r.path.startsWith("/gmail/") && r.method !== "GET");
+    const written = writes().length;
+    expect((await b.cloud.req("add_older_unread", { source: `gmail:${OWNER_EMAIL}` })).res).toMatchObject({ ok: true, data: { adding: true } });
+    await b.svc.stop(500);
+    const second = await b.again();
+    await waitTodo(b, gmailChatID(OWNER_EMAIL, old), true);
+    expect(await todoIDs(b.cloud)).not.toContain(gmailChatID(OWNER_EMAIL, oldDone));
+    for (let i = 0; i < 100 && ((await b.cloud.req("get_older_unread", { source: "gmail" })).res.data as any).items.length; i++) await Bun.sleep(50);
+    expect(((await b.cloud.req("get_older_unread", { source: "gmail" })).res.data as any).items).toEqual([]);
+    expect(writes().length).toBe(written);
+    expect(JSON.stringify(b.cloud.events())).not.toContain("PRIVATE");
+    await second.stop(500);
+    expect(JSON.parse(readFileSync(b.paths.todoFile, "utf8")).sources.find((s: any) => s[0] === `gmail:${OWNER_EMAIL}`)[1].older).toBe("added");
+  }, 30_000);
+
+  test("the whole service: an account this computer does not have, with a source left on disk, starts a first run of its own", async () => {
+    const b = await boot();
+    await b.svc.stop(500);
+    const was = JSON.parse(readFileSync(b.paths.todoFile, "utf8"));
+    was.sources.push([`gmail:${OWNER_EMAIL}`, { since: Date.now() - 90 * 24 * 3_600_000, done: true, synced: Date.now() - 90 * 24 * 3_600_000 }]);
+    writeFileSync(b.paths.todoFile, JSON.stringify(was));
+    await b.again();
+    expect((await b.cloud.req("gmail_connect", { email: OWNER_EMAIL, refreshToken: fg.google.issueRefreshToken(OWNER_EMAIL) })).res.ok).toBe(true);
+    await waitTodo(b, gmailChatID(OWNER_EMAIL, THREADS.lunch), true);
   }, 30_000);
 
   test("a Done thread comes back with new mail, not with the owner's reply; a promotion stays out", async () => {

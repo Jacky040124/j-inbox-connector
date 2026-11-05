@@ -356,7 +356,8 @@ function chatSpecs(): ChatSpec[] {
 
 const SELF_ID = (a: BAccount) => `@${a.user.id}:${a.bridge.id}.localhost`;
 
-export function buildFixture(): Fixture {
+/** `now`: where the fixture world's clock stands, for tests against something that goes by the real one. */
+export function buildFixture(now: number = FIXTURE_NOW): Fixture {
   const assets = buildAssets();
   const chats: BChat[] = [];
   const messages = new Map<string, BMessage[]>();
@@ -376,7 +377,7 @@ export function buildFixture(): Fixture {
     const participants = { items: [...others, self].slice(0, 20), hasMore: big, total: big ? 250 : others.length + 1 };
 
     // Activity spreads back over ~60 days; earlier specs are more recent.
-    const lastMs = FIXTURE_NOW - idx * 3_600_000 * 7 - Math.floor(r() * 3_600_000);
+    const lastMs = now - idx * 3_600_000 * 7 - Math.floor(r() * 3_600_000);
     const msgs: BMessage[] = [];
     const total = spec.hostile ? Object.keys(HOSTILE_TEXTS).length + 2 : spec.media ? 8 : spec.messages;
     for (let m = 0; m < total; m++) {

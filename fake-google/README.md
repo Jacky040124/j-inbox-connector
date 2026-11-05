@@ -23,7 +23,7 @@ One origin serves everything (the real endpoints live on several Google hosts):
 | `POST /revoke` | `token=` (refresh or access): revokes the whole grant, its access tokens too; unknown: 400 `invalid_token` |
 | `GET /oauth2/v3/userinfo` | `sub`, `email`, `email_verified` |
 | `POST /batch/gmail/v1` | Gmail's batch endpoint: a `multipart/mixed` body of `application/http` parts (request line, headers), at most 100 (`GMAIL_BATCH_MAX`, else 400); each call runs as if sent alone (auth, fault rules, `requests` with `inBatch: true`), in order, the batch's `Authorization` for calls without one; the answer is `multipart/mixed` with one part per call, `Content-ID: <response-ID>`. `latencyMs` is paid once per batch |
-| `/gmail/v1/users/me/...` | `profile`, `threads` (list: `q`, `labelIds`, `maxResults` 1-500, `pageToken`, `includeSpamTrash`; newest activity first, drafts do not count as activity), `threads/{id}` (`format=full|metadata|minimal`, `metadataHeaders`), `threads/{id}/modify`, `messages` (list), `messages/{id}`, `messages/{id}/modify`, `messages/{id}/attachments/{id}`, `messages/send`, `drafts` (create), `history` (`startHistoryId`, `historyTypes`, `labelId`; 404 when older than the kept history). Bearer access token of that user with the `gmail.modify` scope (read-only scope: GETs only), else 401/403 in Google's error shape |
+| `/gmail/v1/users/me/...` | `profile`, `threads` (list: `q`, `labelIds`, `maxResults` 1-500, `pageToken`, `includeSpamTrash`; newest activity first, drafts do not count as activity; `resultSizeEstimate` as measured against real Gmail on 2026-11-05: 201 on a page with more pages after it, whatever the true size of the list (755, 799 and 4000+ were seen), and on the last page what that page holds. It is no count of a list), `threads/{id}` (`format=full|metadata|minimal`, `metadataHeaders`), `threads/{id}/modify`, `messages` (list), `messages/{id}`, `messages/{id}/modify`, `messages/{id}/attachments/{id}`, `messages/send`, `drafts` (create), `history` (`startHistoryId`, `historyTypes`, `labelId`; 404 when older than the kept history). Bearer access token of that user with the `gmail.modify` scope (read-only scope: GETs only), else 401/403 in Google's error shape |
 
 Gmail realism: payload trees (`multipart/mixed` > `multipart/alternative` > text parts; files by
 `attachmentId`), bodies in their declared charset (UTF-8 or ISO-8859-1), RFC 2047 encoded headers,
@@ -34,7 +34,9 @@ mailbox `historyId` and is recorded for `history.list`. The query language (`com
 covers words and phrases, `from: to: cc: subject: in: is: label: category: has:attachment after:
 before: rfc822msgid:`, `-` negation, `{a b}` and `(a OR b)`; it is evaluated per message.
 
-Fixture (`buildMailbox()`, owner `owner@example.com`; `THREADS` names the interesting threads):
+The request log keeps a list's search (`requests[i].q`), and `failNext({ search: /pageToken=/ })` fails only a later page.
+
+Fixture at a fixed date (`GMAIL_FIXTURE_NOW`; `new FakeGoogle({ fixtureNow: Date.now() })` puts it where a test's real clock is) (`buildMailbox()`, owner `owner@example.com`; `THREADS` names the interesting threads):
 `lunch` (reply chain, unread), `kickoff` (several To/Cc, for reply-all), `html` (HTML only, links,
 `<script>`), `encoded` (RFC 2047 subject and name, Latin-1 body), `attachments` (PDF + inline
 `cid:` PNG), `promo` and `social` (Gmail categories), `archived` (no INBOX), `starred`, `draft`

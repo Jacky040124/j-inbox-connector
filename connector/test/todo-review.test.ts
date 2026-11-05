@@ -532,8 +532,9 @@ describe("Gmail To do in the service (findings 1, 2, 15, through the real Gmail 
   let fb: FakeBeeper;
   let fg: RunningFakeGoogle;
   beforeAll(async () => {
-    fb = await startFakeBeeper();
-    fg = await startFakeGoogle();
+    // The connector goes by the real clock: the fixtures must be recent to it, or To do's first run leaves them out.
+    fb = await startFakeBeeper({ fixtureNow: Date.now() });
+    fg = await startFakeGoogle({ fixtureNow: Date.now() });
   });
   afterAll(() => {
     fb.stop();

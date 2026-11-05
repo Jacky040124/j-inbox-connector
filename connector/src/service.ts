@@ -182,6 +182,7 @@ export async function startService(o: ServiceOptions): Promise<Service> {
       if (e === "gmail.connected" && !metaCache.persistent) void gmailCacheKey(o.secrets, o.paths, true).then((k) => k && metaCache.persistTo(o.paths.gmailCacheFile, k));
       if (e === "gmail.connected") void todo.sync();
     },
+    onNewAccount: (email) => todo.meetAccount(email),
   });
   const drafts = new DraftStore({ path: o.paths.draftsFile });
   const uploads = new UploadStore({ dir: o.paths.uploadsDir, draftAlive: (id) => drafts.has(id) });

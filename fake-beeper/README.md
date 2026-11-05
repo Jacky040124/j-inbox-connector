@@ -11,6 +11,8 @@ import { startFakeBeeper, CHAT_IDS, ASSET_URLS, HOSTILE_TEXTS } from "@j-inbox/f
 const fb = await startFakeBeeper();   // 127.0.0.1, random port; fb.url, fb.wsURL, fb.token
 ```
 
+The fixture stands at a fixed date (`FIXTURE_NOW`); `startFakeBeeper({ fixtureNow: Date.now() })` puts it where a test's real clock is (To do's first run looks 7 days back).
+
 Full reference (routes, fixture, knobs): `testkit/README.md` ("fake-beeper"), which re-exports this
 package as `@j-inbox/testkit/fake-beeper` for the closed packages. The spec-conformance tests that
 validate every response against the vendored Beeper OpenAPI spec live in `testkit/test/`

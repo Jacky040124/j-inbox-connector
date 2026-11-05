@@ -1,6 +1,7 @@
 // Bun HTTP + WebSocket server for the fake Beeper Client API (127.0.0.1 only).
 import type { Server, ServerWebSocket } from "bun";
 import { createBeeperHandler, defaultControls, type Controls, type FailRule, type HangRule } from "./handler.ts";
+import { buildFixture } from "./fixtures.ts";
 import { FakeBeeperState, type Call, type DomainEvent } from "./state.ts";
 
 export const FAKE_BEEPER_TOKEN = "fake-beeper-token-0123456789abcdef";
@@ -28,7 +29,7 @@ function appStatePayload(state: BeeperAppState) {
   };
 }
 
-export type FakeBeeperOptions = { port?: number; token?: string; controls?: Partial<Controls> };
+export type FakeBeeperOptions = { port?: number; token?: string; controls?: Partial<Controls>; /** The fixture's "now" (default FIXTURE_NOW, a fixed date): a test whose connector goes by the real clock passes Date.now(). */ fixtureNow?: number };
 
 export type FakeBeeper = {
   readonly url: string;
@@ -62,7 +63,7 @@ export type FakeBeeper = {
 };
 
 export async function startFakeBeeper(opts: FakeBeeperOptions = {}): Promise<FakeBeeper> {
-  let state = new FakeBeeperState();
+  let state = new FakeBeeperState(buildFixture(opts.fixtureNow));
   const tokens = new Set([opts.token ?? FAKE_BEEPER_TOKEN]);
   const controls: Controls = { ...defaultControls(), ...opts.controls };
   const failRules: FailRule[] = [];
@@ -213,7 +214,7 @@ export async function startFakeBeeper(opts: FakeBeeperOptions = {}): Promise<Fak
       hangRules.length = 0;
       Object.assign(controls, defaultControls(), opts.controls);
       appState = "ready";
-      state = new FakeBeeperState();
+      state = new FakeBeeperState(buildFixture(opts.fixtureNow));
       bindState();
     },
     stop() {

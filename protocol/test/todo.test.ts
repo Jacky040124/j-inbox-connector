@@ -42,6 +42,21 @@ describe("To do in the protocol", () => {
     expect(JSON.stringify(buildRaftManifest({ origin: "https://inbox.example.com", service: "j-inbox" })).includes("set_todo")).toBe(false);
   });
 
+  test("what the first run left out: owner only, never in the manifest, a count and a go and nothing about a message", () => {
+    expect(CAPABILITIES.olderUnread).toBe("older-unread.v1");
+    for (const name of ["get_older_unread", "add_older_unread"] as const) {
+      const d = ACTIONS[name];
+      expect([d.humanOnly, d.needsApprovalForAgents, d.streamed, (d as { cloud?: boolean }).cloud, (d as { cloudOnly?: boolean }).cloudOnly]).toEqual([true, false, false, undefined, undefined]);
+      expect(isAgentActionName(name)).toBe(false);
+      expect(JSON.stringify(buildRaftManifest({ origin: "https://inbox.example.com", service: "j-inbox" })).includes(name)).toBe(false);
+    }
+    expect(ACTIONS.get_older_unread.write).toBe(false);
+    expect(ACTIONS.add_older_unread.write).toBe(true);
+    const item = { source: "beeper", count: 3, adding: false, counting: false };
+    expect(parseActionResult("get_older_unread", { items: [item, { ...item, count: null, counting: true }] }).ok).toBe(true);
+    for (const bad of [{ ...item, count: -1 }, { ...item, count: 1.5 }, { ...item, title: "Hello" }, { ...item, counting: "yes" }, { source: "beeper", count: 1, adding: false }]) expect(parseActionResult("get_older_unread", { items: [bad] }).ok).toBe(false);
+  });
+
   test("set_todo's shape: strict both ways", () => {
     expect(parseActionParams("set_todo", { chatID, todo: false }).ok).toBe(true);
     for (const bad of [{ chatID }, { todo: true }, { chatID, todo: "false" }, { chatID, todo: true, extra: 1 }]) expect(parseActionParams("set_todo", bad).ok).toBe(false);

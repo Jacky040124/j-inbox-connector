@@ -143,6 +143,10 @@ export async function scopeIdempotencyKey(caller: { type: "human" | "agent"; sub
  * unread_summary and search_messages over several sources return what they have and name the
  * failed ones here (e.g. a Gmail account that needs reconnecting), instead of failing as a whole.
  */
+/** A To do source: "beeper", or a Gmail account's accountID (gmail:<address>). */
+const olderUnreadSource = accountID;
+const olderUnreadItem = object({ source: olderUnreadSource, count: nullable(integer({ min: 0, max: 1_000_000_000 })), adding: boolean(), counting: boolean() });
+
 export const failedSource = object({ source: enumOf(["beeper", "gmail"] as const), accountID: optional(accountID), error: errorBody });
 const failedSources = optional(array(failedSource, { max: MAX_ACCOUNTS + 1 }));
 const recipients = (min: number) => array(emailRecipient, { min, max: 50 });
@@ -896,6 +900,36 @@ export const ACTIONS = {
     timeoutMs: REQUEST_TIMEOUT_MS,
     rateLimitPerMinute: 60,
     beeper: "none (the connector's To do store)",
+  }),
+
+  get_older_unread: define({
+    description: "What To do's first run left out, per source: count is about how many older unread chats, as the first run counted them and less what has come in since (null: not known), adding: they are on their way in, counting: the source's first run is not finished, so the number is not known yet. A source with nothing to say is not listed. Nothing is changed, and neither Beeper nor Gmail is asked. Owner only.",
+    params: object({ source: enumOf(["beeper", "gmail"] as const) }),
+    paramDocs: { source: "Which sources: beeper, or every Gmail account" },
+    defaults: {},
+    result: object({ items: array(olderUnreadItem, { max: MAX_ACCOUNTS }) }),
+    write: false,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    rateLimitPerMinute: 60,
+    beeper: "none (the connector's To do store: the first run counted it)",
+  }),
+
+  add_older_unread: define({
+    description: "Bring what To do's first run left out of a source into To do, in the background, unless the owner already handled it or it is noise. Idempotent. It lives on the owner's computer: nothing is sent, marked read or archived in Beeper or Gmail. adding: false: there is nothing (more) to bring in. Owner only.",
+    params: object({ source: olderUnreadSource }),
+    paramDocs: { source: "beeper, or gmail:<address>" },
+    defaults: {},
+    result: object({ source: olderUnreadSource, adding: boolean() }),
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    rateLimitPerMinute: 60,
+    beeper: "GET /v1/chats in the background (no write); Gmail threads.list, ids only, a page a second",
   }),
 
   get_media: define({

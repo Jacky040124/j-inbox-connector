@@ -1,21 +1,33 @@
 // To do, between the store and the world: what Beeper and Gmail say goes into the store (todo/store.ts), the
 // first run finds what is unread, and a start (or a socket back) catches up with what happened while nobody listened.
 //
-// The first run, once per source (Beeper; each Gmail account when first seen). The source's `since` goes to disk
-// first; from then on a chat the store has never seen is handled unless someone wrote after it. What was unread
-// at that moment is found in the background, one page at a time, and nothing waits for it: Beeper's
-// GET /v1/chats pages (they are local), Gmail's threads.list for `is:unread in:inbox category:primary` (ids only, one
-// call of 10 quota units per 100 threads, a second apart: no thread is read for it). A restart walks again from the
-// top, which changes nothing that is already known. While a source's first run is not done, a chat seen for
-// the first time by any list is judged by the same rule, so a list is right before the walk reaches it. When
-// the walk ends the source is `done`, on disk, and it never runs again.
+// The first run, once per source (Beeper; each Gmail account when first seen). The source's `since` and its `cut`
+// (7 days before it, fixed: store.ts) go to disk first; from then on a chat the store has never seen is handled unless
+// someone wrote after `since`. What was unread at that moment and active since the cut is found in the background, one
+// page at a time, and nothing waits for it: Beeper's GET /v1/chats pages (they are local; a chat without a known time
+// counts as active), Gmail's threads.list for `is:unread in:inbox category:primary after:<epoch>` (ids only, one
+// call of 10 quota units per 100 threads, a second apart: no thread is read for it). Gmail's search judges each message, so a
+// thread whose unread message is older than the cut and whose activity since then was read (or the owner's) needs two more
+// walks of ids: every thread active since the cut, then the unread older than it; what is in both is To do too, as a list would have it. That last walk always runs, since what it goes past
+// is also what the cut leaves out. A restart walks again from the top, with the same cut, which changes nothing that is already known. While a source's first run is not done, a chat
+// seen for the first time by any list is judged by the same rule, so a list is right before the walk reaches it. When
+// the walk ends the source is `done`, on disk, and it never runs again. Nothing is marked read or archived for any of it.
+//
+// Add older unread, the owner's, per source: what the cut left out comes in the same way, in the background, once.
+// Asked for on disk first, so a restart goes on with it from the top; then it is over for good. What is known already stays as it is (the owner's Done
+// above all, even one forgotten for the store's bound: store.ts `forgot`), noise stays out. Handled chats make room for it; To do chats do not, so when they fill the
+// bound the rest is left out and said (todoFull), and the source has its line again for when there is room. A walk that fails is logged and tried again
+// soon, backing off, since nothing else would for half an hour. Until asked, Settings says how many, and that number is counted once: the first run goes past them anyway (Gmail's
+// `before:<epoch>` walk, Beeper's every chat), counts what is neither known nor noise, and keeps it on the source with `done` (`olderLeft`). A restart of an unfinished first run counts again from the top.
+// Settings only reads it, with no call to Gmail or Beeper; until the first run has ended it says `counting`. "About", because it is as of the first run and the owner may read mail after it.
+// Gmail's resultSizeEstimate is no count (201 on any page with more after it: fake-google/README.md), and nothing reads it. A walk takes what it brings in off the number as it goes, so one the bound stopped leaves what is left, at least the rest of its page.
 //
 // While nobody listened. Each source remembers how far it has looked (`synced`). On start, and whenever
 // Beeper's socket or the cloud's link comes back, and every half hour for what an at-most-once socket lost, the
 // chats active since then are walked newest first. A Gmail thread's metadata says who wrote what, from the cache while
 // its historyId stands. A Beeper chat whose newest message is the owner's says nothing about before it, so
 // that chat is read (the queue below), once per change of its activity.
-import { gmailChatID, makeError, parseGmailChatID, type ActionResult, type ChatSummary, type ErrorBody, type EventFrame, type MessageItem } from "@j-inbox/protocol";
+import { MAX_ACCOUNTS, gmailChatID, makeError, parseGmailChatID, type ActionResult, type ChatSummary, type ErrorBody, type EventFrame, type MessageItem } from "@j-inbox/protocol";
 import type { Outcome, RequestContext } from "../actions.ts";
 import { Q_PRIMARY } from "../gmail/source.ts";
 import type { NoiseView } from "../noise/store.ts";
@@ -39,6 +51,8 @@ const MAX_READ_PAGES = 5;
 const MAX_GAVE_UP = 1000;
 /** Events per page of a first run: enough for open pages to read the list again, not one per chat. */
 const FIRST_RUN_EVENTS_PER_PAGE = 3;
+/** Add older unread's walk failed: tried again after this long, doubling up to the half-hourly sync. */
+const OLDER_RETRY_MS = 60_000;
 
 /** What a Gmail account gives the tracker (gmail/source.ts). */
 export type TodoGmail = {
@@ -61,13 +75,20 @@ export type TodoTrackerOptions = {
   onChange?: (chatID: string, todo: boolean) => void;
   log?: (msg: string) => void;
   now?: () => number;
-  pauseMs?: { gmail?: number; beeper?: number };
+  pauseMs?: { gmail?: number; beeper?: number; olderRetry?: number };
 };
 
+const MAX_OLDER_COUNT = 1_000_000_000;
 const pause = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const failed = (code: ErrorBody["code"]): { ok: false; error: ErrorBody } => ({ ok: false, error: makeError(code, "read failed") });
 /** Gmail's query for "unread in the main inbox", as the Unread tab asks it. */
 const Q_UNREAD_PRIMARY = `is:unread ${Q_PRIMARY}`;
+// Gmail's epoch-second operators, so the line stays where it is. Whichever way Gmail takes the very second of the cut, a thread there is in one or both, never in neither.
+const qSinceCut = (cut: number) => `${Q_UNREAD_PRIMARY} after:${Math.max(0, Math.floor(cut / 1000) - 1)}`;
+const qBeforeCut = (cut: number) => `${Q_UNREAD_PRIMARY} before:${Math.floor(cut / 1000)}`;
+// Any thread active since the cut, wherever that message is (the owner's own has no INBOX label), as a row's last activity counts it: not a draft.
+const qActiveSinceCut = (cut: number) => `after:${Math.max(0, Math.floor(cut / 1000) - 1)} -in:drafts`;
+const sourceName = (key: string) => (key === BEEPER_SOURCE ? "Beeper" : "a Gmail account");
 
 export class TodoTracker {
   readonly store: TodoStore;
@@ -84,6 +105,8 @@ export class TodoTracker {
   private gmailTimer: ReturnType<typeof setTimeout> | null = null;
   /** When this process last looked at each Gmail account (a restart has to look, whatever the file says). */
   private gmailLooked = new Map<string, number>();
+  private olderRetry: ReturnType<typeof setTimeout> | null = null;
+  private olderTries = 0;
 
   constructor(private readonly o: TodoTrackerOptions) {
     this.store = o.store;
@@ -241,9 +264,41 @@ export class TodoTracker {
     return now;
   }
 
+  /** What the first run left out, per source of this kind (Settings), as the store has it: no call to Gmail or Beeper. `counting`: its first run is not over, so the number is not known yet. Count null (that, or on its way, or no number kept) shows nothing. */
+  olderUnread(kind: "beeper" | "gmail"): { source: string; count: number | null; adding: boolean; counting: boolean }[] {
+    const item = (source: string) => {
+      const o = this.store.olderOf(source);
+      if (!o) return [];
+      const left = this.store.olderLeft(source);
+      return [{ source, count: o.asked || !o.done || left === undefined ? null : Math.min(left, MAX_OLDER_COUNT), adding: o.asked, counting: !o.done }];
+    };
+    if (kind === "beeper") return this.o.beeperPage ? item(BEEPER_SOURCE) : [];
+    // Asking makes an account known: a sync busy elsewhere may not reach one just added for a long time, and the line does not wait for it.
+    const live = this.o.gmail?.() ?? [];
+    for (const s of live) this.store.meet(`gmail:${s.email}`);
+    const items = live.flatMap((s) => item(`gmail:${s.email}`));
+    // An account that cannot be asked now (it needs reconnecting) is still on its way: that line is not over.
+    const waiting = this.store.olderAsked().filter((source) => source.startsWith("gmail:") && !items.some((i) => i.source === source));
+    return [...items, ...waiting.flatMap(item)].slice(0, MAX_ACCOUNTS);
+  }
+
+  /** The owner's Add older unread. On disk when this returns, and running in the background. Pressed twice, it is one walk. False: there is nothing to bring in. */
+  addOlder(source: string): boolean {
+    const asked = this.store.askOlder(source);
+    if (asked) void this.sync();
+    return asked;
+  }
+
   /** A Gmail account was removed. */
   forgetAccount(email: string) {
     this.store.forgetSource(`gmail:${email}`);
+  }
+
+  /** A Gmail account this computer did not have was connected: whatever was left about that address is not about this connection, and its first run starts now. */
+  meetAccount(email: string) {
+    const key = `gmail:${email}`;
+    this.store.forgetSource(key);
+    this.store.meet(key);
   }
 
   // ---------------------------------------------------------------- reading one chat
@@ -318,6 +373,8 @@ export class TodoTracker {
     this.timer = null;
     if (this.gmailTimer) clearTimeout(this.gmailTimer);
     this.gmailTimer = null;
+    if (this.olderRetry) clearTimeout(this.olderRetry);
+    this.olderRetry = null;
     this.store.flush();
   }
 
@@ -333,11 +390,28 @@ export class TodoTracker {
         for (const id of this.store.awaitingSecondLook()) this.readSoon(id);
         try {
           await this.syncBeeper();
-        } catch {}
+        } catch {
+          this.olderHeldUp(BEEPER_SOURCE);
+        }
+        try {
+          await this.addOlderBeeper();
+        } catch {
+          this.olderHeldUp(BEEPER_SOURCE);
+        }
         for (const s of this.o.gmail?.() ?? []) {
+          const key = `gmail:${s.email}`;
+          // Removed while an account before it was walked, which can be long: it is not made known again.
+          if (!this.o.gmail?.().some((x) => x.email === s.email)) continue;
           try {
             await this.syncGmail(s);
-          } catch {}
+          } catch {
+            this.olderHeldUp(key);
+          }
+          try {
+            await this.addOlderGmail(s);
+          } catch {
+            this.olderHeldUp(key);
+          }
         }
       } while (this.again && !this.stopped);
     })().finally(() => {
@@ -354,6 +428,8 @@ export class TodoTracker {
     if (!this.o.beeperPage) return;
     const started = this.now();
     const state = this.store.meet(BEEPER_SOURCE);
+    // What the cut leaves out, each once, however the list moves under the walk. Not on disk until the walk ends: a restart counts again.
+    const older = new Set<string>();
     let cursor: string | null = null;
     for (let page = 0; !this.stopped; page++) {
       const r: { items: ChatSummary[]; next: string | null } = await this.o.beeperPage(cursor, this.ctx());
@@ -365,6 +441,7 @@ export class TodoTracker {
         if (t >= state.synced - SYNC_MARGIN_MS) stillNew = true;
         const had = this.store.isTodo(c.id);
         const knew = this.store.known(c.id);
+        if (firstRun && this.store.isOlder(c) && !this.isNoise(c.id)) older.add(c.id);
         // Out of the main inbox, or noise: as the Unread tab counts them, at first run too.
         const out = this.isNoise(c.id) ? { ...c, isLowPriority: true } : c;
         const seen = this.store.see(out);
@@ -380,7 +457,7 @@ export class TodoTracker {
       await pause(this.o.pauseMs?.beeper ?? BEEPER_PAGE_PAUSE_MS);
     }
     if (this.stopped) return;
-    this.store.finishFirstRun(BEEPER_SOURCE);
+    this.store.finishFirstRun(BEEPER_SOURCE, older.size);
     this.store.markSynced(BEEPER_SOURCE, started);
   }
 
@@ -389,21 +466,40 @@ export class TodoTracker {
     const started = this.now();
     const state = this.store.meet(key);
     if (!state.done) {
-      let token: string | null = null;
-      for (;;) {
-        const r: { ids: string[]; next: string | null } = await s.threadIDs(Q_UNREAD_PRIMARY, token, this.ctx());
-        if (this.stopped) return;
+      // Removed meanwhile (added again or not): what this walk was for is gone.
+      const live = () => !this.stopped && this.store.cutNow(key) === state.cut;
+      const mark = (ids: string[]) => {
         let told = 0;
-        for (const id of r.ids) {
+        for (const id of ids) {
           const chatID = gmailChatID(s.email, id);
           if (this.isNoise(chatID)) continue;
           if (this.store.markUnreadAtFirstRun(chatID) && told++ < FIRST_RUN_EVENTS_PER_PAGE) this.tell(chatID);
         }
-        token = r.next;
-        if (!token) break;
-        await pause(this.o.pauseMs?.gmail ?? GMAIL_FIRST_RUN_PAUSE_MS);
+      };
+      // What the cut leaves out, each once, however the list moves under the walk. Not on disk until the walk ends: a restart counts again.
+      const older = new Set<string>();
+      if (state.cut === undefined) {
+        if (!(await this.walkIds(s, Q_UNREAD_PRIMARY, live, mark))) return;
+      } else {
+        const found = new Set<string>();
+        const since = (ids: string[]) => {
+          mark(ids);
+          for (const id of ids) found.add(id);
+        };
+        if (!(await this.walkIds(s, qSinceCut(state.cut), live, since))) return;
+        // Unread before the cut and active since it, which no one message says: what is both. The rest of that walk is what the cut leaves out. It costs what a first run cost before there was a cut.
+        const active = new Set<string>();
+        if (!(await this.walkIds(s, qActiveSinceCut(state.cut), live, (ids) => ids.forEach((id) => found.has(id) || active.add(id))))) return;
+        const before = (ids: string[]) => {
+          mark(ids.filter((id) => active.has(id)));
+          for (const id of ids) {
+            const chatID = gmailChatID(s.email, id);
+            if (!active.has(id) && !found.has(id) && !this.store.heardOf(chatID) && !this.isNoise(chatID)) older.add(id);
+          }
+        };
+        if (!(await this.walkIds(s, qBeforeCut(state.cut), live, before))) return;
       }
-      this.store.finishFirstRun(key);
+      this.store.finishFirstRun(key, older.size);
       this.store.markSynced(key, started);
       this.gmailLooked.set(key, started);
       this.o.log?.("todo: first run of a Gmail account finished");
@@ -423,5 +519,94 @@ export class TodoTracker {
       if (!cursor || !stillNew) break;
     }
     if (!this.stopped) this.store.markSynced(key, started);
+  }
+
+  /** Pages of a Gmail query, ids only, a second apart. False: `live` said the walk is over before its end. */
+  private async walkIds(s: TodoGmail, q: string, live: () => boolean, page: (ids: string[]) => boolean | void): Promise<boolean> {
+    let token: string | null = null;
+    for (;;) {
+      const r: { ids: string[]; next: string | null } = await s.threadIDs(q, token, this.ctx());
+      if (!live() || page(r.ids) === false) return false;
+      token = r.next;
+      if (!token) return true;
+      await pause(this.o.pauseMs?.gmail ?? GMAIL_FIRST_RUN_PAUSE_MS);
+    }
+  }
+
+  /** Add older unread, when asked and the first run is over: Beeper's pages, as its first run walks them. */
+  private async addOlderBeeper() {
+    if (!this.o.beeperPage || !this.olderWanted(BEEPER_SOURCE)) return;
+    let cursor: string | null = null;
+    while (!this.stopped) {
+      const r: { items: ChatSummary[]; next: string | null } = await this.o.beeperPage(cursor, this.ctx());
+      if (this.stopped) return;
+      let told = 0;
+      const wanted = (c: ChatSummary) => this.store.isOlder(c) && !this.isNoise(c.id);
+      for (const [i, c] of r.items.entries()) {
+        if (!wanted(c)) continue;
+        const added = this.store.markOlder(c.id);
+        if (added === null) return this.olderNoRoom(BEEPER_SOURCE, r.items.slice(i).filter(wanted).length);
+        if (!added) continue;
+        // Its times and ids, as a list would have left them.
+        this.store.see(c);
+        if (told++ < FIRST_RUN_EVENTS_PER_PAGE) this.tell(c.id);
+      }
+      cursor = r.next;
+      if (!cursor) return this.finishOlder(BEEPER_SOURCE);
+      await pause(this.o.pauseMs?.beeper ?? BEEPER_PAGE_PAUSE_MS);
+    }
+  }
+
+  /** Add older unread, when asked and the first run is over: threads.list and ids only, a second apart, like Gmail's first run. */
+  private async addOlderGmail(s: TodoGmail) {
+    const key = sourceOf(gmailChatID(s.email, "x"));
+    if (!this.olderWanted(key)) return;
+    // Stopped, or the account removed meanwhile: nothing more of it.
+    const live = () => !this.stopped && !!this.store.olderOf(key)?.asked;
+    const ended = await this.walkIds(s, qBeforeCut(this.store.olderOf(key)!.cut), live, (ids) => {
+      let told = 0;
+      for (const [i, id] of ids.entries()) {
+        const chatID = gmailChatID(s.email, id);
+        if (this.isNoise(chatID)) continue;
+        const added = this.store.markOlder(chatID);
+        if (added === null) {
+          this.olderNoRoom(key, ids.slice(i).filter((rest) => !this.store.heardOf(gmailChatID(s.email, rest)) && !this.isNoise(gmailChatID(s.email, rest))).length);
+          return false;
+        }
+        if (added && told++ < FIRST_RUN_EVENTS_PER_PAGE) this.tell(chatID);
+      }
+    });
+    if (ended) this.finishOlder(key);
+  }
+
+  private olderWanted(key: string): boolean {
+    const o = this.store.olderOf(key);
+    return !!o?.asked && o.done && !this.stopped;
+  }
+
+  private finishOlder(key: string) {
+    this.store.finishOlder(key);
+    this.olderTries = 0;
+    this.o.log?.(`todo: older unread of ${sourceName(key)} added`);
+  }
+
+  /** To do fills the bound: it is said (todoFull), and the source has its line back. Not for a walk to try again by itself: only the owner can make room. `rest`: what of its page the walk could not take. */
+  private olderNoRoom(key: string, rest: number) {
+    this.store.releaseOlder(key, rest);
+    this.olderTries = 0;
+    this.o.log?.(`todo: no room for the rest of the older unread of ${sourceName(key)}`);
+  }
+
+  /** A walk that Add older unread is waiting for failed: said, with nothing of the account or its mail, and tried again soon. The half-hourly sync would leave the page saying "Adding" for that long. */
+  private olderHeldUp(key: string) {
+    if (this.stopped || !this.store.olderOf(key)?.asked) return;
+    this.o.log?.(`todo: adding the older unread of ${sourceName(key)} failed for now, it will be tried again`);
+    if (this.olderRetry) return;
+    const wait = Math.min((this.o.pauseMs?.olderRetry ?? OLDER_RETRY_MS) * 2 ** this.olderTries++, SYNC_EVERY_MS);
+    this.olderRetry = setTimeout(() => {
+      this.olderRetry = null;
+      void this.sync();
+    }, wait);
+    (this.olderRetry as { unref?: () => void }).unref?.();
   }
 }

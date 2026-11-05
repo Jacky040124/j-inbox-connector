@@ -29,6 +29,8 @@ export type GmailServiceOptions = {
   metaCache?: ThreadMetaCache;
   /** Lifecycle notes for the local audit log (metadata only). */
   onLifecycle?: (event: "gmail.connected" | "gmail.removed" | "gmail.reauth") => void;
+  /** connect brought an account this computer did not have (not a reconnect, which keeps all that is known about it). */
+  onNewAccount?: (email: string) => void;
 };
 
 const err = (code: ErrorBody["code"], message: string) => ({ ok: false as const, error: makeError(code, message) });
@@ -116,11 +118,13 @@ export function createGmailService(o: GmailServiceOptions) {
       const p = await probe.profile(ctx);
       if (!p.ok) return p.error.code === "REAUTH_REQUIRED" ? err("NOT_ALLOWED", "Google did not accept this account's access. Try adding it again.") : p;
       if (normalizeGmailAddress(p.data.emailAddress) !== email) return err("NOT_ALLOWED", "This Gmail access belongs to a different account than the one that signed in.");
+      const isNew = !accounts.get(email);
       try {
         await accounts.add(email, refreshToken);
       } catch {
         return err("INTERNAL", "The connector could not store the account in the Keychain.");
       }
+      if (isNew) o.onNewAccount?.(email);
       // A fresh client (a reconnect replaces the token) and a fresh history start.
       sources.delete(email);
       poller?.forget(email);

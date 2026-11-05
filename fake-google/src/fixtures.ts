@@ -85,11 +85,11 @@ export function buildPayload(o: MailOpts): Part {
 const H = 3_600_000;
 
 /** A fresh deterministic mailbox for `email` (the owner's by default). */
-export function buildMailbox(email = OWNER_EMAIL, idBase = 0x18c2f): Mailbox {
+export function buildMailbox(email = OWNER_EMAIL, idBase = 0x18c2f, now = GMAIL_FIXTURE_NOW): Mailbox {
   attSeq = 0;
   const box = new Mailbox(email, `1${idBase}0000000000`, idBase);
   const me = email === OWNER_EMAIL ? `${OWNER_NAME} <${email}>` : email;
-  let t = GMAIL_FIXTURE_NOW;
+  let t = now;
   const thread = (name: string | null, mails: (Omit<MailOpts, "messageId" | "at"> & { gapMs?: number; draft?: boolean })[], step = 5 * H) => {
     const threadId = box.newId();
     if (name) box.names[name] = threadId;
@@ -198,7 +198,7 @@ export function buildMailbox(email = OWNER_EMAIL, idBase = 0x18c2f): Mailbox {
 }
 
 /** A small second mailbox (another Google user). */
-export function buildOtherMailbox(): Mailbox {
+export function buildOtherMailbox(now = GMAIL_FIXTURE_NOW): Mailbox {
   const box = new Mailbox(OTHER_EMAIL, "2000000000000000000", 0x2a1f0);
   const id = box.newId();
   box.add(
@@ -206,8 +206,8 @@ export function buildOtherMailbox(): Mailbox {
       id,
       threadId: id,
       labelIds: ["INBOX", "UNREAD", "CATEGORY_PERSONAL"],
-      internalDate: GMAIL_FIXTURE_NOW - 2 * H,
-      payload: buildPayload({ from: "Zed <zed@example.com>", to: OTHER_EMAIL, subject: "Hello other", text: "Hi there", at: GMAIL_FIXTURE_NOW - 2 * H, labels: [], messageId: `<${id}@mail.example.com>` }),
+      internalDate: now - 2 * H,
+      payload: buildPayload({ from: "Zed <zed@example.com>", to: OTHER_EMAIL, subject: "Hello other", text: "Hi there", at: now - 2 * H, labels: [], messageId: `<${id}@mail.example.com>` }),
     },
     { silent: true },
   );

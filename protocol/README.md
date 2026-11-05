@@ -120,6 +120,8 @@ camelCase (like Beeper). Agent writes marked "approval" go through the approval 
 | `set_noise_definition` | `definition(0-4000, multi-line)` | `noiseSettings` | yes (`humanOnly`) | n/a | the connector's noise store; empty turns noise off |
 | `set_noise` | `chatID noise` | `{chatID, noise}` | yes (`humanOnly`) | n/a | the connector's noise store (`read_chat` limit 5 for the owner's example); never Beeper or Gmail |
 | `set_todo` | `chatID todo upTo?(iso time: for Done, the newest message on the owner's screen)` | `{chatID, todo}`: the flag as it now stands (idempotent) | yes (`humanOnly`) | n/a | the connector's To do store (see "To do"); never Beeper or Gmail |
+| `get_older_unread` | `source`(`beeper` or `gmail`: which sources) | `{items: {source, count (null: not known), adding, counting}[]}`: what To do's first run left out, a source with nothing to say not listed | (`humanOnly`) | n/a | none: the connector's To do store, where the first run left its count (see "To do") |
+| `add_older_unread` | `source`(`beeper`, or `gmail:<address>`) | `{source, adding}` (idempotent; false: nothing to bring in) | yes (`humanOnly`) | n/a | none as an answer; in the background, the same reads as a first run, never a write |
 | `get_media` | `url` (an attachment `url` or chat `avatarURL` from another result) | `res` = `{mimeType, size (null if unknown), fileName?}` then `chunk` frames | | | `GET /v1/assets/serve?url=`; `gmail://` URLs: Gmail `messages.attachments.get` |
 
 Notes for implementers:
@@ -468,23 +470,34 @@ archives on WhatsApp) is never called for it.
   Gmail: `in:inbox category:primary` with only the store's threads looked at, so the rest cost no metadata calls).
   **`unread_summary {todo:true}`**: the same scope, the count behind the sidebar's badge: the store's, whatever a scan reaches. `todoFull: true`: more chats have been To do than the computer keeps (5000, fair per source); the oldest were left out.
 - **First run, once per source** (Beeper; each Gmail account when it is first seen): every chat that is unread now
-  in the main inbox is To do, everything else handled. A source's first start time is written first, and from then on
+  in the main inbox and was active in the 7 days before the source was first seen is To do, everything else handled.
+  A source's first start time and that cut (`TODO_FIRST_RUN_DAYS`; one instant, never moved, not worked out from anything that can move) are written first, and from then on
   a chat the store has never seen is handled unless someone wrote after that time, so nothing has to load every chat.
-  The unread ones are found in the background, a page at a time and resuming after a restart: `GET /v1/chats`
-  for Beeper, `threads.list is:unread in:inbox category:primary` (ids only, no metadata) for Gmail. While a source is not done, a
-  chat seen for the first time is judged by the same rule, so a list is right at once. Done, it never runs again.
+  The unread ones are found in the background, a page at a time and resuming after a restart with the same cut: `GET /v1/chats`
+  for Beeper, `threads.list is:unread in:inbox category:primary after:<epoch seconds>` (ids only, no metadata) for Gmail. While a source is not done, a
+  chat seen for the first time is judged by the same rule, so a list is right at once. A chat with no known time is not left out. Done, it never runs again.
+  Nothing is marked read or archived for it: older unread stays unread at the source and in the normal lists, and when someone writes to it after that, it is To do like any chat.
+  A source whose first run was done before this rule has no cut, and nothing about it changes (`todo.json` stays version 1; a first run under way at the upgrade takes its cut once from its first sight).
+  Gmail's search judges each message, and the rule is about the thread: one whose unread message is older than the cut and whose activity since then was read (or the owner's) is found by two more walks of ids, `after:<epoch seconds> -in:drafts` and `threads.list is:unread in:inbox category:primary before:<epoch seconds>`: what is in both is To do, as a list meeting it first has it. That last walk always runs, ids only, a page a second, what a first run cost before there was a cut, because it also counts what the cut leaves out.
+- **Older unread** (`get_older_unread`, `add_older_unread`; owner only, not in the manifest; `"older-unread.v1"`). Settings shows, for a source whose first run left some out, how many. The first run counts them as its walk goes past them (Gmail's `before:` walk, every one of Beeper's chats), without what is known already or noise, and keeps the number on the source (`olderLeft`), on disk with `done`; a restart of an unfinished first run counts again from the top.
+  `get_older_unread` only reads that, with no call to Gmail or Beeper. `counting` is true until the source's first run has finished, and until then `count` is null. "About", because the number is as of the first run and the owner may read mail after it. Gmail's `resultSizeEstimate` is no count of a list (`fake-google/README.md` has what was measured) and nothing reads it.
+  Asking makes a connected account known, so a new account's line comes by itself once its first run ends. `count` 0 or null, or `counting`, shows nothing. `add_older_unread` is on disk before it is answered and runs in the background, paced like a first run: what is
+  already known stays as it is (a chat the owner marked Done stays Done, even one forgotten for the bound below: until the walk is over the store keeps a short hash of each, at most 5000 per source, each once, the oldest going first), noise is skipped. Handled chats make room for what comes in; To do chats do not: when they fill the bound the rest is left out and said in `todoFull`, and the source is listed again with what is left (the kept number less what walks have taken in, never less than the rest of the page it stopped on), so the owner can press once there is room. A restart goes on from the top; twice is once; when it reaches its end it is over for the source, and `get_older_unread` no longer lists it. A walk that fails is logged, without anything about the account or its mail, and tried again after a minute, doubling up to half an hour; until it ends `adding` stays true, also for an account that needs reconnecting (it goes on after the reconnect).
+  The count passes through the cloud like any answer; nothing of it is kept there.
 - **While the connector is down:** each source remembers how far it has looked. On start (Beeper: each subscription; Gmail: each
   welcome) the chats active since then are walked newest first; a chat whose newest message is the owner's is read, to
   see whether someone wrote before it.
 - **Bounded:** at most `MAX_TODO_ENTRIES` (5000) chats, fair per source: handled ones first (the source's start time moves up to what was forgotten,
   but never past what has been looked at), then To do chats out of the main inbox, then the largest source's oldest To do. A To do never goes silently: it is logged,
-  told to open pages, said in `todoFull`, and its source's time does not move, so it comes back when next seen with room.
-- **A damaged `todo.json`** is renamed aside and logged, and the first run finds what is unread again. A file of an unknown version is left as it is (To do goes on in memory).
+  told to open pages, said in `todoFull`, and its source's time does not move, so it comes back when next seen with room. Only To do chats fill the bound: `todoFull` stops once the owner's Done, an account's removal or an Add older unread walk reaching its end leaves them at 90% of it or less, however many handled chats are kept.
+- **A removed Gmail account** goes with all that is known about it. What was still in flight for it (a result, a walk's page, an event) changes nothing and does not make it known again; connected again, or connected with a source left on disk from an older build, it has a first run of its own. A reconnect keeps everything.
+- **A damaged `todo.json`** is renamed aside and logged, and the first run finds what is unread and recent again (with a new cut: the source counts as first seen now). A file of an unknown version is left as it is (To do goes on in memory).
 - **A chat gone:** `chat.deleted` takes it out of counts and events; what is known stays until NOT_FOUND has answered twice, at least 10 minutes apart. Seen again, it is what it was.
 - **`chat` events** may carry `todo` (the flag changed), so open tabs follow at once.
 - **Capability** `"todo.v1"`: without it the cloud answers `set_todo` and a `todo` param `NOT_SUPPORTED` and does not send
   `set_todo` on a snooze, archive or delegation, and the web keeps Unread. Agents read the flag and may filter on it;
   `set_todo` is not in the manifest and `humanOnly` refuses it on every path.
+  `"older-unread.v1"`: without it the cloud answers `get_older_unread` and `add_older_unread` `NOT_SUPPORTED`, the web does not ask, and Settings has no such line.
 
 ### Gmail (`gmail.ts`, design/gmail-plan.md)
 

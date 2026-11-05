@@ -58,6 +58,8 @@ const CASES: Record<ConnectorActionName, { params: () => Record<string, unknown>
   set_noise_definition: { params: () => ({ definition: "Newsletters" }), routes: [] },
   // The To do store is local: nothing goes to Beeper for it.
   set_todo: { params: () => ({ chatID: CHAT_IDS.imessageAlice, todo: true }), routes: [] },
+  get_older_unread: { params: () => ({ source: "beeper" }), routes: [] },
+  add_older_unread: { params: () => ({ source: "beeper" }), routes: [] },
   set_noise: { params: () => ({ chatID: CHAT_IDS.imessageAlice, noise: true }), routes: ["GET /v1/chats/{chatID}", "GET /v1/chats/{chatID}/messages"] },
 };
 

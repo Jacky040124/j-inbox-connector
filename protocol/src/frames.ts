@@ -63,8 +63,9 @@ const JSON_LIMITS = { maxDepth: 32, maxKeys: 50_000 };
  * "todo.v1" (added 2026-11-04): it keeps the owner's To do state (ChatSummary.todo; list_chats and
  * unread_summary `todo`; set_todo; `chat` events' `todo`).
  * "email-html.v1" (added 2026-11-04): it answers get_email_html, so the owner's page can show an email's HTML.
+ * "older-unread.v1" (added 2026-11-05): it answers get_older_unread and add_older_unread: what To do's first run left out, and bringing it in.
  */
-export const CAPABILITIES = { media: "media.v1", gmail: "gmail.v1", drafts: "drafts.v1", delegations: "delegations.v1", attachments: "attachments.v1", noise: "noise.v1", viewers: "viewers.v1", listSource: "list-source.v1", uploadRead: "upload-read.v1", emailHtml: "email-html.v1", todo: "todo.v1" } as const;
+export const CAPABILITIES = { media: "media.v1", gmail: "gmail.v1", drafts: "drafts.v1", delegations: "delegations.v1", attachments: "attachments.v1", noise: "noise.v1", viewers: "viewers.v1", listSource: "list-source.v1", uploadRead: "upload-read.v1", emailHtml: "email-html.v1", todo: "todo.v1", olderUnread: "older-unread.v1" } as const;
 
 export const helloFrame = object({
   type: literal("hello"),

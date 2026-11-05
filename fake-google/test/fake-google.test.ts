@@ -234,6 +234,81 @@ describe("query language", () => {
   });
 });
 
+describe("threads.list by time and read state, as To do's first run asks", () => {
+  const T = Date.parse("2026-11-01T00:00:00.000Z");
+  const sec = T / 1000;
+  const list = async (at: string, q: string, more = "") => (await gmail(`threads?q=${encodeURIComponent(q)}${more}`, at)).body as { threads?: { id: string }[]; nextPageToken?: string; resultSizeEstimate?: number };
+  const ids = (r: { threads?: { id: string }[] }) => (r.threads ?? []).map((t) => t.id).sort();
+  async function mail() {
+    const at = await accessToken();
+    g.mailbox().messages.clear();
+    const send = (subject: string, when: number, labels = ["INBOX", "UNREAD", "CATEGORY_PERSONAL"], threadId?: string) => g.deliver(OWNER_EMAIL, { from: "A <a@example.com>", subject, text: "x", at: when, labels, ...(threadId ? { threadId } : {}) }).threadId;
+    return { at, send };
+  }
+
+  test("after: and before: take epoch seconds and leave the very second to neither; is:unread and the tab narrow them", async () => {
+    const { at, send } = await mail();
+    const before = send("before", T - 1000);
+    const exact = send("exact", T);
+    const after = send("after", T + 1000);
+    const read = send("read", T + 1000, ["INBOX", "CATEGORY_PERSONAL"]);
+    const promo = send("promo", T + 1000, ["INBOX", "UNREAD", "CATEGORY_PROMOTIONS"]);
+    const out = send("out", T + 1000, ["UNREAD", "CATEGORY_PERSONAL"]);
+    expect(ids(await list(at, `after:${sec}`))).toEqual([after, read, promo, out].sort());
+    expect(ids(await list(at, `before:${sec}`))).toEqual([before]);
+    expect(ids(await list(at, `after:${sec - 1}`))).toContain(exact);
+    expect(ids(await list(at, `before:${sec + 1}`))).toContain(exact);
+    expect(ids(await list(at, `is:unread in:inbox category:primary after:${sec}`))).toEqual([after]);
+    expect(ids(await list(at, `is:unread in:inbox category:primary before:${sec}`))).toEqual([before]);
+  });
+
+  test("the query is per message: a thread with one old unread message and a new read one is old to is:unread", async () => {
+    const { at, send } = await mail();
+    const t = send("old unread", T - 1000);
+    send("new read", T + 1000, ["INBOX", "CATEGORY_PERSONAL"], t);
+    expect(ids(await list(at, `is:unread after:${sec}`))).toEqual([]);
+    expect(ids(await list(at, `is:unread before:${sec}`))).toEqual([t]);
+  });
+
+  test("resultSizeEstimate as measured on real Gmail: 201 on a page with more after it, whatever the true size; on the last page, what it holds", async () => {
+    const { at, send } = await mail();
+    for (let i = 0; i < 7; i++) send(`m${i}`, T - 1000 - i);
+    send("new", T + 1000);
+    const q = `is:unread before:${sec}`;
+    const first = await list(at, q, "&maxResults=3");
+    expect(first.threads).toHaveLength(3);
+    expect(first.resultSizeEstimate).toBe(201);
+    const second = await list(at, q, `&maxResults=3&pageToken=${first.nextPageToken}`);
+    expect(second.threads).toHaveLength(3);
+    expect(second.resultSizeEstimate).toBe(201);
+    const last = await list(at, q, `&maxResults=3&pageToken=${second.nextPageToken}`);
+    expect(last.nextPageToken).toBeUndefined();
+    expect(last.threads).toHaveLength(1);
+    expect(last.resultSizeEstimate).toBe(1);
+    // One page is the whole list; none is none.
+    expect((await list(at, q)).resultSizeEstimate).toBe(7);
+    expect((await list(at, `is:unread after:${sec + 100}`)).resultSizeEstimate).toBe(0);
+  });
+
+  test("the log keeps a list's search, and a rule can fail only a later page", async () => {
+    const { at, send } = await mail();
+    for (let i = 0; i < 3; i++) send(`m${i}`, T - i);
+    g.failNext({ path: /\/threads$/, search: /pageToken=/, status: 400 });
+    const first = await list(at, "is:unread", "&maxResults=2");
+    expect(g.requests.at(-1)!.q).toBe("is:unread");
+    const later = await gmail(`threads?q=is%3Aunread&maxResults=2&pageToken=${first.nextPageToken}`, at);
+    expect(later.status).toBe(400);
+  });
+
+  test("a mailbox whose clock is given: its fixture stands there", async () => {
+    const at = Date.parse("2030-01-01T00:00:00.000Z");
+    const box = new FakeGoogle({ fixtureNow: at }).mailbox();
+    expect(Math.max(...[...box.messages.values()].map((m) => m.internalDate))).toBeGreaterThan(at - 24 * 3_600_000);
+    expect(Math.max(...[...box.messages.values()].map((m) => m.internalDate))).toBeLessThanOrEqual(at);
+    expect(new FakeGoogle({ fixtureNow: at }).mailbox().names).toEqual(new FakeGoogle().mailbox().names);
+  });
+});
+
 describe("batch (POST /batch/gmail/v1)", () => {
   const batchBody = (calls: { id?: string; line: string; headers?: string[] }[], boundary = "b0und") =>
     calls.map((c) => `--${boundary}\r\nContent-Type: application/http\r\n${c.id ? `Content-ID: <${c.id}>\r\n` : ""}\r\n${c.line}\r\n${(c.headers ?? []).map((h) => h + "\r\n").join("")}\r\n`).join("") + `--${boundary}--\r\n`;

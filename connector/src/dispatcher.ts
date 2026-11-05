@@ -6,7 +6,7 @@
 // the upload_store_* actions and discard_upload keep files being sent in its upload store (and
 // upload_store_read streams one back for the owner's preview); the noise
 // actions keep the owner's definition and verdicts in its noise store; set_todo keeps the owner's To do
-// state in its To do store. Chats in every result carry their noise mark (noise/store.ts decorate) and To do flag.
+// state in its To do store, and get_older_unread and add_older_unread ask it what its first run left out. Chats in every result carry their noise mark (noise/store.ts decorate) and To do flag.
 import {
   ACTIONS,
   encodeFrame,
@@ -138,7 +138,7 @@ export function createDispatcher(o: {
     return r.ok ? { kind: "res", ok: true, data: r.value } : fail("INTERNAL", "The connector produced an invalid result.");
   };
   const via =
-    (name: Exclude<ConnectorActionName, "get_media" | "get_email_html" | "discard_upload" | `draft_store_${string}` | `upload_store_${string}` | "get_noise_settings" | "set_noise_definition" | "set_noise" | "set_todo">): Handler =>
+    (name: Exclude<ConnectorActionName, "get_media" | "get_email_html" | "discard_upload" | `draft_store_${string}` | `upload_store_${string}` | "get_noise_settings" | "set_noise_definition" | "set_noise" | "set_todo" | "get_older_unread" | "add_older_unread">): Handler =>
     async (p, ctx) => {
       const r = await (router[name] as (p: unknown, ctx: RequestContext) => Promise<{ ok: boolean; data?: unknown; error?: ErrorBody }>)(p, ctx);
       if (!r.ok) return { kind: "res", ok: false, error: r.error! };
@@ -234,6 +234,8 @@ export function createDispatcher(o: {
       const now = todo.setByOwner(p.chatID, p.todo, p.upTo !== undefined ? { upTo: Date.parse(p.upTo) } : {});
       return checked("set_todo", { chatID: p.chatID, todo: now });
     },
+    get_older_unread: async (p: { source: "beeper" | "gmail" }) => checked("get_older_unread", { items: todo.olderUnread(p.source) }),
+    add_older_unread: async (p: { source: string }) => checked("add_older_unread", { source: p.source, adding: todo.addOlder(p.source) }),
     get_media: async (p: { url: string }, ctx) => {
       if (p.url.startsWith("gmail://")) return openGmailMedia(o.gmail ?? null, o.assets, p.url, ctx);
       const r = await openMedia(o.client, o.assets, p.url, ctx.signal);
