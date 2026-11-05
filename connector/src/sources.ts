@@ -29,7 +29,7 @@ import { hashKey, type IdempotencyCache } from "./idempotency.ts";
 import { SourceFailure, mergeCollect, type FailedSource, type MergeItem, type MergeSource, type Merged } from "./merge.ts";
 import { CursorExpired, CursorTooLong, RequestAborted, fitToFrame } from "./pager.ts";
 import { activityMs } from "./gmail/map.ts";
-import { listFilterFor, noiseLaneFilter, type GmailSource } from "./gmail/source.ts";
+import { listFilterFor, noiseLaneFilter, type GmailSource, type ListFilter, type TodoLists } from "./gmail/source.ts";
 import type { GmailService } from "./gmail/service.ts";
 import type { NoiseView } from "./noise/store.ts";
 
@@ -49,6 +49,8 @@ export type RouterOptions = {
   uploads?: UploadSource;
   /** Noise verdicts: Gmail's noise threads leave Primary and unread_summary and join Low priority (the Beeper actions do the same with their own). */
   noise?: NoiseView;
+  /** To do: Gmail's lane of `todo` lists, and its count. */
+  todo?: TodoLists & { countFor(email: string): number; countBeeper(): number; full(): boolean; forgetAccount(email: string): void };
 };
 
 async function guarded<T>(fn: () => Promise<Outcome<T>>): Promise<Outcome<T>> {
@@ -145,7 +147,8 @@ export function createRouter(o: RouterOptions) {
       const limit = p.limit ?? 25;
       const noise = o.noise?.active() ? o.noise : null;
       const isNoise = noise ? (id: string) => noise.isNoise(id) : undefined;
-      const filter = listFilterFor(p, isNoise);
+      const filter = listFilterFor(p, isNoise, o.todo);
+      const forSource = (s: GmailSource): ListFilter => (p.todo && o.todo ? { ...filter, only: o.todo.onlyFor(s.email) } : filter);
       // Low priority with noise on: each account's other tabs, and its Primary threads that are noise.
       const noiseLane = isNoise && p.inbox === "low-priority" ? noiseLaneFilter(p, isNoise) : null;
       const beeperParams = { ...p, ...(sel.beeperAccountIDs ? { accountIDs: sel.beeperAccountIDs } : {}) };
@@ -168,11 +171,11 @@ export function createRouter(o: RouterOptions) {
             })(),
         });
       sel.gmail.forEach((s, i) => {
-        sources.push({ id: shortId(s.email), rank: 1 + i, failure: { source: "gmail", accountID: gmailAccountID(s.email) }, fetch: (cursor, n) => s.listThreads(filter, cursor, n, ctx) });
+        sources.push({ id: shortId(s.email), rank: 1 + i, failure: { source: "gmail", accountID: gmailAccountID(s.email) }, fetch: (cursor, n) => s.listThreads(forSource(s), cursor, n, ctx) });
         if (noiseLane) sources.push({ id: "n" + shortId(s.email).slice(1), rank: 1 + sel.gmail.length + i, failure: { source: "gmail", accountID: gmailAccountID(s.email) }, fetch: (cursor, n) => s.listThreads(noiseLane, cursor, n, ctx) });
       });
       if (!sources.length) return { ok: true, data: { items: [], hasMore: false, nextCursor: null } };
-      const scope = `merged\u0000list_chats\u0000${JSON.stringify([p.network?.toLowerCase() ?? null, p.accountIDs ?? null, p.unreadOnly ?? null, p.pinnedOnly ?? null, p.inbox ?? null, p.type ?? null, p.query ?? null])}${noiseLane ? "\u0000noise" : ""}`;
+      const scope = `merged\u0000list_chats\u0000${JSON.stringify([p.network?.toLowerCase() ?? null, p.accountIDs ?? null, p.unreadOnly ?? null, p.pinnedOnly ?? null, p.inbox ?? null, p.type ?? null, p.query ?? null])}${noiseLane ? "\u0000noise" : ""}${p.todo ? "\u0000todo" : ""}`;
       const m = await mergeCollect(sources, p.cursor ?? null, limit, scope);
       if (m === "bad") return err("BAD_PARAMS", "cursor is not from this list (other filters or another action).");
       const all = failuresOrError(m, sources.length);
@@ -188,14 +191,15 @@ export function createRouter(o: RouterOptions) {
   async function unread_summary(p: Partial<ActionParams<"unread_summary">>, ctx: RequestContext = {}): Promise<Outcome<ActionResult<"unread_summary">>> {
     const sources = gmail ? gmail.sources() : [];
     if (!sources.length) return b.unread_summary(p, ctx);
+    const todoOnly = p.todo === true && !!o.todo;
     return guarded(async () => {
       const limit = p.limit ?? 50;
       const failed: FailedSource[] = [];
       const parts = await Promise.all([
         (async () => {
           try {
-            const r = await b.internals.unreadCollect(ctx);
-            return { rank: 0, items: r.all.map((x) => ({ value: x.value, time: activityMs(x.value), key: x.value.id, urls: x.urls })), truncated: r.hasMore };
+            const r = await b.internals.unreadCollect(ctx, todoOnly);
+            return { rank: 0, items: r.all.map((x) => ({ value: x.value, time: activityMs(x.value), key: x.value.id, urls: x.urls })), truncated: r.hasMore, count: todoOnly ? o.todo!.countBeeper() : r.all.length };
           } catch (e) {
             if (e instanceof RequestAborted) throw e;
             failed.push({ source: "beeper", error: b.internals.toFailure(e) ?? makeError("INTERNAL", "Beeper failed while listing.") });
@@ -204,6 +208,11 @@ export function createRouter(o: RouterOptions) {
         })(),
         ...sources.map(async (s, i) => {
           try {
+            // To do's count is the store's: no Gmail call beyond the few rows asked for.
+            if (todoOnly) {
+              const page = await s.listThreads({ ...listFilterFor({ todo: true }, o.noise?.active() ? (id) => o.noise!.isNoise(id) : undefined, o.todo), only: o.todo!.onlyFor(s.email) }, null, limit, ctx);
+              return { rank: 1 + i, items: page.items, truncated: page.hasMore, count: o.todo!.countFor(s.email) };
+            }
             const r = await s.unread(limit, ctx, o.noise?.active() ? (id) => o.noise!.isNoise(id) : undefined);
             return { rank: 1 + i, items: r.items, truncated: r.truncated };
           } catch (e) {
@@ -219,10 +228,11 @@ export function createRouter(o: RouterOptions) {
       const truncatedAny = ok.some((x) => x.truncated);
       const totalUnreadMessages = all.reduce((sum, c) => sum + c.value.unreadCount, 0);
       const build = (n: number) => ({
-        totalUnreadChats: all.length,
+        totalUnreadChats: todoOnly ? ok.reduce((sum, x) => sum + (x.count ?? x.items.length), 0) : all.length,
         totalUnreadMessages: Math.min(totalUnreadMessages, 1_000_000_000),
         items: all.slice(0, n).map((x) => x.value),
         truncated: n < all.length || truncatedAny,
+        ...(todoOnly && o.todo!.full() ? { todoFull: true } : {}),
         ...withFailed(failed),
       });
       const n = fitToFrame(Math.min(limit, all.length), build);
@@ -422,6 +432,7 @@ export function createRouter(o: RouterOptions) {
     if (!gmail) return err("NOT_FOUND", "No such Gmail account on this computer.");
     return guarded(async () => {
       const r = await gmail.remove(email);
+      if (r.ok) o.todo?.forgetAccount(email);
       return r.ok ? { ok: true, data: { accountID: p.accountID, removed: true as const, scope: "all-devices" as const, affectedAccountIDs: [p.accountID] } } : r;
     });
   }

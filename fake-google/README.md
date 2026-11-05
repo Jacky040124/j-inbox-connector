@@ -44,7 +44,7 @@ messages), `noSubject`, `cjk`, `sentOnly`, plus 24 filler threads. A second user
 
 Controls: `consentAs`, `denyNextConsent`, `grantOnly`, `issueRefreshToken(email)` (skip the browser
 dance), `revokeAll(email)`, `isRevoked`, `liveGrants`, `expireAccessTokens`, `expireHistory`,
-`advance(ms)`, `deliver(email, {threadId?, from, subject, text})` (incoming mail),
+`advance(ms)`, `deliver(email, {threadId?, from, subject, text?, html?, attachments?, labels?, body?})` (incoming mail; `body`: a payload of the caller's own, for odd charsets and parts),
 `failNext({method?, path?, status?, body?, network?, hang?, times?})`, `releaseHangs`, `latencyMs`,
 `sent(email)` / `drafts(email)` (what clients sent, with parsed headers and text), `requests`
 (method, path, status, account, `inBatch`: metadata only), `reset()`.

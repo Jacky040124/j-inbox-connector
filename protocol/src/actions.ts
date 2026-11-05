@@ -194,6 +194,7 @@ export const ACTIONS = {
       limit: optional(limit(MAX_PAGE_LIMIT)),
       cursor: optional(pageCursor),
       source: optional(enumOf(["beeper", "gmail"] as const)),
+      todo: optional(boolean()),
     }),
     paramDocs: {
       network: "Chat network name as shown on chats, e.g. WhatsApp, Instagram, LinkedIn, Twitter/X, iMessage, Gmail (case-insensitive)",
@@ -207,6 +208,7 @@ export const ACTIONS = {
       cursor: "nextCursor from the previous page",
       source:
         "Only this source's chats (beeper or gmail; default both, merged), for a quick first page while the other source is slow. First page only: no cursor with it, and its answer has none (page the merged list instead)",
+      todo: "true: only chats the owner has marked as still to handle in the main inbox (a chat's todo flag). Reading only: the flag is the owner's, and no agent can change it. Refused by an owner's computer too old for it",
     },
     defaults: { limit: 25 },
     result: object({ ...page(chatSummary, MAX_PAGE_LIMIT), failedSources }),
@@ -221,15 +223,17 @@ export const ACTIONS = {
   }),
 
   unread_summary: define({
-    description: "Every chat in the main inbox with unread messages (not archived, not low priority): who, which network, how many, and the latest message.",
-    params: object({ limit: optional(limit(MAX_PAGE_LIMIT)) }),
-    paramDocs: { limit: `Most chats to include, 1-${MAX_PAGE_LIMIT} (default 50)` },
+    description: "Every chat in the main inbox with unread messages (not archived, not low priority): who, which network, how many, and the latest message. With todo: the owner's To do chats instead.",
+    params: object({ limit: optional(limit(MAX_PAGE_LIMIT)), todo: optional(boolean()) }),
+    paramDocs: { limit: `Most chats to include, 1-${MAX_PAGE_LIMIT} (default 50)`, todo: "true: the chats the owner still has to handle (their todo flag), read or not: totalUnreadChats counts those, totalUnreadMessages only the items returned" },
     defaults: { limit: 50 },
     result: object({
       totalUnreadChats: integer({ min: 0, max: 1_000_000_000 }),
       totalUnreadMessages: integer({ min: 0, max: 1_000_000_000 }),
       items: array(chatSummary, { max: MAX_PAGE_LIMIT }),
       truncated: boolean(),
+      /** With todo: more chats have been To do than the computer keeps (5000); the oldest were left out. */
+      todoFull: optional(boolean()),
       failedSources,
     }),
     write: false,
@@ -805,6 +809,21 @@ export const ACTIONS = {
     beeper: "none (the connector's local upload store)",
   }),
 
+  get_email_html: define({
+    description: "Internal: one email's sanitized HTML for the owner's page (chunks under flow control, like get_media). Agents read `text`.",
+    params: object({ chatID, messageID }),
+    paramDocs: { chatID: "The Gmail thread", messageID: "A message in it" },
+    defaults: {},
+    result: mediaHead,
+    write: false,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    cloudOnly: true,
+    streamed: true,
+    timeoutMs: MEDIA_TIMEOUT_MS,
+    beeper: "none (Gmail messages.get, format=full; messages.attachments.get for its cid: images)",
+  }),
+
   discard_upload: define({
     description: "Forget a file the owner attached in the web page and then removed (one on an agent's draft stays with the draft). Owner only.",
     params: object({ uploadId: uploadID }),
@@ -862,6 +881,21 @@ export const ACTIONS = {
     timeoutMs: REQUEST_TIMEOUT_MS,
     rateLimitPerMinute: 60,
     beeper: "none (the connector's noise store; read_chat limit 5 for the example)",
+  }),
+
+  set_todo: define({
+    description: "The owner's To do state of a chat: true puts it back, false is Done. Idempotent. It lives on the owner's computer, apart from the network's read state: nothing is sent, marked read or archived in Beeper or Gmail. The answer is the flag as it now stands: Done with upTo stays To do (true) if the computer knows a newer message from someone else. Owner only.",
+    params: object({ chatID, todo: boolean(), upTo: optional(isoDateTime()) }),
+    paramDocs: { chatID: "Chat ID", todo: "true: To do; false: handled", upTo: "For Done: the time of the newest message on the owner's screen" },
+    defaults: {},
+    result: object({ chatID, todo: boolean() }),
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    rateLimitPerMinute: 60,
+    beeper: "none (the connector's To do store)",
   }),
 
   get_media: define({

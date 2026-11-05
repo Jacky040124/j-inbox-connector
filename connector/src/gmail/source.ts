@@ -2,12 +2,20 @@
 // unread summary, the writes (mark read, archive, reply-all draft and send, new email) and
 // attachments. Every Gmail call goes through the account's GmailClient.
 import {
+  GMAIL_ID_RE,
+  GMAIL_ATTACHMENT_ID_RE,
   LIST_SCAN_BUDGET_MS,
   MAX_CURSOR_LENGTH,
+  MAX_EMAIL_CID_IMAGE_BYTES,
+  MAX_EMAIL_CID_TOTAL_BYTES,
+  MAX_EMAIL_HTML_BYTES,
+  MAX_EMAIL_TEXT_LENGTH,
   MAX_MEDIA_BYTES,
   MIME_RE,
   gmailChatID,
   makeError,
+  sanitizeText,
+  truncateText,
   type ActionParams,
   type ChatSummary,
   type ErrorBody,
@@ -18,8 +26,10 @@ import { SourceFailure, type MergeItem, type SourcePage } from "../merge.ts";
 import { CursorTooLong, RequestAborted } from "../pager.ts";
 import type { RequestContext } from "../actions.ts";
 import type { GCall, GmailClient } from "./client.ts";
-import { activityMs, header, isDraft, mapGmailMessage, mapGmailThread, threadMessages, type GMessage, type GPart, type GThread } from "./map.ts";
-import { b64urlToBytes, buildMessage, headerText, parseAddressList, rawForGmail, replyAllRecipients, replyReferences, replySubject, type OutgoingFile } from "./mime.ts";
+import { activityMs, charsetOfPart, header, htmlParts, inlineHtmlOf, isDraft, mapGmailMessage, mapGmailThread, partsByContentId, threadMessages, type GMessage, type GPart, type GThread } from "./map.ts";
+import { imageDataUri } from "./email-html.ts";
+import { cidReferencesIn, compareInWorker, sanitizeInWorker } from "./email-html-run.ts";
+import { b64urlToBytes, buildMessage, decodeCharset, headerText, parseAddressList, rawForGmail, replyAllRecipients, replyReferences, replySubject, splitQuoted, type OutgoingFile } from "./mime.ts";
 import { sniffImageType } from "../media.ts";
 import { GMAIL_BATCH_SIZE } from "./batch.ts";
 import { ThreadMetaCache, keptThread } from "./meta-cache.ts";
@@ -34,6 +44,15 @@ const REPLY_HEADERS = ["From", "To", "Cc", "Reply-To", "Subject", "Message-ID", 
 export const Q_PRIMARY = "in:inbox category:primary";
 export const Q_LOW_PRIORITY = "in:inbox -category:primary";
 const MAX_SCAN_PAGES = 5;
+/** A walk that reads no thread but the ones it wants (ListFilter.only) can go further for the same quota: a list call each. */
+const MAX_ONLY_PAGES = 20;
+/** Sanitized HTML kept in memory, here on the Mac and nowhere else: opening and folding an email again costs no Gmail quota. */
+const HTML_KEPT_ENTRIES = 8;
+const HTML_KEPT_BYTES = 16 * 1024 * 1024;
+const HTML_KEPT_MS = 10 * 60_000;
+/** What read_chat worked out about emails' two versions: messages do not change, and a thread is read again and again. */
+const AGREEMENT_KEPT_ENTRIES = 300;
+const AGREEMENT_MESSAGES_AT_ONCE = 30;
 
 export type Out<T> = { ok: true; data: T } | { ok: false; error: ErrorBody };
 const fail = (code: ErrorBody["code"], message: string): { ok: false; error: ErrorBody } => ({ ok: false, error: makeError(code, message) });
@@ -47,10 +66,10 @@ const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64url");
 const unb64 = (s: string) => Buffer.from(s, "base64url").toString("utf8");
 const scopeHash = (s: string) => createHash("sha256").update(s).digest().subarray(0, 9).toString("base64url");
 
-/** A position in a Gmail list: page token (null = first page) and offset in that page. */
-type Pos = { t: string | null; o: number };
+/** A position in a Gmail list: page token (null = first page), offset in that page, and how many of a filter's `only` threads came before it. */
+type Pos = { t: string | null; o: number; f?: number };
 function encodePos(p: Pos): string {
-  const s = "g1." + b64(JSON.stringify([p.t, p.o]));
+  const s = "g1." + b64(JSON.stringify(p.f ? [p.t, p.o, p.f] : [p.t, p.o]));
   if (s.length > MAX_CURSOR_LENGTH) throw new CursorTooLong();
   return s;
 }
@@ -59,7 +78,7 @@ function decodePos(s: string | null): Pos | null {
   if (!s.startsWith("g1.")) return null;
   try {
     const v = JSON.parse(unb64(s.slice(3)));
-    if (Array.isArray(v) && v.length === 2 && (v[0] === null || (typeof v[0] === "string" && v[0].length <= 512)) && Number.isSafeInteger(v[1]) && v[1] >= 0 && v[1] <= 500) return { t: v[0], o: v[1] };
+    if (Array.isArray(v) && (v.length === 2 || (v.length === 3 && Number.isSafeInteger(v[2]) && v[2] >= 0)) && (v[0] === null || (typeof v[0] === "string" && v[0].length <= 512)) && Number.isSafeInteger(v[1]) && v[1] >= 0 && v[1] <= 500) return { t: v[0], o: v[1], ...(v.length === 3 ? { f: v[2] } : {}) };
   } catch {}
   return null;
 }
@@ -69,19 +88,29 @@ export type ListFilter = {
   keep: (c: ChatSummary) => boolean;
   /** Set isLowPriority from the query (Gmail knows the tab; the labels only hint at it). */
   lowPriority?: boolean;
+  /**
+   * To do: of what Gmail lists, only these threads are read at all (the rest cost no metadata), `total` of them (`counted`) are
+   * expected, so the walk ends when all have come, and `missing` hears who did not when it reached the list's end.
+   */
+  only?: { wants(chatID: string): boolean; counted(chatID: string): boolean; total: number; missing(found: ReadonlySet<string>): void };
 };
+
+/** What the lists ask of To do (todo/tracker.ts). */
+export type TodoLists = { inList(c: ChatSummary, o?: { exactScope?: boolean }): boolean; onlyFor(email: string): NonNullable<ListFilter["only"]> };
 
 /**
  * Gmail query and post-filter for list_chats params (network/accountIDs are routed before). `isNoise`
  * (noise on): noise threads leave the Primary list; Low priority gets them from noiseLaneFilter.
  */
-export function listFilterFor(p: Partial<ActionParams<"list_chats">>, isNoise?: (chatID: string) => boolean): ListFilter {
+export function listFilterFor(p: Partial<ActionParams<"list_chats">>, isNoise?: (chatID: string) => boolean, todo?: TodoLists): ListFilter {
   const q: string[] = [];
   const keeps: ((c: ChatSummary) => boolean)[] = [];
   let lowPriority: boolean | undefined;
-  if (p.inbox === "primary") q.push(Q_PRIMARY), keeps.push((c) => !c.isArchived && !isNoise?.(c.id)), (lowPriority = false);
+  // To do is the main inbox's, whatever else is asked.
+  if (p.inbox === "primary" || p.todo) q.push(Q_PRIMARY), keeps.push((c) => !c.isArchived && !isNoise?.(c.id)), (lowPriority = false);
   else if (p.inbox === "low-priority") q.push(Q_LOW_PRIORITY), keeps.push((c) => !c.isArchived), (lowPriority = true);
   else if (p.inbox === "archive") q.push("-in:inbox"), keeps.push((c) => c.isArchived);
+  if (p.todo && todo) keeps.push((c) => todo.inList(c, { exactScope: true }));
   if (p.unreadOnly) q.push("is:unread"), keeps.push((c) => c.unreadCount > 0);
   if (p.pinnedOnly) q.push("is:starred"), keeps.push((c) => c.isPinned);
   if (p.type && p.type !== "any") keeps.push((c) => c.type === p.type);
@@ -102,7 +131,7 @@ export function noiseLaneFilter(p: Partial<ActionParams<"list_chats">>, isNoise:
 
 export type GmailSource = ReturnType<typeof createGmailSource>;
 
-export function createGmailSource(o: { email: string; client: GmailClient; scan?: { maxPages?: number; budgetMs?: number }; now?: () => number; metaCache?: ThreadMetaCache }) {
+export function createGmailSource(o: { email: string; client: GmailClient; scan?: { maxPages?: number; budgetMs?: number }; now?: () => number; metaCache?: ThreadMetaCache; htmlKeptMs?: number }) {
   const { email, client } = o;
   const now = o.now ?? Date.now;
   const opts = (ctx: RequestContext) => ({ signal: ctx.signal });
@@ -150,7 +179,14 @@ export function createGmailSource(o: { email: string; client: GmailClient; scan?
     let pos: Pos = start;
     let hasMore = false;
     let resume: Pos | null = null;
-    const pageSize = Math.min(100, Math.max(limit + 5, 20));
+    const only = filter.only;
+    const pageSize = only ? 100 : Math.min(100, Math.max(limit + 5, 20));
+    const pagesAtMost = only ? (o.scan?.maxPages ?? MAX_ONLY_PAGES) : maxPages;
+    // How many of the wanted threads were met, this walk and the pages before it; which ones, on a walk from the top.
+    let met = start.f ?? 0;
+    const metHere = new Set<string>();
+    let allMet = false;
+    let lastLooked: string | null = null;
     for (let pages = 1; ; pages++) {
       checkTime(ctx);
       const list = must(await client.get(client.path(["threads"], { q: filter.q || undefined, maxResults: String(pageSize), pageToken: pos.t ?? undefined }), opts(ctx)));
@@ -163,45 +199,83 @@ export function createGmailSource(o: { email: string; client: GmailClient; scan?
       let i = pos.o;
       while (i < ids.length && kept.length < limit) {
         const chunk = ids.slice(i, i + Math.min(GMAIL_BATCH_SIZE, limit - kept.length + 2));
-        const threads = await threadMetas(chunk, (id) => historyOf.get(id), ctx);
+        // With `only`, the threads not wanted are not read: a list call says all there is to know about them.
+        const wanted = only ? chunk.filter((id) => only.wants(gmailChatID(email, id))) : chunk;
+        const got = await threadMetas(wanted, (id) => historyOf.get(id), ctx);
+        const threadOf = new Map(wanted.map((id, k) => [id, got[k]!]));
         for (let j = 0; j < chunk.length; j++) {
           const idx = i + j;
-          const after: Pos = idx + 1 < ids.length ? { t: pos.t, o: idx + 1 } : next ? { t: next, o: 0 } : { t: pos.t, o: ids.length };
+          if (only && threadOf.has(chunk[j]!)) {
+            const chatID = gmailChatID(email, chunk[j]!);
+            if (only.counted(chatID)) met++;
+            metHere.add(chatID);
+          }
+          const counted = only && met ? { f: met } : {};
+          const after: Pos = idx + 1 < ids.length ? { t: pos.t, o: idx + 1, ...counted } : next ? { t: next, o: 0, ...counted } : { t: pos.t, o: ids.length, ...counted };
           const urls: string[] = [];
-          const chat = threads[j] ? mapGmailThread(threads[j], email, { onAsset: (u) => urls.push(u) }) : null;
+          const t = threadOf.get(chunk[j]!);
+          const chat = t ? mapGmailThread(t, email, { onAsset: (u) => urls.push(u) }) : null;
           if (chat && filter.lowPriority !== undefined) chat.isLowPriority = filter.lowPriority;
           if (chat && filter.keep(chat)) kept.push({ item: { value: chat, time: activityMs(chat), key: chat.id, urls }, after });
-          if (kept.length >= limit) {
+          allMet = !!only && met >= only.total;
+          if (kept.length >= limit || allMet) {
             const moreHere = idx + 1 < ids.length;
-            hasMore = moreHere || !!next;
-            resume = after;
+            hasMore = !allMet && (moreHere || !!next);
+            resume = hasMore ? after : null;
             break;
           }
         }
+        if (kept.length >= limit || allMet) break;
         i += chunk.length;
       }
-      if (kept.length >= limit) break;
+      if (kept.length >= limit || allMet) break;
+      lastLooked = ids.at(-1) ?? lastLooked;
       if (!next) {
         hasMore = false;
         resume = null;
+        // Its end, from the top: what is wanted and did not come is not in this list.
+        // Only a walk of exactly the main inbox can say so: a narrower list (pinned, unread, a query: any agent may ask one) has left out what it never looked for.
+        if (only && cursor === null && filter.q === Q_PRIMARY) only.missing(metHere);
         break;
       }
-      pos = { t: next, o: 0 };
-      if (pages >= maxPages || now() - t0 >= budget || (ctx.deadline !== undefined && now() >= ctx.deadline)) {
+      pos = { t: next, o: 0, ...(only && met ? { f: met } : {}) };
+      if (pages >= pagesAtMost || now() - t0 >= budget || (ctx.deadline !== undefined && now() >= ctx.deadline)) {
         hasMore = true;
         resume = pos;
         break;
       }
     }
     const items = kept.map((k) => k.item);
+    // A walk cut short that read nothing it could tell the time by: how far back it looked, from the last thread it listed.
+    let horizon: number | undefined;
+    if (only && hasMore && kept.length < limit && lastLooked) {
+      const [t] = await threadMetas([lastLooked], () => undefined, ctx).catch(() => [null]);
+      const c = t ? mapGmailThread(t, email) : null;
+      if (c) horizon = activityMs(c);
+    }
     return {
       items,
       hasMore,
+      ...(horizon !== undefined ? { horizon } : {}),
       cursorAfter: (n) => {
         if (n < items.length) return n > 0 ? encodePos(kept[n - 1]!.after) : cursor === null ? encodePos({ t: null, o: 0 }) : cursor;
         return hasMore && resume ? encodePos(resume) : null;
       },
     };
+  }
+
+  /** Ids of the threads Gmail lists for a query, one page: a list call, no thread read (10 quota units per 100 threads). */
+  async function threadIDs(q: string, pageToken: string | null, ctx: RequestContext): Promise<{ ids: string[]; next: string | null }> {
+    checkTime(ctx);
+    const list = must(await client.get(client.path(["threads"], { q, maxResults: "100", pageToken: pageToken ?? undefined }), opts(ctx)));
+    const ids: string[] = Array.isArray(list?.threads) ? list.threads.map((t: any) => t?.id).filter((id: unknown): id is string => typeof id === "string" && GMAIL_ID_RE.test(id)) : [];
+    return { ids, next: typeof list?.nextPageToken === "string" && list.nextPageToken ? list.nextPageToken : null };
+  }
+
+  /** The main inbox's chats, newest first, one page (metadata from the cache while a thread's historyId stands). */
+  async function primaryPage(cursor: string | null, ctx: RequestContext): Promise<{ items: ChatSummary[]; next: string | null }> {
+    const page = await listThreads({ q: Q_PRIMARY, keep: () => true, lowPriority: false }, cursor, 50, ctx);
+    return { items: page.items.map((i) => i.value), next: page.cursorAfter(page.items.length) };
   }
 
   /** Unread chats in the primary inbox, newest first (unread_summary); noise ones (isNoise) left out. */
@@ -239,6 +313,7 @@ export function createGmailSource(o: { email: string; client: GmailClient; scan?
       const item = mapGmailMessage(m, email, { onAsset: (x) => u.push(x) });
       if (item) items.push(item), urls.push(u);
     }
+    await showWhatTheOwnerSees(msgs, chat.preview ? [...items, chat.preview] : items);
     return { ok: true, data: { chat, items, offsets: { total: msgs.length, from: offset, slice: end - startAt }, urls, chatURLs } };
   }
 
@@ -409,6 +484,129 @@ export function createGmailSource(o: { email: string; client: GmailClient; scan?
     return { ok: true, data: { mimeType, fileName: name || null, bytes } };
   }
 
+  // Messages do not change; drafts are refused before they get here. Bounded, gone with the process, and gone when their time is up: a timer, not the next read.
+  const htmlKept = new Map<string, { threadId: string; bytes: Uint8Array; until: number }>();
+  const keepHtml = (messageId: string, threadId: string, bytes: Uint8Array) => {
+    if (bytes.length > HTML_KEPT_BYTES) return;
+    const keptMs = o.htmlKeptMs ?? HTML_KEPT_MS;
+    const entry = { threadId, bytes, until: now() + keptMs };
+    htmlKept.set(messageId, entry);
+    (setTimeout(() => {
+      if (htmlKept.get(messageId) === entry) htmlKept.delete(messageId);
+    }, keptMs) as { unref?: () => void }).unref?.();
+    let total = 0;
+    for (const v of htmlKept.values()) total += v.bytes.length;
+    for (const [k, v] of htmlKept) {
+      if (htmlKept.size <= HTML_KEPT_ENTRIES && total <= HTML_KEPT_BYTES) break;
+      htmlKept.delete(k);
+      total -= v.bytes.length;
+    }
+  };
+
+  const agreement = new Map<string, string | null>();
+
+  /**
+   * When an email's plain part clearly differs from what its HTML shows, `text` becomes what the HTML shows, so that whoever reads
+   * the thread (agents, Jev) reads what the owner sees; the plain part stays as `plainText`, for the owner's Plain text view (the
+   * cloud gives it to no agent). A separate step on purpose: messageBody decides which part is the body, this only compares.
+   * An email that cannot be sanitized shows the owner its text anyway, so nothing changes. Within read_chat's deadline, off the main loop.
+   */
+  async function showWhatTheOwnerSees(msgs: GMessage[], items: MessageItem[]): Promise<void> {
+    const wanted = new Set(items.map((i) => i.id));
+    const asked: { id: string; html: string; plain: string }[] = [];
+    for (const m of msgs) {
+      if (!m.id || !wanted.has(m.id) || agreement.has(m.id) || asked.length >= AGREEMENT_MESSAGES_AT_ONCE) continue;
+      const item = items.find((i) => i.id === m.id)!;
+      if (!item.hasHtml) continue;
+      const parts = htmlParts(m.payload).map(inlineHtmlOf);
+      const html = parts.filter((t): t is string => t !== null).join("\n");
+      if (!html || Buffer.byteLength(html, "utf8") > MAX_EMAIL_HTML_BYTES) continue;
+      asked.push({ id: m.id, html, plain: `${item.text ?? ""}\n${item.quotedText ?? ""}` });
+    }
+    if (asked.length) {
+      for (const [id, shown] of await compareInWorker(asked)) {
+        agreement.set(id, shown === null ? null : shown.slice(0, MAX_EMAIL_TEXT_LENGTH * 2));
+        if (agreement.size > AGREEMENT_KEPT_ENTRIES) agreement.delete(agreement.keys().next().value!);
+      }
+    }
+    for (const item of items) {
+      const shown = agreement.get(item.id);
+      if (!shown) continue;
+      const { main, quoted } = splitQuoted(sanitizeText(shown));
+      const t = truncateText(main.replace(/\s+$/, ""), MAX_EMAIL_TEXT_LENGTH);
+      if (item.text) item.plainText = item.text;
+      item.text = t.text;
+      if (t.truncated) item.textTruncated = true;
+      else delete item.textTruncated;
+      if (quoted) item.quotedText = truncateText(quoted, MAX_EMAIL_TEXT_LENGTH).text;
+      else delete item.quotedText;
+    }
+  }
+
+  /** A part's bytes, held in the message or by attachmentId. null: unreadable. */
+  async function partBytes(messageId: string, p: GPart, ctx: RequestContext): Promise<Uint8Array | null> {
+    if (typeof p.body?.data === "string") return b64urlToBytes(p.body.data);
+    const id = p.body?.attachmentId;
+    if (typeof id !== "string" || !GMAIL_ATTACHMENT_ID_RE.test(id)) return null;
+    const a = await client.get(client.path(["messages", messageId, "attachments", id]), opts(ctx));
+    return a.ok && typeof a.body?.data === "string" ? b64urlToBytes(a.body.data) : null;
+  }
+
+  /** The message's own images that its HTML names, as data: URIs: only those parts are fetched, within the limits; the rest are simply not there. */
+  async function cidImages(messageId: string, payload: GPart | undefined, html: string, ctx: RequestContext): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    const wanted = (await cidReferencesIn(html)) ?? [];
+    if (!wanted.length) return out;
+    const parts = partsByContentId(payload);
+    let total = 0;
+    for (const id of wanted) {
+      const p = parts.get(id);
+      if (!p) continue;
+      const declared = typeof p.body?.size === "number" ? p.body.size : 0;
+      if (declared > MAX_EMAIL_CID_IMAGE_BYTES || total + declared > MAX_EMAIL_CID_TOTAL_BYTES) continue;
+      checkTime(ctx);
+      const bytes = await partBytes(messageId, p, ctx);
+      if (!bytes || total + bytes.length > MAX_EMAIL_CID_TOTAL_BYTES) continue;
+      const uri = imageDataUri(bytes);
+      if (!uri) continue;
+      total += bytes.length;
+      out.set(id, uri);
+    }
+    return out;
+  }
+
+  /** get_email_html: one message's HTML, sanitized. Its plain metadata was already read by read_chat; this asks Gmail once per message, and no more while it is kept. */
+  async function emailHtml(threadId: string, messageId: string, ctx: RequestContext): Promise<Out<Uint8Array>> {
+    const gone = () => fail("NOT_FOUND", "This email is not in this thread, or has no HTML.");
+    const kept = htmlKept.get(messageId);
+    if (kept && kept.until > now()) return kept.threadId === threadId ? { ok: true, data: kept.bytes } : gone();
+    const r = await client.get(client.path(["messages", messageId], { format: "full" }), opts(ctx));
+    if (!r.ok) return r;
+    const m = r.body as GMessage;
+    // A draft is the owner's unsent text: it never leaves the Mac, in any form.
+    if (m?.threadId !== threadId || isDraft(m)) return gone();
+    const parts = htmlParts(m.payload);
+    if (!parts.length) return gone();
+    const tooLarge = () => fail("TOO_LARGE", "This email's HTML is too large to show here.");
+    if (parts.reduce((n, p) => n + (typeof p.body?.size === "number" ? p.body.size : 0), 0) > MAX_EMAIL_HTML_BYTES) return tooLarge();
+    const texts: string[] = [];
+    for (const p of parts) {
+      checkTime(ctx);
+      const inline = typeof p.body?.data === "string" ? inlineHtmlOf(p) : null;
+      const bytes = inline === null ? await partBytes(messageId, p, ctx) : null;
+      const t = inline ?? (bytes ? decodeCharset(bytes, charsetOfPart(p)) : null);
+      if (t !== null) texts.push(t);
+    }
+    if (!texts.length) return fail("UPSTREAM_DOWN", "Gmail sent an unreadable email.");
+    const html = texts.join("\n");
+    if (Buffer.byteLength(html, "utf8") > MAX_EMAIL_HTML_BYTES) return tooLarge();
+    const clean = await sanitizeInWorker(html, await cidImages(messageId, m.payload, html, ctx));
+    if (clean === null) return fail("NOT_FOUND", "This email's HTML cannot be shown.");
+    const bytes = new TextEncoder().encode(clean.html);
+    keepHtml(messageId, threadId, bytes);
+    return { ok: true, data: bytes };
+  }
+
   async function profile(ctx: RequestContext): Promise<Out<{ emailAddress: string; historyId: string }>> {
     const r = await client.get(client.path(["profile"]), opts(ctx));
     if (!r.ok) return r;
@@ -418,5 +616,5 @@ export function createGmailSource(o: { email: string; client: GmailClient; scan?
     return { ok: true, data: { emailAddress: e, historyId: h } };
   }
 
-  return { email, client, listThreads, unread, readThread, readCursor, search, markRead, modifyThread, draftReply, sendReply, compose, attachment, profile };
+  return { email, client, listThreads, threadIDs, primaryPage, unread, readThread, readCursor, search, markRead, modifyThread, draftReply, sendReply, compose, attachment, emailHtml, profile };
 }

@@ -13,5 +13,6 @@ export * from "./actions.ts";
 export * from "./frames.ts";
 export * from "./agent.ts";
 export * from "./pairing.ts";
+export * from "./email-frame.ts";
 export * from "./web.ts";
 export * from "./auth.ts";

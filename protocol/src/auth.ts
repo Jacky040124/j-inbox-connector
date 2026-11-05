@@ -18,6 +18,7 @@
 import { AGENT_ACTION_PATH_PREFIX, RAFT_CALLBACK_PATH, authorizeRoomAccess, canonicalOrigin, type AccessDecision, type Principal, type RoomBinding } from "./agent.ts";
 import { AGENT_SESSION_MAX_AGE_SECONDS, HUMAN_SESSION_ABSOLUTE_SECONDS, HUMAN_SESSION_IDLE_SECONDS, LOGIN_INIT_TTL_SECONDS } from "./limits.ts";
 import { PAIR_PATHS } from "./pairing.ts";
+import { EMAIL_FRAME_PATH } from "./email-frame.ts";
 import { GOOGLE_PATHS } from "./gmail.ts";
 import { AUTH_LOGOUT, LIVE_PATH, sessionCookie, type SessionKind } from "./web.ts";
 
@@ -245,7 +246,7 @@ export type Surface = "web" | "agent" | "connector" | "public";
 export function surfaceForPath(pathname: string): Surface {
   if (pathname.startsWith(AGENT_ACTION_PATH_PREFIX)) return "agent";
   if (pathname === PAIR_PATHS.start || pathname === PAIR_PATHS.poll || pathname === "/connect" || pathname === GOOGLE_PATHS.token) return "connector";
-  if (pathname.startsWith("/api/") || pathname === LIVE_PATH || pathname === AUTH_LOGOUT.path || pathname === GOOGLE_PATHS.start || pathname === GOOGLE_PATHS.callback) return "web";
+  if (pathname.startsWith("/api/") || pathname.startsWith(EMAIL_FRAME_PATH) || pathname === LIVE_PATH || pathname === AUTH_LOGOUT.path || pathname === GOOGLE_PATHS.start || pathname === GOOGLE_PATHS.callback) return "web";
   return "public";
 }
 

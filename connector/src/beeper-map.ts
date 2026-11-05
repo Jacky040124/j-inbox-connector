@@ -35,6 +35,7 @@ import {
   type Reaction,
 } from "@j-inbox/protocol";
 import { contactName, isAddress, sameAddress } from "./contacts.ts";
+import { noteHiddenPreview } from "./todo/store.ts";
 
 type Raw = Record<string, any>;
 export type MapOptions = {
@@ -242,6 +243,7 @@ export function mapChat(raw: unknown, opts: MapOptions = {}): ChatSummary | null
   // Only whether a draft exists: the owner's unsent text never leaves the Mac.
   if (isObj(raw.draft)) out.hasDraft = typeof raw.draft.text === "string" && raw.draft.text.length > 0;
   if ("preview" in raw) out.preview = raw.preview ? mapMessage(raw.preview, { ...opts, keepHidden: true }) : null;
+  if (out.preview && raw.preview.isHidden === true) noteHiddenPreview(out.preview);
   return out;
 }
 

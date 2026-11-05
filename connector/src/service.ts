@@ -1,6 +1,6 @@
 // The background service (`j-inbox run`, started by launchd): Beeper client + whitelist dispatcher
 // + cloud link + Beeper events + health checks + re-sync + the noise judge (every conversation with
-// new activity, Beeper's or Gmail's, is asked about), with the local audit log and a small
+// new activity, Beeper's or Gmail's, is asked about) + To do, with the local audit log and a small
 // metadata-only state file that `j-inbox status` reads.
 import { watchContacts } from "./contacts.ts";
 import { readFileSync } from "node:fs";
@@ -22,6 +22,8 @@ import { cloudTokenRefresher } from "./gmail/client.ts";
 import { createGmailService } from "./gmail/service.ts";
 import { NoiseStore } from "./noise/store.ts";
 import { NoiseJudge } from "./noise/judge.ts";
+import { TodoStore } from "./todo/store.ts";
+import { TodoTracker } from "./todo/tracker.ts";
 import { GmailAccounts } from "./gmail/accounts.ts";
 import { ThreadMetaCache } from "./gmail/meta-cache.ts";
 import { isStorableSecret } from "./secrets.ts";
@@ -149,7 +151,17 @@ export async function startService(o: ServiceOptions): Promise<Service> {
   const assets = new AssetAllowlist({ path: o.paths.assetsFile });
   const idempotency = createWriteDedupe({ journal: new FileIdempotencyJournal(o.paths.idempotencyFile) });
   const noise = new NoiseStore({ path: o.paths.noiseFile });
-  const actions = createActions(client, { connectorVersion: o.version, assets, idempotency, noise });
+  // Late-bound: the tracker walks Beeper and Gmail through what is built next.
+  const todo: TodoTracker = new TodoTracker({
+    store: new TodoStore({ path: o.paths.todoFile, log: (m) => log(m) }),
+    noise,
+    beeperPage: (cursor, ctx) => actions.internals.chatsPage(cursor, ctx),
+    gmail: () => gmail.sources().filter((s) => gmail.status(s.email) !== "reconnect_required"),
+    readChat: (p, ctx) => readChat(p, ctx),
+    onChange: (chatID, flag) => emit({ type: "event", kind: "chat", op: "upserted", chatID, ts: new Date().toISOString(), todo: flag }),
+    log: (m) => log(m),
+  });
+  const actions = createActions(client, { connectorVersion: o.version, assets, idempotency, noise, todo });
   // Gmail: tokens in the Keychain, access tokens refreshed through the cloud (the client secret
   // cannot ship in this open-source connector), Gmail itself reached directly from this Mac.
   const metaCache = new ThreadMetaCache({ path: o.paths.gmailCacheFile, key: await gmailCacheKey(o.secrets, o.paths, false) });
@@ -168,6 +180,7 @@ export async function startService(o: ServiceOptions): Promise<Service> {
       audit.lifecycle(e);
       // The first Gmail account: from now on its list metadata is kept on disk too (sealed).
       if (e === "gmail.connected" && !metaCache.persistent) void gmailCacheKey(o.secrets, o.paths, true).then((k) => k && metaCache.persistTo(o.paths.gmailCacheFile, k));
+      if (e === "gmail.connected") void todo.sync();
     },
   });
   const drafts = new DraftStore({ path: o.paths.draftsFile });
@@ -188,7 +201,7 @@ export async function startService(o: ServiceOptions): Promise<Service> {
       for (const chatID of ids) emit({ type: "event", kind: "chat", op: "upserted", chatID, ts });
     },
   });
-  const dispatcher = createDispatcher({ actions, client, assets, gmail, idempotency, drafts, uploads, noise, judge });
+  const dispatcher = createDispatcher({ actions, client, assets, gmail, idempotency, drafts, uploads, noise, judge, todo });
   readChat = dispatcher.readChat;
 
   let link: CloudLink;
@@ -196,9 +209,10 @@ export async function startService(o: ServiceOptions): Promise<Service> {
   const pending = new EventBuffer();
   const connected = () => link?.state.status === "connected";
   const emit = (f: EventFrame) => link.sendEvent(f) || (!connected() && pending.add(f));
-  // New activity (a message in, or the owner's own out) is judged again; the event goes on as before.
+  // New activity (a message in, or the owner's own out) is judged again, and To do hears who wrote; the event goes on as before.
   const touch = (f: EventFrame) => {
     if (f.kind === "message" && f.op === "upserted") judge.touch(f.chatID);
+    todo.event(f);
   };
   const send = (f: EventFrame) => (touch(f), emit(f));
   // Gmail keeps its own place in history instead: true only when the event really went out.
@@ -234,7 +248,10 @@ export async function startService(o: ServiceOptions): Promise<Service> {
     },
     // Every subscription, the first too: when Beeper starts after the connector, the welcome-time
     // re-sync found it down and sent nothing. Chats already reported are skipped by the Reconciler.
-    onOpen: () => void reconciler.run(),
+    onOpen: () => {
+      void reconciler.run();
+      void todo.sync();
+    },
     log: (m) => log(m),
   });
 
@@ -275,6 +292,7 @@ export async function startService(o: ServiceOptions): Promise<Service> {
       if (flushed) log(`cloud: sent ${flushed} events kept while disconnected`);
       void reconciler.run();
       void gmail.pollNow();
+      void todo.sync();
     },
     onViewers: (count) => gmail.setViewers(count),
     onRequest: (r) => audit.request(r),
@@ -304,6 +322,7 @@ export async function startService(o: ServiceOptions): Promise<Service> {
       health.stop();
       gmail.stopPolling();
       judge.stop();
+      todo.stop();
       clearInterval(flushTimer);
       await link.stop(graceMs);
       try {
@@ -315,6 +334,7 @@ export async function startService(o: ServiceOptions): Promise<Service> {
 
   audit.lifecycle("service.started");
   log(`j-inbox ${o.version}: starting (device ${config.deviceID})`);
+  todo.start();
   health.start();
   events.start();
   gmail.startPolling(sendNow, connected);

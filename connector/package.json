@@ -9,7 +9,7 @@
   },
   "scripts": {
     "test": "bun test",
-    "build": "mkdir -p dist && cd dist && bun build --compile --target=bun-darwin-arm64 ../src/cli.ts --outfile j-inbox && rm -f .*.bun-build"
+    "build": "mkdir -p dist && cd dist && bun build --compile --target=bun-darwin-arm64 ../src/cli.ts ../src/gmail/email-html-worker.ts --outfile j-inbox && rm -f .*.bun-build"
   },
   "dependencies": {
     "@j-inbox/protocol": "workspace:*"

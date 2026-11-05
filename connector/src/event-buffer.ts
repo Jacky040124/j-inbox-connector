@@ -48,7 +48,9 @@ export class EventBuffer {
       const { othersAt: _drop, ...base } = f;
       next = { ...base, messageIDs: ids, ts: later(had.ts, f.ts), ...(othersAt !== undefined ? { othersAt } : {}) };
     } else if (had?.kind === "chat" && f.kind === "chat") {
-      next = { ...f, ts: later(had.ts, f.ts) };
+      // The last word on To do, whichever event said it.
+      const todo = f.todo ?? had.todo;
+      next = { ...f, ts: later(had.ts, f.ts), ...(todo !== undefined ? { todo } : {}) };
     }
     // Re-inserting moves the chat to the newest end, so overflow drops the chats quiet the longest.
     this.items.delete(key);

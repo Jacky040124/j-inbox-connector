@@ -28,11 +28,12 @@ import {
   type Schema,
 } from "./schema.ts";
 import { errorBody, errorCode } from "./errors.ts";
-import { beeperHealth, chatID, ownId, versionString } from "./model.ts";
+import { beeperHealth, chatID, messageID, ownId, versionString } from "./model.ts";
 import { SNOOZE_REASONS } from "./snooze.ts";
 import { draftMeta, MAX_ACTIVE_DRAFTS, raftAgentID } from "./drafts.ts";
 import { delegationMeta } from "./delegations.ts";
 import { approvalView, canonicalOrigin } from "./agent.ts";
+import { EMAIL_FRAME_PATH, EMAIL_FRAME_TICKET_RE } from "./email-frame.ts";
 import { eventFrame } from "./frames.ts";
 import type { ActionName } from "./actions.ts";
 import { AGENT_SESSION_MAX_AGE_SECONDS, HUMAN_SESSION_ABSOLUTE_SECONDS, MAX_FRAME_BYTES } from "./limits.ts";
@@ -75,6 +76,13 @@ export const API_ROUTES = {
    * "upload-read.v1" (NOT_SUPPORTED otherwise). The id stays out of the URL.
    */
   uploadRead: { method: "POST", path: "/api/upload/read" },
+  /**
+   * Body: emailFrameRequest {chatID, messageID}. Response: apiResponse(emailFrameTicket): a ticket good
+   * for one GET of EMAIL_FRAME_PATH + ticket within EMAIL_FRAME_TTL_MS, by this session only, which
+   * answers the email's sanitized HTML as a sandboxed document (email-frame.ts). No id in that URL.
+   * Owner only; needs "email-html.v1" (NOT_SUPPORTED otherwise).
+   */
+  emailFrame: { method: "POST", path: "/api/email/frame" },
   devices: { method: "GET", path: "/api/devices" },
   /**
    * Before answering {revoked:true} the room closes the device's live /connect socket with 4403
@@ -155,6 +163,11 @@ export const AUTH_LOGOUT = { method: "POST", path: "/auth/logout" } as const;
 export const mediaRequest = object({ url: assetUrl() });
 export type MediaRequest = Infer<typeof mediaRequest>;
 
+export const emailFrameRequest = object({ chatID, messageID });
+export type EmailFrameRequest = Infer<typeof emailFrameRequest>;
+export const emailFrameTicket = object({ ticket: string({ min: 43, max: 43, pattern: EMAIL_FRAME_TICKET_RE }), expiresAt: isoDateTime() });
+export type EmailFrameTicket = Infer<typeof emailFrameTicket>;
+
 /** On every /api response (JSON and media). */
 export const API_NO_STORE_HEADERS = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } as const;
 
@@ -195,6 +208,11 @@ export const WEB_HTML_HEADERS = {
   "X-Content-Type-Options": "nosniff",
   "Cache-Control": "no-store",
 } as const;
+
+/** WEB_HTML_HEADERS for a page of this origin: frames only from the email frame's path, nothing else of ours or anyone's. */
+export function appHtmlHeaders(appOrigin: string): Record<string, string> {
+  return { ...WEB_HTML_HEADERS, "Content-Security-Policy": `${WEB_HTML_HEADERS["Content-Security-Policy"]}; frame-src ${canonicalOrigin(appOrigin)}${EMAIL_FRAME_PATH}` };
+}
 
 /**
  * On the file preview's own files (/preview.js, /pdfjs/*). The page's CSP is not changed for them: a worker from

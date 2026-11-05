@@ -25,6 +25,7 @@ Changes must be **additive** and recorded in the root README changelog (see "Rul
 | `drafts.ts` | Drafts by agents: `draftMeta` (what the cloud keeps), `draftView` (+ the texts from the computer), `storedDraft`, `raftAgent`, `raftAgentsResult`, ids (`draftRequestID`, `raftAgentID`), `DRAFT_STATUSES`, `ACTIVE_DRAFT_STATUSES`, `DRAFT_DELIVERIES`, limits (`DRAFT_DEADLINE_MS` 30 min, `MAX_DRAFT_INSTRUCTION_LENGTH` 2000, `MAX_ACTIVE_DRAFTS` 50, `MAX_DRAFT_READ` 10, `DRAFT_KEEP_MS` 7 days), the Raft event (`draftEventSummary`, `draftEventPayload`). |
 | `delegations.ts` | Delegations to agents as Raft tasks: `delegationMeta` (what the cloud keeps), `delegationView` (+ the instruction from the computer), `delegationRequestForAgent`, `delegationRequestID` (`dlg_`), channels (`raftChannel`, `CHANNEL_PATTERN`, `normalizeChannel`, `sameChannel`), `delegationTask`, `cleanDelegationReason`, `coerceReportParams`, `DELEGATION_STATUSES` / `SHOWN_` / `OPEN_`, limits (`DELEGATION_DEADLINE_MS` 30 min, `MAX_ACTIVE_DELEGATIONS` 50, `MAX_SHOWN_DELEGATIONS` 200, `MAX_RECENT_CHANNELS` 20, `MAX_DELEGATION_REASON_LENGTH` 200), the Raft event (`delegationEventSummary`, `delegationEventPayload`). `drafts.ts` adds `storedRequestID` (`drq_` or `dlg_`: the connector's one request store). |
 | `uploads.ts` | Files sent from J-Inbox (since 2026-10-29): `uploadID` (`upl_`), `uploadOwner` / `uploadOwnerTag(caller)`, `fileName` / `sanitizeFileName`, `cleanMimeType`, `uploadInfo`, `uploadHead` (POST /api/upload's first line), `uploadBeginParams`, `fileSizeLabel`, limits (`MAX_UPLOAD_BYTES` = `MAX_MEDIA_BYTES` 25 MiB, `UPLOAD_CHUNK_BYTES` 256 KiB, `MAX_UPLOAD_CHUNKS` 100, `AGENT_UPLOAD_FILE_MAX_BYTES` 512 KiB, `UPLOAD_TTL_MS` 1 h, `MAX_STORED_UPLOADS` 60, `MAX_UPLOAD_STORE_BYTES` 256 MiB, `UPLOAD_BEGIN_PER_MINUTE` 10, `UPLOAD_CHUNK_PER_MINUTE` 240, `SEND_WITH_FILE_TIMEOUT_MS` 2 min). See "Files". |
+| `email-frame.ts` | HTML email (since 2026-11-04, `"email-html.v1"`): `EMAIL_FRAME_PATH`, `EMAIL_FRAME_SANDBOX`, `emailFrameCsp`, `emailFrameHeaders`, the document around the email (`emailFrameOpen`, `emailFrameClose`, `emailFrameFailure`: our one script), `parseEmailFrameMessage` (what the parent may believe, the height clamped), the ticket's shape, limits (`EMAIL_FRAME_TTL_MS` 1 min, `MAX_EMAIL_HTML_BYTES` 2 MiB, `MAX_EMAIL_CID_IMAGE_BYTES` 4 MiB, `MAX_EMAIL_CID_TOTAL_BYTES` 8 MiB). No schema in it, so `dist/email-frame.js` can import it alone. See "HTML email". |
 | `noise.ts` | Noise (since 2026-10-29): `noiseDefinition`, `noiseLines` (the definition's lines as Jev gets them), `noiseDecision`, `noiseSettings`, `NOISE_PROBLEMS`, limits (`MAX_NOISE_DEFINITION_LENGTH` 4000, `MAX_NOISE_LINES` 50, `MAX_NOISE_DECISIONS` 20), `NOISE_CONFIDENCE_THRESHOLD` (0.7), `OWNER_NOISE_REASON`. `model.ts` has `chatNoise` (`ChatSummary.noise`), `NOISE_SOURCES`, `MAX_NOISE_LINE_LENGTH`. See "Noise". |
 | `web.ts` | Browser API routes and shapes, CSRF header, `mediaResponseHeaders`, `WEB_HTML_HEADERS`, `NO_SESSION_TIMING`, human and agent session cookies, logout, local-cache rules, upgrade `Origin` checks, `/live` messages. |
 | `auth.ts` | Login with Raft (`startHumanLogin`, `handleRaftCallback`: state + nonce + PKCE for humans, stateless only for proven agents), session lifetimes (`sessionExpired`, `agentSessionMaxAge`), surfaces (`surfaceForPath`, `sessionKindForSurface`, `authorizeSurface`). |
@@ -89,8 +90,8 @@ camelCase (like Beeper). Agent writes marked "approval" go through the approval 
 | Action | Params (all strict; `?` optional) | Result | write | approval for agents | Beeper call |
 |---|---|---|---|---|---|
 | `status` | – | `{online, lastSeenAt, connectorVersion, beeper:{reachable, version, appState?, tokenValid?}, accounts[], networks?[]}`. `networks` is the platform list; `accounts[]` alone is not (no iMessage account, `X` vs `Twitter/X`) | | | `GET /v1/info`, `GET /v1/accounts`, `GET /v1/chats` (first page, networks by `accountID`) |
-| `list_chats` | `network? accountIDs? unreadOnly? pinnedOnly? inbox?(primary/low-priority/archive) type?(single/group/any) query? limit?(1-50, 25) cursor? source?(beeper/gmail; first page only, never with cursor; `"list-source.v1"`, added 2026-10-31)` | `{items: ChatSummary[], hasMore, nextCursor}` (with `source`: only that source's chats, the other source is not asked, `nextCursor` is null) | | | `GET /v1/chats` or `/v1/chats/search`, then connector-side `network`/`pinnedOnly` filter (see "Filtered paging") |
-| `unread_summary` | `limit?(1-50, 50)` | `{totalUnreadChats, totalUnreadMessages, items: ChatSummary[] (with preview), truncated}` | | | `GET /v1/chats` (ChatWithPreview) paged, keep `unreadCount>0 \|\| isMarkedUnread`, drop `isArchived` and `isLowPriority` chats (Beeper's inbox view). Not `/v1/chats/search`: it returns `Chat` without `preview` |
+| `list_chats` | `network? accountIDs? unreadOnly? pinnedOnly? inbox?(primary/low-priority/archive) type?(single/group/any) query? limit?(1-50, 25) cursor? source?(beeper/gmail; first page only, never with cursor; `"list-source.v1"`, added 2026-10-31) todo?(true: only To do chats, in the main inbox's scope; `"todo.v1"`)` | `{items: ChatSummary[], hasMore, nextCursor}` (with `source`: only that source's chats, the other source is not asked, `nextCursor` is null) | | | `GET /v1/chats` or `/v1/chats/search`, then connector-side `network`/`pinnedOnly` filter (see "Filtered paging") |
+| `unread_summary` | `limit?(1-50, 50) todo?(true: To do chats instead, read or not; `"todo.v1"`)` | `{totalUnreadChats, totalUnreadMessages, items: ChatSummary[] (with preview), truncated, todoFull?}` | | | `GET /v1/chats` (ChatWithPreview) paged, keep `unreadCount>0 \|\| isMarkedUnread`, drop `isArchived` and `isLowPriority` chats (Beeper's inbox view). Not `/v1/chats/search`: it returns `Chat` without `preview` |
 | `read_chat` | `chatID cursor? limit?(1-50, 30; 20 = `BEEPER_MESSAGES_PAGE` or fewer costs one Beeper history call)` | `{chat, items: MessageItem[] oldest-first, hasMore, nextCursor}` (nextCursor = older) | | | `GET /v1/chats/{id}`, `GET /v1/chats/{id}/messages?cursor&direction=before` |
 | `search_messages` | `query chatIDs? accountIDs? network? sender?(me/others) dateAfter? dateBefore? limit?(1-20, 20) cursor?` | `{items, chats: {chatID: ChatSummary}, hasMore, nextCursor}` | | | `GET /v1/messages/search` |
 | `draft_reply` | `chatID text(1-10000) attachmentId?` (agents only: their own upload, see "Files") | `{chatID, draftSet: true}` | yes | no | `GET /v1/chats/{id}`; if `draft` is non-empty answer `CONFLICT` (never clear the owner's half-typed text); else `PATCH /v1/chats/{id}` `{draft:{text}}`; Beeper 409/422 -> `CONFLICT` |
@@ -113,10 +114,12 @@ camelCase (like Beeper). Agent writes marked "approval" go through the approval 
 | `list_delegations` | `chatID?` | `{items: delegationView[], channels: #name[]}` (shown ones, newest first, at most `MAX_SHOWN_DELEGATIONS`; recent channels, at most 20) | (cloud, `humanOnly`) | n/a | the cloud's store, then `draft_store_get` |
 | `draft_store_put` / `_get` / `_set_text` / `_delete` | see `actions.ts` | | (cloud-only, `humanOnly`) | n/a | the connector's local request store (draft texts and, by `dlg_` id, delegation instructions; `_set_text` drafts only, with `attachmentId` + `owner` the agent's upload goes with the draft; `_get` answers it as `attachment`; `_delete` forgets it too) |
 | `upload_store_begin` / `_chunk` / `_commit` / `_delete` | `uploadId owner fileName mimeType size` / `uploadId owner index data(base64, 256 KiB raw)` / `uploadId owner` / `uploadIds[1-60]` | `{uploadId, stored}` / `{uploadId, index, received}` / `uploadInfo` / `{deleted}` | yes (cloud-only, `humanOnly`) | n/a | the connector's upload store (see "Files") |
+| `get_email_html` | `chatID messageID` | `mediaHead` (`text/html`, the size) then `chunk` frames: the email's sanitized HTML | (cloud-only, `humanOnly`, streamed) | n/a | Gmail `messages.get` (`format=full`), `messages.attachments.get` for its `cid:` images; none while the connector keeps it (see "HTML email") |
 | `discard_upload` | `uploadId` | `{uploadId, deleted}` (false: not there, or on an agent's draft) | yes (`humanOnly`) | n/a | the connector's upload store |
 | `get_noise_settings` | – | `noiseSettings {definition, enabled, keySet, problem, noiseCount, decisions[]}` | (`humanOnly`) | n/a | the connector's noise store (see "Noise") |
 | `set_noise_definition` | `definition(0-4000, multi-line)` | `noiseSettings` | yes (`humanOnly`) | n/a | the connector's noise store; empty turns noise off |
 | `set_noise` | `chatID noise` | `{chatID, noise}` | yes (`humanOnly`) | n/a | the connector's noise store (`read_chat` limit 5 for the owner's example); never Beeper or Gmail |
+| `set_todo` | `chatID todo upTo?(iso time: for Done, the newest message on the owner's screen)` | `{chatID, todo}`: the flag as it now stands (idempotent) | yes (`humanOnly`) | n/a | the connector's To do store (see "To do"); never Beeper or Gmail |
 | `get_media` | `url` (an attachment `url` or chat `avatarURL` from another result) | `res` = `{mimeType, size (null if unknown), fileName?}` then `chunk` frames | | | `GET /v1/assets/serve?url=`; `gmail://` URLs: Gmail `messages.attachments.get` |
 
 Notes for implementers:
@@ -146,6 +149,51 @@ Notes for implementers:
   `MAX_FRAME_BYTES` (long CJK texts, many attachments and reactions). The connector then returns
   fewer items (newest kept), `hasMore: true` and a cursor that continues exactly after the last item
   it returned. One maximal message always fits.
+
+### HTML email (`email-frame.ts`; `"email-html.v1"`)
+
+A message with an HTML part says `hasHtml: true`. `text` is what agents, Jev and the fallback read. An email's two versions can say different things, and the owner sees the HTML, so
+the connector compares them on `read_chat` (word overlap, `textsDiffer`): when they clearly differ, `text` becomes the visible words of the HTML (hidden elements left out, links with
+their addresses), and the plain part moves to `plainText`, for the owner's Plain text view only: the room strips it from every agent's answer. Showing the HTML takes three locks, each independent of the others:
+
+1. **The connector sanitizes** (`connector/src/gmail/email-html.ts`, Bun's `HTMLRewriter`): an allowlist of elements and
+   attributes, no script, handler, form, frame, SVG, MathML, video or audio; only http(s), mailto, tel, sms and webcal links, with
+   `target=_blank rel="noopener noreferrer"`, and `#anchor`s, which stay in the frame; CSS properties from an allowlist (no columns, transforms, filters, animations, grid, `position`), with no remote
+   load but images outside `@media`, no height in media queries and no viewport-height unit however written; `cid:` images from the message's own
+   parts as `data:` URIs; 1x1, hidden and known trackers' images gone; off-page preheaders hidden; quoted history folded in `<details>`. Over 100 levels deep, 64 attributes on an element, or with nothing visible left:
+   no HTML, and the page shows the text. It runs in a Worker (`email-html-run.ts`, 3 s, then terminated, then the text), and is linear in its input, so a hostile email never stalls the connector's main loop.
+2. **The frame's own response** (`emailFrameHeaders`): the CSP in `emailFrameCsp`, with its own `sandbox` and a nonce new for each
+   response, `no-store`, `no-referrer`, `nosniff`, CORP. A srcdoc or blob frame would inherit the app's CSP, so it is a real URL.
+3. **The iframe element**: `sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"`, `referrerpolicy="no-referrer"`.
+   Its origin is opaque: no cookie, no storage, no parent. Never `allow-same-origin`, `allow-forms` or `allow-top-navigation`.
+
+The app's own CSP (`appHtmlHeaders`) adds `frame-src <origin>/email-frame/`: frames from exactly this path, and a frame sent
+anywhere else by anything in it is stopped by its parent. `script-src 'self'` is as it was.
+
+**Getting there.** `POST /api/email/frame` (`API_ROUTES.emailFrame`; owner session, CSRF and sub headers; body `{chatID, messageID}`)
+answers `emailFrameTicket {ticket, expiresAt}`: 32 random bytes, held in the room's memory only, for this session,
+for `EMAIL_FRAME_TTL_MS`. Then the iframe loads `GET /email-frame/<ticket>#<token>`: no chat or message id in the URL, the
+session's cookie and the ticket must both be right, and only a frame of our own page may ask (`Sec-Fetch-Dest`,
+`Sec-Fetch-Site`). Asking spends the ticket. Why not a cookie-only GET: such a URL could be framed or linked; why not a
+self-contained signed ticket: it could not be one-use. The room sends the cloud-only streamed `get_email_html`; the Worker
+wraps the bytes in a head and an end of its own (`emailFrameOpen`, `emailFrameClose`), after sanitizing, with a nonce and an end
+mark of this response alone, keeping none of it. The nonce appears once, before a byte of the email. `token` is the page's own
+random value, in the URL's fragment, so no server and no page the frame could be sent to ever sees it.
+
+**Our one script** runs first, holds its references before anything can clobber them, makes a `MessageChannel` and hands the parent one port in its hello. It says everything else on the
+other port, which stays in its closure: a script that had got into the frame, knowing the token, could not say a thing the parent hears. It reports the height (ResizeObserver), scales a
+wide email down with `zoom` on the body (0.3 at most; past that it scrolls inside its frame), forwards `keydown` and asks the parent to scroll to an `#anchor`. Done
+means the end mark with this response's own id arrived: a stream cut short, or markup that swallowed the end, is not
+done. The parent takes one hello, from that iframe's `contentWindow` with that `token`, and then only that port; the
+height is clamped (`EMAIL_FRAME_MIN_HEIGHT`, `EMAIL_FRAME_MAX_HEIGHT`), followed at most a few times a second and then not until it has been quiet, and kept only once it has stood still.
+Keys that could write (E, U, the letters that open a menu) also need the focus in that frame and `navigator.userActivation.isActive`, which a real press gives and a script cannot; Down, Up, Esc and anything with Cmd or Ctrl write nothing and need neither. Space and the page keys scroll the thread.
+No `<base target>`. Forms are lock one's and `form-action`'s to stop: in Chromium, with the sandbox alone, a form with `target=_blank` submitted in a click handler still sends its POST as a popup, by `allow-popups`.
+
+**What it does not do.** Remote images load (the owner's decision), so a sender can still see an open and the IP: there is no image
+proxy, and the tracker list and the 1x1 rule do not catch everything (a CSS background, a normal-looking picture on an unlisted host). "Hidden" for the comparison and for pictures means by the element's own style: a class from a sheet, white on white or a font size of 0 can still hide words from the owner that agents read.
+A worker terminated stops running JavaScript; a pattern already running in native code runs on, which is why everything it runs is linear, and after three workers that did not end the connector starts no more until it restarts, and shows the text.
+With the sanitizer bypassed, the frame's `img-src https:` still lets a picture go anywhere; the headers and the sandbox stop
+scripts, not images. An older connector, an offline computer, a failed frame or the saved copy means the text, with no error.
 
 ### Snooze (`snooze.ts`; cloud actions)
 
@@ -395,6 +443,47 @@ Low priority. Nothing changes in Beeper or Gmail: never read, never archived.
 - **Capability** `"noise.v1"`: without it the cloud answers the three actions `NOT_SUPPORTED` and the
   web shows no Noise UI. Agents never see the actions (`humanOnly`).
 
+### To do (`ChatSummary.todo`, `set_todo`; added 2026-11-04, `"todo.v1"`)
+
+The owner thinks of the inbox as "unhandled", not "unread": a network's read state goes with reading on a phone,
+and Beeper appears to mark a chat read when the owner sends. So J-Inbox keeps its own state, on the owner's computer
+(`todo.json`, 0600, `connector/src/todo/`); the cloud relays it and keeps none of it. It is apart from the read state:
+nothing about To do ever marks a chat read, unread or archived in Beeper or Gmail, and `POST /unread` (which also
+archives on WhatsApp) is never called for it.
+
+- **Becomes To do:** a message from someone else not seen before, after the source's first sight (Beeper and Gmail events, any
+  list or read, and on start what happened while the connector was down), the end of the owner's snooze by any route, a ready draft, or `set_todo {todo:true}`.
+  A new id is new even at or before the newest time known; the same id again is not, whatever its clock says. Reactions and tapbacks Beeper hides are not
+  messages; a NOTICE from someone else is. The owner's and agents' messages neither set nor clear it. An agent's own snooze returning does not set it.
+- **Done with `upTo`:** if the computer knows a newer message from someone else than that time, nothing changes and the answer is `todo: true`: the owner has not seen it.
+- **Stops being To do, only by the owner's hand in J-Inbox:** `set_todo {todo:false}` (Done), `snooze_chat`,
+  `request_delegation`, `archive {archived:true}` and `set_noise {noise:true}`. Opening, replying, sending a draft and
+  reading elsewhere do not. An agent's approved archive or snooze does not: agents have no way to change it.
+- **Scope, as the Unread tab:** `todo` is false, and the chat in no To do list or count, while it is archived, low
+  priority or noise. What the store holds stays: a chat that comes back to the main inbox with a message
+  nobody handled is To do.
+- **`list_chats {todo:true}`** pages and merges like `unreadOnly` (Beeper: the walk over `GET /v1/chats`, kept by the store;
+  Gmail: `in:inbox category:primary` with only the store's threads looked at, so the rest cost no metadata calls).
+  **`unread_summary {todo:true}`**: the same scope, the count behind the sidebar's badge: the store's, whatever a scan reaches. `todoFull: true`: more chats have been To do than the computer keeps (5000, fair per source); the oldest were left out.
+- **First run, once per source** (Beeper; each Gmail account when it is first seen): every chat that is unread now
+  in the main inbox is To do, everything else handled. A source's first start time is written first, and from then on
+  a chat the store has never seen is handled unless someone wrote after that time, so nothing has to load every chat.
+  The unread ones are found in the background, a page at a time and resuming after a restart: `GET /v1/chats`
+  for Beeper, `threads.list is:unread in:inbox category:primary` (ids only, no metadata) for Gmail. While a source is not done, a
+  chat seen for the first time is judged by the same rule, so a list is right at once. Done, it never runs again.
+- **While the connector is down:** each source remembers how far it has looked. On start (Beeper: each subscription; Gmail: each
+  welcome) the chats active since then are walked newest first; a chat whose newest message is the owner's is read, to
+  see whether someone wrote before it.
+- **Bounded:** at most `MAX_TODO_ENTRIES` (5000) chats, fair per source: handled ones first (the source's start time moves up to what was forgotten,
+  but never past what has been looked at), then To do chats out of the main inbox, then the largest source's oldest To do. A To do never goes silently: it is logged,
+  told to open pages, said in `todoFull`, and its source's time does not move, so it comes back when next seen with room.
+- **A damaged `todo.json`** is renamed aside and logged, and the first run finds what is unread again. A file of an unknown version is left as it is (To do goes on in memory).
+- **A chat gone:** `chat.deleted` takes it out of counts and events; what is known stays until NOT_FOUND has answered twice, at least 10 minutes apart. Seen again, it is what it was.
+- **`chat` events** may carry `todo` (the flag changed), so open tabs follow at once.
+- **Capability** `"todo.v1"`: without it the cloud answers `set_todo` and a `todo` param `NOT_SUPPORTED` and does not send
+  `set_todo` on a snooze, archive or delegation, and the web keeps Unread. Agents read the flag and may filter on it;
+  `set_todo` is not in the manifest and `humanOnly` refuses it on every path.
+
 ### Gmail (`gmail.ts`, design/gmail-plan.md)
 
 The connector runs Gmail accounts next to Beeper. Rules every peer relies on:
@@ -407,7 +496,7 @@ The connector runs Gmail accounts next to Beeper. Rules every peer relies on:
   `isLowPriority` = a message carries `CATEGORY_PROMOTIONS`/`SOCIAL`/`UPDATES`/`FORUMS` (so Gmail's
   other tabs stay out of the primary inbox and `unread_summary`); `isPinned` = STARRED; `type` = group
   when more than one other person is on the thread; drafts never leave the Mac (`hasDraft` only).
-  Message `text` = the text/plain part, else the HTML part as plain text; `email = {subject, from,
+  Message `text` = the text/plain part, else the HTML part as plain text (also when the plain part shows nothing once tags and invisible characters are gone, as a real Wealthsimple email's `<body></body>` and thousands of U+034F); `email = {subject, from,
   to[], cc[]}`; `senderName` = the From display name.
 - **Actions on Gmail chats.** `read_chat` (cursor `jg.`), `mark_read` (UNREAD on the thread, or up to
   `messageID`), `archive` (INBOX), `draft_reply` (a reply-all draft; `CONFLICT` when the thread has a
@@ -504,6 +593,7 @@ both                 ping {t} / pong {t}                    every 25 s; 60 s sil
   takes delegation requests (`dlg_` ids). The cloud gates `request_draft` / `request_delegation` on them;
   `"attachments.v1"` = it keeps and sends files (`upload_store_*`, `discard_upload`, `attachmentId`; see "Files");
   `"upload-read.v1"` (2026-11-03) = it answers `upload_store_read`, so the owner can preview a file on a draft (see "Files");
+  `"email-html.v1"` (2026-11-04) = it answers `get_email_html`, so the owner's page can show an email's HTML (see "HTML email");
   `"noise.v1"` = it judges conversations with Jev and keeps the noise store (see "Noise");
   `"viewers.v1"` (2026-10-31) = it takes the `viewers {count}` frame: the cloud sends it after every
   `welcome` and whenever the owner's open `/live` sockets go from none to some or back; the connector

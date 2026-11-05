@@ -223,7 +223,7 @@ export class FakeGoogle {
   }
 
   /** A new incoming email (in an existing thread when threadId is given). Returns the message. */
-  deliver(email: string, o: { threadId?: string; from: string; subject: string; text: string; labels?: string[]; to?: string; at?: number }): FMessage {
+  deliver(email: string, o: { threadId?: string; from: string; subject: string; text?: string; html?: string; attachments?: { filename: string; mimeType: string; data: Uint8Array; inlineCid?: string }[]; labels?: string[]; to?: string; at?: number; body?: Part }): FMessage {
     const box = this.mailbox(email);
     const id = box.newId();
     const at = o.at ?? this.now();
@@ -234,8 +234,10 @@ export class FakeGoogle {
       threadId: o.threadId && prev.length ? o.threadId : id,
       labelIds: o.labels ?? ["INBOX", "UNREAD", "CATEGORY_PERSONAL"],
       internalDate: at,
-      payload: buildPayload({ from: o.from, to: o.to ?? email, subject: o.subject, text: o.text, at, labels: [], messageId: `<${id}@mail.example.com>`, ...(refs.length ? { inReplyTo: refs.at(-1)!, references: refs.join(" ") } : {}) }),
+      payload: buildPayload({ from: o.from, to: o.to ?? email, subject: o.subject, ...(o.text !== undefined || o.html === undefined ? { text: o.text ?? "" } : {}), ...(o.html !== undefined ? { html: o.html } : {}), ...(o.attachments ? { attachments: o.attachments } : {}), at, labels: [], messageId: `<${id}@mail.example.com>`, ...(refs.length ? { inReplyTo: refs.at(-1)!, references: refs.join(" ") } : {}) }),
     };
+    // A body of the caller's own (odd charsets, parts): under this message's headers.
+    if (o.body) msg.payload = { ...o.body, headers: [...msg.payload.headers.filter((h) => !/^content-/i.test(h.name)), ...o.body.headers] };
     box.add(msg);
     return msg;
   }

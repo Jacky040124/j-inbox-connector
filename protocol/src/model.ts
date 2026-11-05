@@ -158,6 +158,10 @@ export const messageItem = object({
   email: optional(emailHeaders),
   /** Email only: the quoted history of a reply (attribution line and ">" lines), apart from `text`. Truncated. */
   quotedText: optional(text({ max: MAX_EMAIL_TEXT_LENGTH })),
+  /** Email only: it has an HTML part, which the owner's page can show (get_email_html). Never the HTML itself; `text` stays the plain text. */
+  hasHtml: optional(literal(true)),
+  /** Email only, the owner's only (the cloud strips it for agents): the plain part, when it clearly differs from what the HTML shows and so `text` is what the HTML shows. */
+  plainText: optional(text({ max: MAX_EMAIL_TEXT_LENGTH })),
 });
 export type MessageItem = Infer<typeof messageItem>;
 
@@ -205,6 +209,13 @@ export const chatSummary = object({
   preview: optional(nullable(messageItem)),
   /** Noise (noise.ts): set when the owner's computer put this chat in Low priority as noise; isLowPriority is then true. */
   noise: optional(chatNoise),
+  /**
+   * To do ("todo.v1"): the owner has not handled this chat in J-Inbox. Kept on the owner's computer, apart from
+   * the network's read state: a new message from someone else sets it, only the owner's own hand in J-Inbox
+   * clears it (set_todo, snooze, delegate, archive, noise). False while the chat is out of the main inbox
+   * (archived, low priority, noise). Absent: a connector without "todo.v1".
+   */
+  todo: optional(boolean()),
 });
 export type ChatSummary = Infer<typeof chatSummary>;
 

@@ -21,6 +21,7 @@ import type { AssetAllowlist } from "./assets.ts";
 import { IdempotencyCache, hashKey, type IdempotencyJournal } from "./idempotency.ts";
 import { CursorExpired, CursorTooLong, RequestAborted, collect, decodePagerCursor, finishPage, fitToFrame, type BeeperPage, type PagerCursor } from "./pager.ts";
 import type { NoiseView } from "./noise/store.ts";
+import type { TodoLists } from "./gmail/source.ts";
 
 export type Outcome<T> = { ok: true; data: T; error?: undefined } | { ok: false; error: ErrorBody; data?: undefined };
 
@@ -167,6 +168,8 @@ export type ActionsOptions = {
   uploads?: UploadSource;
   /** Noise verdicts (noise/store.ts): noise chats leave the main inbox and unread_summary, and join Low priority. */
   noise?: NoiseView;
+  /** To do (todo/tracker.ts): list_chats and unread_summary `todo` keep what it says. */
+  todo?: TodoLists & { countBeeper?(): number; full?(): boolean };
   /** How long to watch a chat after mark unread for Beeper archiving it on its own (keepInInbox; default 1.5 s, every 250 ms). */
   unreadWatch?: { windowMs?: number; everyMs?: number };
 };
@@ -212,6 +215,12 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
     for (const it of items.slice(0, n)) for (const u of it.urls) opts.assets.add(u);
   };
 
+  /** A raw chat, in the main inbox and on the To do store's list. The store sees it first: this walk may be the first to hear of it. */
+  const inTodo = (raw: unknown): boolean => {
+    const c = mapChat(raw);
+    return !!c && c.isArchived !== true && c.isLowPriority !== true && !opts.noise?.isNoise(c.id) && !!opts.todo?.inList(c);
+  };
+
   /** The Beeper part of list_chats: collected (not yet frame-fitted) chats with their asset URLs. Throws BeeperFailure and pager errors. */
   async function listChatsCollect(p: Partial<ActionParams<"list_chats">>, ctx: RequestContext = {}) {
     // GET /v1/chats returns ChatWithPreview; /v1/chats/search returns Chat without `preview`. The
@@ -221,9 +230,11 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
     // inbox: one walk over every chat (no `inbox` for search), filtered here.
     const noise = opts.noise?.active() ? opts.noise : null;
     const lowNoise = !!noise && p.inbox === "low-priority";
-    const primary = (p.inbox === "primary" || lowNoise) && p.query === undefined && (p.type === undefined || p.type === "any");
+    // To do is the main inbox's (as Unread): from /v1/chats, with previews, kept here by the store.
+    const todoOnly = p.todo === true && !!opts.todo;
+    const primary = (p.inbox === "primary" || lowNoise || todoOnly) && p.query === undefined && (p.type === undefined || p.type === "any");
     // The endpoint is part of the scope: a cursor from the other endpoint is not resumable here.
-    const scope = `list_chats\u0000${JSON.stringify([p.network?.toLowerCase() ?? null, p.accountIDs ?? null, p.unreadOnly ?? null, p.pinnedOnly ?? null, p.inbox ?? null, p.type ?? null, p.query ?? null])}${primary ? "\u0000chats" : ""}${lowNoise ? "\u0000noise" : ""}`;
+    const scope = `list_chats\u0000${JSON.stringify([p.network?.toLowerCase() ?? null, p.accountIDs ?? null, p.unreadOnly ?? null, p.pinnedOnly ?? null, p.inbox ?? null, p.type ?? null, p.query ?? null])}${primary ? "\u0000chats" : ""}${lowNoise ? "\u0000noise" : ""}${todoOnly ? "\u0000todo" : ""}`;
     const cursor = cursorParam(p.cursor, scope);
     if (cursor === "bad") throw new BeeperFailure(makeError("BAD_PARAMS", "cursor is not from this list (other filters or another action)."));
     const limit = p.limit ?? 25;
@@ -247,6 +258,7 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
         (!p.pinnedOnly || c.isPinned === true) &&
         (!primary || lowNoise || (c.isArchived !== true && c.isLowPriority !== true)) &&
         (p.inbox !== "primary" || !noise?.isNoise(String(c.id))) &&
+        (!todoOnly || inTodo(c)) &&
         (!lowNoise || (c.isArchived !== true && (c.isLowPriority === true || noise!.isNoise(String(c.id))))) &&
         (!unreadOnly || Number(c.unreadCount) > 0 || c.isMarkedUnread === true) &&
         mapChat(c) !== null,
@@ -273,14 +285,14 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
   }
 
   /** The Beeper part of unread_summary: every unread chat of the main inbox found within the scan budget. */
-  async function unreadCollect(ctx: RequestContext = {}) {
+  async function unreadCollect(ctx: RequestContext = {}, todoOnly = false) {
     // /v1/chats carries `preview` (the latest message); /v1/chats/search does not.
     const r = await collect({
       cursor: null,
       limit: Number.MAX_SAFE_INTEGER,
       fetchPage: async (b) => beeperPage(must(await client.get(`/v1/chats?${chatsQuery({ limit: "50", ...(b ? { cursor: b, direction: "before" } : {}) })}`, callOpts(ctx)))),
       // Beeper's inbox view: archived and low-priority chats (noise too) are not "unread" for the owner.
-      keep: (c) => (Number(c.unreadCount) > 0 || c.isMarkedUnread === true) && c.isArchived !== true && c.isLowPriority !== true && !opts.noise?.isNoise(String(c.id)) && mapChat(c) !== null,
+      keep: (c) => (todoOnly ? inTodo(c) : (Number(c.unreadCount) > 0 || c.isMarkedUnread === true) && c.isArchived !== true && c.isLowPriority !== true && !opts.noise?.isNoise(String(c.id))) && mapChat(c) !== null,
       keyOf: (c) => String(c.id),
       ...scan,
       ...ctx,
@@ -291,13 +303,16 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
   async function unread_summary(p: Partial<ActionParams<"unread_summary">>, ctx: RequestContext = {}): Promise<Outcome<ActionResult<"unread_summary">>> {
     return guard(async () => {
       const limit = p.limit ?? 50;
-      const { all, hasMore } = await unreadCollect(ctx);
+      const { all, hasMore } = await unreadCollect(ctx, p.todo === true);
       const totalUnreadMessages = all.reduce((sum, c) => sum + c.value.unreadCount, 0);
+      const counted = p.todo === true && !!opts.todo?.countBeeper;
       const build = (n: number) => ({
-        totalUnreadChats: all.length,
+        // To do's count is the store's, as Gmail's: a scan does not reach every deep chat, and the badge must not say fewer than there are.
+        totalUnreadChats: counted ? opts.todo!.countBeeper!() : all.length,
         totalUnreadMessages: Math.min(totalUnreadMessages, 1_000_000_000),
         items: all.slice(0, n).map((x) => x.value) as ChatSummary[],
         truncated: n < all.length || hasMore,
+        ...(p.todo === true && opts.todo?.full?.() ? { todoFull: true } : {}),
       });
       const n = fitToFrame(Math.min(limit, all.length), build);
       allow(all, n);
@@ -543,6 +558,12 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
     });
   }
 
+  /** One page of GET /v1/chats as it is, mapped, previews included: what the To do tracker walks. Throws when Beeper cannot answer. */
+  async function chatsPage(cursor: string | null, ctx: RequestContext = {}): Promise<{ items: ChatSummary[]; next: string | null }> {
+    const page = beeperPage(must(await client.get(`/v1/chats?${chatsQuery({ limit: "50", ...(cursor ? { cursor, direction: "before" } : {}) })}`, callOpts(ctx))));
+    return { items: page.items.map((c) => mapChat(c)).filter((c): c is ChatSummary => c !== null), next: page.hasMore && page.items.length ? page.oldestCursor : null };
+  }
+
   async function archive(p: Partial<ActionParams<"archive">> & { chatID: string }, ctx: RequestContext = {}): Promise<Outcome<ActionResult<"archive">>> {
     return guard(async () => {
       const archived = p.archived !== false;
@@ -589,7 +610,7 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
     archive,
     remove_account,
     /** Building blocks for lists merged with other sources (sources.ts). They throw instead of answering. */
-    internals: { listChatsCollect, unreadCollect, searchCollect, finishPage, toFailure },
+    internals: { listChatsCollect, unreadCollect, searchCollect, chatsPage, finishPage, toFailure },
   };
 }
 

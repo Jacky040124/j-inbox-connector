@@ -28,8 +28,9 @@ const valid = (f: unknown): f is EventFrame => parse(eventFrame, f).ok;
 /**
  * message.upserted `entries` (Beeper Message objects) -> `othersAt` for snooze's early return: the
  * newest timestamp among messages someone else sent (never later than now), null when every entry
- * is the owner's (their sends, status updates) or a reaction, undefined when Beeper sent no entries
- * or an entry does not say who sent it. Only this one timestamp leaves the Mac, never who or what.
+ * is the owner's (their sends, status updates), a reaction or one Beeper hides (iMessage's tapback as a message of its
+ * own; a NOTICE from someone else is their message: bridges send bots' messages that way), undefined when Beeper sent no entries or an entry does not say who
+ * sent it. Only this one timestamp leaves the Mac, never who or what.
  */
 export function othersAtOf(entries: unknown, now: string): string | null | undefined {
   if (!Array.isArray(entries) || !entries.length) return undefined;
@@ -38,7 +39,7 @@ export function othersAtOf(entries: unknown, now: string): string | null | undef
   for (const e of entries) {
     if (typeof e !== "object" || e === null || Array.isArray(e)) return undefined;
     const m = e as Record<string, unknown>;
-    if (m.type === "REACTION") continue;
+    if (m.type === "REACTION" || m.isHidden === true) continue;
     if (m.isSender === true) continue;
     const at = typeof m.timestamp === "string" ? Date.parse(m.timestamp) : Number.NaN;
     if (m.isSender !== false || !Number.isFinite(at)) {

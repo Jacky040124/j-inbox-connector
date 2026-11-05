@@ -158,23 +158,92 @@ export function decodeEntities(s: string): string {
   });
 }
 
+/** What shows on a page when text is drawn: anything but white space, control and format characters, lone combining marks and default-ignorable code points (and the Braille blank, which draws nothing). */
+const SHOWS = /[^\p{Cc}\p{Cf}\p{Z}\p{M}\p{Default_Ignorable_Code_Point}\u2800]/u;
+
+/**
+ * Whether a text/plain part says anything once HTML tags and invisible characters are gone. Some senders
+ * (a real Wealthsimple email) put `<body></body>` and thousands of U+034F in it, with the mail in the HTML part.
+ * Only tags count as tags: "<3" and "a < b" are words; CJK and emoji are visible like any letter.
+ */
+export function hasVisibleText(s: string): boolean {
+  // Linear, as a plain part can be 2 MB of "<!--" with an HTML part beside it, on the connector's main loop.
+  const bare = withoutRawBlocks(s.slice(0, 2_000_000))
+    .replace(/<\/?[a-z!][^<>]*>/gi, "")
+    .replace(/&(zwnj|zwj|shy|ensp|emsp|thinsp);/gi, "");
+  return SHOWS.test(decodeEntities(bare));
+}
+
+const RAW_BLOCKS = ["head", "style", "script", "title", "template", "noscript"];
+
+/** The HTML without its comments and the elements whose text is no text. Each search goes forward only: one that finds no end is not made again. */
+function withoutRawBlocks(html: string): string {
+  const lower = html.toLowerCase();
+  const noEnd = new Set<string>();
+  let out = "";
+  let at = 0;
+  for (let i = lower.indexOf("<"); i >= 0; i = lower.indexOf("<", i)) {
+    let skipTo = -1;
+    if (lower.startsWith("<!--", i)) {
+      const end = noEnd.has("!--") ? -1 : lower.indexOf("-->", i + 4);
+      if (end < 0) noEnd.add("!--");
+      else skipTo = end + 3;
+    } else {
+      const tag = RAW_BLOCKS.find((t) => lower.startsWith(t, i + 1) && !/[a-z0-9]/.test(lower[i + 1 + t.length] ?? " "));
+      if (tag && !noEnd.has(tag)) {
+        const close = lower.indexOf(`</${tag}`, i);
+        const end = close < 0 ? -1 : lower.indexOf(">", close);
+        if (end < 0) noEnd.add(tag);
+        else skipTo = end + 1;
+      }
+    }
+    if (skipTo < 0) {
+      i++;
+      continue;
+    }
+    out += html.slice(at, i);
+    at = i = skipTo;
+  }
+  return out + html.slice(at);
+}
+
+const HREF = /\shref\s*=\s*"([^"]*)"/i;
+/** One tag's text is looked at, at most this much of it. */
+const MAX_TAG_LENGTH = 8192;
+
+/** Links as "words (address)": http(s) and mailto only. */
+function linksAsText(s: string): string {
+  const lower = s.toLowerCase();
+  let out = "";
+  let at = 0;
+  for (let i = lower.indexOf("<a", at); i >= 0; i = lower.indexOf("<a", i + 2)) {
+    if (i < at || !/\s/.test(lower[i + 2] ?? "")) continue;
+    const tagEnd = lower.indexOf(">", i);
+    if (tagEnd < 0) break;
+    const close = lower.indexOf("</a>", tagEnd);
+    if (close < 0) break;
+    const href = tagEnd - i <= MAX_TAG_LENGTH && !s.slice(i + 1, tagEnd).includes("<") ? HREF.exec(s.slice(i, tagEnd))?.[1] : undefined;
+    if (href === undefined) continue;
+    const label = s.slice(tagEnd + 1, close).replace(/<[^<>]*>/g, "").trim();
+    const url = decodeEntities(href).trim();
+    out += s.slice(at, i) + (!/^(https?:|mailto:)/i.test(url) ? label : !label || decodeEntities(label) === url ? url : `${label} (${url})`);
+    at = close + 4;
+  }
+  return out + s.slice(at);
+}
+
 /**
  * Email HTML as plain text (for HTML-only mail): drops <head>, <style>, <script> and comments with
- * their contents, keeps link targets, turns blocks into line breaks. The result is plain text.
+ * their contents, keeps link targets, turns blocks into line breaks. The result is plain text. This runs on the
+ * connector's main loop for every email read, so it is linear in its input, whatever that input is.
  */
 export function emailHtmlToText(html: string): string {
-  const s = html
-    .slice(0, 2_000_000)
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/<(head|style|script|title|template|noscript)\b[\s\S]*?<\/\1\s*>/gi, "")
+  const joined = withoutRawBlocks(html.slice(0, 2_000_000))
     .replace(/\r\n?/g, "\n")
-    .replace(/[ \t]*\n[ \t]*/g, " ")
-    .replace(/<a\s[^<>]*?href\s*=\s*"([^"]*)"[^<>]*>([\s\S]*?)<\/a>/gi, (_m, href: string, inner: string) => {
-      const label = inner.replace(/<[^<>]*>/g, "").trim();
-      const url = decodeEntities(href).trim();
-      if (!/^(https?:|mailto:)/i.test(url)) return label;
-      return !label || decodeEntities(label) === url ? url : `${label} (${url})`;
-    })
+    .split("\n")
+    .map(trimBlanks)
+    .join(" ");
+  const s = linksAsText(joined)
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<li(?:\s[^<>]*)?>/gi, "\n• ")
     .replace(/<\/?(?:p|div|tr|table|ul|ol|blockquote|h[1-6]|section|article|header|footer)(?:\s[^<>]*)?>/gi, "\n")
@@ -185,6 +254,14 @@ export function emailHtmlToText(html: string): string {
     .replace(/ *\n */g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+function trimBlanks(line: string): string {
+  let a = 0;
+  let b = line.length;
+  while (a < b && (line[a] === " " || line[a] === "\t")) a++;
+  while (b > a && (line[b - 1] === " " || line[b - 1] === "\t")) b--;
+  return line.slice(a, b);
 }
 
 /**

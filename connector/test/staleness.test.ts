@@ -293,7 +293,8 @@ describe("the service while the cloud link is down", () => {
     fg.google.deliver(OWNER_EMAIL, { threadId: THREADS.kickoff, from: "Bob <bob@example.com>", subject: "Re: Kickoff", text: "hello" });
     const id = gmailChatID(OWNER_EMAIL, THREADS.kickoff);
     await Bun.sleep(300);
-    expect(cloud.events().some((e: any) => e.chatID === id)).toBe(false);
+    // Not polled yet. (To do's first run may say something about the thread, as it finds it unread: that is no poll.)
+    expect(cloud.events().some((e: any) => e.kind === "message" && e.chatID === id)).toBe(false);
     cloud.send({ type: "viewers", count: 1 });
     await cloud.waitFor(() => cloud.events().some((e: any) => e.kind === "message" && e.chatID === id), 3000, "polled when the page opened");
   });

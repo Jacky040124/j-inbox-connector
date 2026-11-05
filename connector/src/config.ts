@@ -1,6 +1,6 @@
 // Where the connector keeps things, and its (secret-free) config file.
 //   config  ~/.config/j-inbox/config.json      cloud URL, Beeper URL, device id and name
-//   data    ~/Library/Application Support/j-inbox   idempotency journal, asset allowlist (hashes), draft store, upload store, noise store
+//   data    ~/Library/Application Support/j-inbox   idempotency journal, asset allowlist (hashes), draft store, upload store, noise store, To do store
 //   logs    ~/Library/Logs/j-inbox              audit.jsonl (metadata only), service.log
 // J_INBOX_CONFIG_DIR moves all of it, including the LaunchAgents dir, under one directory (tests).
 import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
@@ -34,6 +34,8 @@ export type Paths = {
   uploadsDir: string;
   /** The owner's definition of noise and the verdicts (noise/store.ts): kept here, never in the cloud. */
   noiseFile: string;
+  /** The owner's To do state (todo/store.ts): kept here, never in the cloud. */
+  todoFile: string;
   /** Gmail thread metadata for the lists (gmail/meta-cache.ts), sealed with the Keychain's `gmail-cache-key`. */
   gmailCacheFile: string;
   /** Everything lives under J_INBOX_CONFIG_DIR. */
@@ -75,6 +77,7 @@ export function resolvePaths(env: Record<string, string | undefined>): Paths {
     draftsFile: join(dataDir, "drafts.json"),
     uploadsDir: join(dataDir, "uploads"),
     noiseFile: join(dataDir, "noise.json"),
+    todoFile: join(dataDir, "todo.json"),
     gmailCacheFile: join(dataDir, "gmail-cache.json"),
     testMode: override !== undefined,
   };

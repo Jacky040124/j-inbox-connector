@@ -31,7 +31,8 @@ import {
   type EmailHeaders,
   type MessageItem,
 } from "@j-inbox/protocol";
-import { b64urlToBytes, charsetOf, decodeCharset, decodeEntities, emailHtmlToText, headerText, parseAddressList, reflowPlain, splitQuoted } from "./mime.ts";
+import { noteThreadOthers } from "../todo/store.ts";
+import { b64urlToBytes, charsetOf, decodeCharset, decodeEntities, emailHtmlToText, hasVisibleText, headerText, parseAddressList, reflowPlain, splitQuoted } from "./mime.ts";
 
 export type GPart = { partId?: string; mimeType?: string; filename?: string; headers?: { name?: string; value?: string }[]; body?: { size?: number; data?: string; attachmentId?: string }; parts?: GPart[] };
 export type GMessage = { id?: string; threadId?: string; labelIds?: string[]; snippet?: string; internalDate?: string; payload?: GPart };
@@ -69,7 +70,11 @@ function partText(p: GPart): string | null {
   return bytes ? decodeCharset(bytes, charsetOf(header(p, "Content-Type"))) : null;
 }
 
-/** The plain-text body (hard wrapping undone): the first text/plain part, else the first text/html part as text. null for metadata-only messages. */
+/**
+ * The plain-text body (hard wrapping undone): the first text/plain part, else the first text/html part as
+ * text; also when the plain part shows nothing (tags and invisible characters only, hasVisibleText) and
+ * there is an HTML part. null for metadata-only messages.
+ */
 export function messageBody(payload: GPart | undefined): string | null {
   let plain: string | null = null;
   let html: string | null = null;
@@ -78,9 +83,9 @@ export function messageBody(payload: GPart | undefined): string | null {
     const t = String(p.mimeType ?? "").toLowerCase();
     if (plain === null && t === "text/plain") plain = partText(p);
     else if (html === null && t === "text/html") html = partText(p);
-    if (plain !== null) return true;
+    if (plain !== null && html !== null) return true;
   });
-  if (plain !== null) return reflowPlain((plain as string).replace(/\r\n?/g, "\n"));
+  if (plain !== null && (html === null || hasVisibleText(plain))) return reflowPlain((plain as string).replace(/\r\n?/g, "\n"));
   if (html !== null) return emailHtmlToText(html);
   return null;
 }
@@ -115,6 +120,38 @@ function attachmentsOf(email: string, messageId: string, payload: GPart | undefi
 
 function decodeEncodedName(v: string): string {
   return headerText(v, 255);
+}
+
+/**
+ * An email's HTML parts (get_email_html): text/html that is no file, each part of a multipart/mixed
+ * in order. Not what is inside an attached message: that is another email.
+ */
+export function htmlParts(payload: GPart | undefined): GPart[] {
+  const out: GPart[] = [];
+  const go = (p: GPart | undefined, depth: number) => {
+    if (!isObj(p) || depth > MAX_PART_DEPTH) return;
+    const t = String(p.mimeType ?? "").toLowerCase();
+    if (t === "message/rfc822") return;
+    const named = typeof p.filename === "string" && p.filename.length > 0;
+    if (t === "text/html" && !named && !/^\s*attachment/i.test(header(p, "Content-Disposition")) && (typeof p.body?.data === "string" || typeof p.body?.attachmentId === "string")) out.push(p);
+    if (Array.isArray(p.parts)) for (const c of p.parts) go(c, depth + 1);
+  };
+  go(payload, 0);
+  return out;
+}
+
+/** One HTML part held in the message (Gmail may keep a very long one by attachmentId instead), in its charset. */
+export const inlineHtmlOf = partText;
+export const charsetOfPart = (p: GPart) => charsetOf(header(p, "Content-Type"));
+
+/** A message's parts by Content-ID (cid: images come from these and from nowhere else). The first of an id wins. */
+export function partsByContentId(payload: GPart | undefined): Map<string, GPart> {
+  const out = new Map<string, GPart>();
+  walk(payload, (p) => {
+    const id = header(p, "Content-ID").trim().replace(/^<|>$/g, "");
+    if (id && !out.has(id)) out.set(id, p);
+  });
+  return out;
 }
 
 export function emailHeadersOf(payload: GPart | undefined): EmailHeaders {
@@ -172,6 +209,7 @@ export function mapGmailMessage(raw: unknown, email: string, o: GmailMapOptions 
     if (quoted) out.quotedText = truncateText(quoted, MAX_EMAIL_TEXT_LENGTH).text;
   }
   out.isUnread = has(m, "UNREAD");
+  if (htmlParts(m.payload).length) out.hasHtml = true;
   const atts = attachmentsOf(email, m.id, m.payload, o.onAsset);
   if (atts.length) {
     out.attachments = atts;
@@ -217,6 +255,9 @@ export function mapGmailThread(raw: unknown, email: string, o: GmailMapOptions =
     hasDraft: all.some(isDraft),
     preview: last ? mapGmailMessage(last, email, o) : null,
   };
+  // Who wrote last, whatever the owner has sent since: To do (todo/store.ts) needs no other read for it.
+  const fromOthers = msgs.filter((m) => !has(m, "SENT") && parseAddressList(header(m.payload, "From"), 1)[0]?.address !== email);
+  noteThreadOthers(chat, fromOthers.length ? Math.max(...fromOthers.map((m) => dateOf(m)!)) : null, fromOthers.map((m) => m.id).filter((id): id is string => typeof id === "string"));
   return chat;
 }
 

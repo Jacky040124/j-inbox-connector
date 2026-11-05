@@ -60,8 +60,11 @@ const JSON_LIMITS = { maxDepth: 32, maxKeys: 50_000 };
  * "viewers.v1" (added 2026-10-31): it takes the cloud's `viewers` frame (how many browser /live
  * sockets are open) and polls Gmail faster while one is.
  * "list-source.v1" (added 2026-10-31): list_chats takes `source` (beeper or gmail, first page only).
+ * "todo.v1" (added 2026-11-04): it keeps the owner's To do state (ChatSummary.todo; list_chats and
+ * unread_summary `todo`; set_todo; `chat` events' `todo`).
+ * "email-html.v1" (added 2026-11-04): it answers get_email_html, so the owner's page can show an email's HTML.
  */
-export const CAPABILITIES = { media: "media.v1", gmail: "gmail.v1", drafts: "drafts.v1", delegations: "delegations.v1", attachments: "attachments.v1", noise: "noise.v1", viewers: "viewers.v1", listSource: "list-source.v1", uploadRead: "upload-read.v1" } as const;
+export const CAPABILITIES = { media: "media.v1", gmail: "gmail.v1", drafts: "drafts.v1", delegations: "delegations.v1", attachments: "attachments.v1", noise: "noise.v1", viewers: "viewers.v1", listSource: "list-source.v1", uploadRead: "upload-read.v1", emailHtml: "email-html.v1", todo: "todo.v1" } as const;
 
 export const helloFrame = object({
   type: literal("hello"),
@@ -128,6 +131,8 @@ export const chatEvent = object({
   chatID,
   ts: eventTs,
   unreadCount: optional(integer({ min: 0, max: 1_000_000_000 })),
+  /** Optional ("todo.v1"): the chat's To do flag changed to this. One bit, metadata only, so open tabs follow at once; the cloud relays it and keeps nothing. */
+  todo: optional(boolean()),
 });
 export const statusEvent = object({
   type: literal("event"),

@@ -17,7 +17,7 @@ import { MAX_PAGE_LIMIT, MAX_SEND_TEXT_LENGTH } from "../src/limits.ts";
 import { account, chat, chatID, message } from "./fixtures/examples.ts";
 import { parse } from "../src/schema.ts";
 
-const EXPECTED = ["status", "list_chats", "unread_summary", "read_chat", "search_messages", "draft_reply", "send_message", "react", "mark_read", "archive", "remove_account", "compose_email", "gmail_connect", "snooze_chat", "unsnooze_chat", "list_snoozed", "request_draft", "cancel_draft", "discard_draft", "mark_draft_sent", "list_drafts", "list_raft_agents", "set_draft_agents", "request_delegation", "cancel_delegation", "dismiss_delegation", "list_delegations", "draft_store_put", "draft_store_get", "draft_store_set_text", "draft_store_delete", "upload_store_begin", "upload_store_chunk", "upload_store_commit", "upload_store_delete", "upload_store_read", "discard_upload", "get_noise_settings", "set_noise_definition", "set_noise", "get_media"];
+const EXPECTED = ["status", "list_chats", "unread_summary", "read_chat", "search_messages", "draft_reply", "send_message", "react", "mark_read", "archive", "remove_account", "compose_email", "gmail_connect", "snooze_chat", "unsnooze_chat", "list_snoozed", "request_draft", "cancel_draft", "discard_draft", "mark_draft_sent", "list_drafts", "list_raft_agents", "set_draft_agents", "request_delegation", "cancel_delegation", "dismiss_delegation", "list_delegations", "draft_store_put", "draft_store_get", "draft_store_set_text", "draft_store_delete", "upload_store_begin", "upload_store_chunk", "upload_store_commit", "upload_store_delete", "upload_store_read", "get_email_html", "discard_upload", "get_noise_settings", "set_noise_definition", "set_noise", "set_todo", "get_media"];
 const NOISE_OWNER: string[] = ["get_noise_settings", "set_noise_definition", "set_noise"];
 const DRAFT_OWNER: string[] = ["request_draft", "cancel_draft", "discard_draft", "mark_draft_sent", "list_drafts", "list_raft_agents", "set_draft_agents"];
 const DELEGATION_OWNER: string[] = ["request_delegation", "cancel_delegation", "dismiss_delegation", "list_delegations"];
@@ -30,11 +30,11 @@ describe("catalogue", () => {
   test("has exactly the agreed actions", () => expect([...ACTION_NAMES].sort() as string[]).toEqual([...EXPECTED].sort()));
   test("write flags", () => {
     const writes = ACTION_NAMES.filter((n) => ACTIONS[n].write).sort() as string[];
-    expect(writes).toEqual(["archive", "cancel_delegation", "cancel_draft", "compose_email", "discard_draft", "discard_upload", "dismiss_delegation", "draft_reply", "draft_store_delete", "draft_store_put", "draft_store_set_text", "gmail_connect", "mark_draft_sent", "mark_read", "react", "remove_account", "request_delegation", "request_draft", "send_message", "set_draft_agents", "set_noise", "set_noise_definition", "snooze_chat", "unsnooze_chat", "upload_store_begin", "upload_store_chunk", "upload_store_commit", "upload_store_delete"].sort());
+    expect(writes).toEqual(["archive", "cancel_delegation", "cancel_draft", "compose_email", "discard_draft", "discard_upload", "dismiss_delegation", "draft_reply", "draft_store_delete", "draft_store_put", "draft_store_set_text", "gmail_connect", "mark_draft_sent", "mark_read", "react", "remove_account", "request_delegation", "request_draft", "send_message", "set_draft_agents", "set_noise", "set_noise_definition", "set_todo", "snooze_chat", "unsnooze_chat", "upload_store_begin", "upload_store_chunk", "upload_store_commit", "upload_store_delete"].sort());
   });
   test("human-only actions: remove_account, the draft and delegation actions and the cloud-only gmail_connect and draft store, and never one that agents could get approved", () => {
-    expect(ACTION_NAMES.filter((n) => ACTIONS[n].humanOnly === true) as string[]).toEqual(["remove_account", "gmail_connect", ...DRAFT_OWNER, ...DELEGATION_OWNER, ...DRAFT_STORE, ...UPLOAD_STORE, "discard_upload", ...NOISE_OWNER]);
-    expect(ACTION_NAMES.filter((n) => (ACTIONS[n] as { cloudOnly?: boolean }).cloudOnly === true) as string[]).toEqual(["gmail_connect", ...DRAFT_STORE, ...UPLOAD_STORE]);
+    expect(ACTION_NAMES.filter((n) => ACTIONS[n].humanOnly === true) as string[]).toEqual(["remove_account", "gmail_connect", ...DRAFT_OWNER, ...DELEGATION_OWNER, ...DRAFT_STORE, ...UPLOAD_STORE, "get_email_html", "discard_upload", ...NOISE_OWNER, "set_todo"]);
+    expect(ACTION_NAMES.filter((n) => (ACTIONS[n] as { cloudOnly?: boolean }).cloudOnly === true) as string[]).toEqual(["gmail_connect", ...DRAFT_STORE, ...UPLOAD_STORE, "get_email_html"]);
     for (const n of ACTION_NAMES) if (ACTIONS[n].humanOnly) expect(ACTIONS[n].needsApprovalForAgents).toBe(false);
     for (const n of ACTION_NAMES) if ((ACTIONS[n] as { cloudOnly?: boolean }).cloudOnly) expect(ACTIONS[n].humanOnly).toBe(true);
   });
@@ -61,7 +61,7 @@ describe("catalogue", () => {
     for (const n of CONNECTOR_ACTION_NAMES) expect(isCloudAction(n)).toBe(false);
     for (const n of ["__proto__", "whoami", "", null]) expect(isCloudAction(n)).toBe(false);
   });
-  test("only get_media and the owner's upload_store_read stream", () => expect(ACTION_NAMES.filter((n) => ACTIONS[n].streamed)).toEqual(["upload_store_read", "get_media"]));
+  test("only get_media and the owner's upload_store_read and get_email_html stream", () => expect(ACTION_NAMES.filter((n) => ACTIONS[n].streamed)).toEqual(["upload_store_read", "get_email_html", "get_media"]));
   test("every param is documented and every action has a description", () => {
     for (const n of ACTION_NAMES) {
       const a = ACTIONS[n];
@@ -135,10 +135,12 @@ const VALID: Record<ActionName, unknown[]> = {
   upload_store_commit: [{ uploadId: UPL, owner: OWNER }],
   upload_store_delete: [{ uploadIds: [UPL, "upl_fedcba9876543210"] }],
   upload_store_read: [{ uploadId: UPL, owner: OWNER }],
+  get_email_html: [{ chatID: "gmail:owner@example.com:18c2f0a1b2c3d4e5", messageID: "18c2f0a1b2c3d4e6" }],
   discard_upload: [{ uploadId: UPL }],
   get_noise_settings: [{}],
   set_noise_definition: [{ definition: "Newsletters, ads, app notifications\nCold emails I sent that nobody has replied to yet" }, { definition: "" }],
   set_noise: [{ chatID, noise: true }, { chatID: "gmail:owner@example.com:18c2f0a1b2c3d4e5", noise: false }],
+  set_todo: [{ chatID, todo: true }, { chatID: "gmail:owner@example.com:18c2f0a1b2c3d4e5", todo: false }],
   get_media: [{ url: "mxc://beeper.local/abc" }, { url: "localmxc://local-whatsapp/xyz" }, { url: "gmail://jacky%40example.com/18c2f0a1b2c3d4e5/ANGjdJ8-abc_DEF" }],
 };
 
@@ -214,11 +216,13 @@ const INVALID: Record<ActionName, unknown[]> = {
   upload_store_chunk: [{ uploadId: UPL, owner: OWNER, index: -1, data: "" }, { uploadId: UPL, owner: OWNER, index: 100, data: "" }, { uploadId: UPL, owner: OWNER, index: 0, data: "not base64!" }, { uploadId: UPL, owner: OWNER, index: 0, data: "A".repeat(349_532) }, { uploadId: UPL, index: 0, data: "" }],
   upload_store_commit: [{ uploadId: UPL }, { owner: OWNER }],
   upload_store_delete: [{ uploadIds: [] }, { uploadIds: ["x"] }],
+  get_email_html: [{}, { chatID: "gmail:owner@example.com:18c2f0a1b2c3d4e5" }, { messageID: "18c2f0a1b2c3d4e6" }, { chatID: "a", messageID: "b", raw: true }],
   upload_store_read: [{}, { uploadId: UPL }, { owner: OWNER }, { uploadId: "x", owner: OWNER }, { uploadId: UPL, owner: "sub" }, { uploadId: UPL, owner: OWNER, offset: 0 }],
   discard_upload: [{}, { uploadId: "upl_" }, { uploadId: UPL, owner: OWNER }],
   get_noise_settings: [{ definition: "x" }],
   set_noise_definition: [{}, { definition: "x".repeat(4001) }, { definition: 1 }],
   set_noise: [{ chatID }, { chatID, noise: "true" }, { noise: true }, { chatID, noise: true, reason: "x" }],
+  set_todo: [{ chatID }, { chatID, todo: "true" }, { chatID, todo: 1 }, { todo: true }, { chatID, todo: true, at: "x" }, { chatID: "a b", todo: true }],
   get_media: [{ url: "gmail://jacky%40example.com/../ANG" }, { url: "gmail://jacky%40example.com/18c2/a/b" }, {}, { url: "https://evil.example/a.png" }, { url: "file:///etc/../etc/passwd" }, { url: "javascript:alert(1)" }, { url: "mxc://" + "a".repeat(3000) }],
 };
 
@@ -315,10 +319,12 @@ const RESULTS: Record<ActionName, unknown> = {
   upload_store_commit: { uploadId: UPL, fileName: "报价 – Quote.pdf", mimeType: "application/pdf", size: 1234 },
   upload_store_delete: { deleted: 1 },
   upload_store_read: { mimeType: "application/pdf", size: 1024, fileName: "quote.pdf" },
+  get_email_html: { mimeType: "text/html", size: 1024 },
   discard_upload: { uploadId: UPL, deleted: true },
   get_noise_settings: { definition: "Newsletters", enabled: true, keySet: false, problem: "no_key", noiseCount: 0, decisions: [] },
   set_noise_definition: { definition: "", enabled: false, keySet: true, problem: null, noiseCount: 0, decisions: [{ chatID, title: "Weekly digest", network: "Gmail", noise: true, reason: "Newsletters", confidence: 0.9, source: "jev", at: "2026-10-29T10:00:00.000Z" }] },
   set_noise: { chatID, noise: true },
+  set_todo: { chatID, todo: false },
   get_media: { mimeType: "image/png", size: 1234, fileName: "a.png" },
 };
 

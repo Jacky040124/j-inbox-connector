@@ -16,7 +16,9 @@ import {
   replySubject,
   decodeEntities,
   decodeCharset,
+  hasVisibleText,
 } from "../src/gmail/mime.ts";
+import { mapGmailMessage, messageBody, type GPart } from "../src/gmail/map.ts";
 
 const SELF = "owner@example.com";
 
@@ -168,4 +170,62 @@ describe("reading replies like Gmail: quoted history apart, hard wrapping undone
     const code = "Here is the snippet I mentioned in the meeting this morning, below.\n    const x = 1;";
     expect(reflowPlain(code)).toBe(code);
   });
+});
+
+describe("a text/plain part that shows nothing", () => {
+  const b64 = (t: string) => Buffer.from(t, "utf8").toString("base64url");
+  const part = (mimeType: string, text: string): GPart => ({ mimeType, headers: [{ name: "Content-Type", value: `${mimeType}; charset=utf-8` }], body: { size: text.length, data: b64(text) } });
+  const mail = (...parts: GPart[]): GPart => ({ mimeType: "multipart/alternative", parts });
+  // As the real Wealthsimple email has it: an empty body tag and thousands of U+034F.
+  const JUNK = `<body></body>\r\n${"\u034f".repeat(6000)}\r\n${"\u200b\u200c\u00ad\ufeff".repeat(500)}\r\n`;
+  const HTML = "<html><head><style>p{color:red}</style></head><body><p>Your statement is <b>ready</b>.</p></body></html>";
+
+  test("the HTML part is the text, whichever part comes first, also deep in the message", () => {
+    expect(messageBody(mail(part("text/plain", JUNK), part("text/html", HTML)))).toBe("Your statement is ready.");
+    expect(messageBody(mail(part("text/html", HTML), part("text/plain", JUNK)))).toBe("Your statement is ready.");
+    expect(messageBody({ mimeType: "multipart/mixed", parts: [mail(part("text/plain", JUNK), part("text/html", HTML))] })).toBe("Your statement is ready.");
+  });
+  test("mapped: the message has the HTML's words, with none of the junk", () => {
+    const m = mapGmailMessage({ id: "m1", threadId: "t1", internalDate: "1700000000000", labelIds: ["INBOX"], payload: { ...mail(part("text/plain", JUNK), part("text/html", HTML)), headers: [{ name: "From", value: "Wealthsimple <a@wealthsimple.com>" }] } }, "owner@example.com");
+    expect(m?.text).toBe("Your statement is ready.");
+  });
+  test("with no HTML part it stays as it was", () => {
+    expect(messageBody(part("text/plain", "<body></body>"))).toBe("<body></body>");
+  });
+  test("real short messages keep their plain part, however short", () => {
+    for (const real of ["ok", "好", "はい", "네", "👍", "🇨🇦", "1️⃣", "👨‍👩‍👧", "<3", "a < b", "?", ".", "😀\u200d", "مرحبا", "שלום", "สวัสดี", "ॐ"]) {
+      expect(hasVisibleText(real)).toBe(true);
+      expect(messageBody(mail(part("text/plain", real), part("text/html", HTML)))).toBe(real);
+    }
+  });
+  test("what counts as nothing", () => {
+    for (const none of ["", " ", "\r\n\t", "<body></body>", "<p><br/></p>", "<!-- a comment -->", "<style>p{color:red}</style>", "&nbsp;&#160;&zwnj;", "\u034f\u034f", "\u200b\u2060\ufeff", "\u3164\ufe0f", "\u2800\u2800", "<body>\u034f</body>"]) expect(hasVisibleText(none)).toBe(false);
+  });
+  // A plain part with an HTML sibling: it runs on the connector's main loop for every read of such a mail.
+  for (const [name, plain] of Object.entries({ "unterminated comments": "<!--".repeat(500_000), "unterminated styles": "<style>".repeat(285_000), "open tags": "<a ".repeat(660_000), "less-thans": "<".repeat(2_000_000), "script after script": "<script>".repeat(250_000) }))
+    test(`hasVisibleText is linear: ${name} at the 2 MB cap`, () => {
+      const t0 = performance.now();
+      hasVisibleText(plain);
+      expect(performance.now() - t0).toBeLessThan(1500);
+    });
+});
+
+describe("emailHtmlToText on what would stall a regular expression", () => {
+  // It runs on the connector's main loop for every HTML-only email read. These were minutes at this size.
+  const SIZE = 2_000_000;
+  const cases: Record<string, string> = {
+    "unterminated comments": "<!--".repeat(SIZE / 4),
+    "unterminated styles": "<style>".repeat(SIZE / 7),
+    "links without an end": '<a href="x">'.repeat(SIZE / 12),
+    "a long run of blanks": " ".repeat(SIZE) + "x",
+    "blanks before no newline": ("x" + " ".repeat(1000)).repeat(SIZE / 1001),
+    "less-thans": "<".repeat(SIZE),
+    "open tags": "<a ".repeat(SIZE / 3),
+  };
+  for (const [name, html] of Object.entries(cases))
+    test(name, () => {
+      const t0 = performance.now();
+      emailHtmlToText(html);
+      expect(performance.now() - t0).toBeLessThan(1500);
+    });
 });

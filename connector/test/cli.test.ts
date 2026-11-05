@@ -451,7 +451,9 @@ describe("uninstall", () => {
     const h = await pairedHarness();
     await Bun.write(join(h.paths.launchAgentsDir, `${LAUNCHD_LABEL}.plist`), "<plist/>");
     await Bun.write(h.paths.auditFile, "");
+    await Bun.write(h.paths.todoFile, "{}");
     expect(await h.cli("uninstall", "--yes")).toBe(0);
+    expect(existsSync(h.paths.todoFile)).toBe(false);
     expect(existsSync(join(h.paths.launchAgentsDir, `${LAUNCHD_LABEL}.plist`))).toBe(false);
     expect(await new FileSecretStore(h.paths.secretsFile).get("beeper-token")).toBeNull();
     expect(existsSync(h.paths.configFile)).toBe(false);
