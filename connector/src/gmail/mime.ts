@@ -163,7 +163,7 @@ const SHOWS = /[^\p{Cc}\p{Cf}\p{Z}\p{M}\p{Default_Ignorable_Code_Point}\u2800]/u
 
 /**
  * Whether a text/plain part says anything once HTML tags and invisible characters are gone. Some senders
- * (a real Wealthsimple email) put `<body></body>` and thousands of U+034F in it, with the mail in the HTML part.
+ * (a real A bank email) put `<body></body>` and thousands of U+034F in it, with the mail in the HTML part.
  * Only tags count as tags: "<3" and "a < b" are words; CJK and emoji are visible like any letter.
  */
 export function hasVisibleText(s: string): boolean {

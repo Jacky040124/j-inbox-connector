@@ -176,7 +176,7 @@ describe("a text/plain part that shows nothing", () => {
   const b64 = (t: string) => Buffer.from(t, "utf8").toString("base64url");
   const part = (mimeType: string, text: string): GPart => ({ mimeType, headers: [{ name: "Content-Type", value: `${mimeType}; charset=utf-8` }], body: { size: text.length, data: b64(text) } });
   const mail = (...parts: GPart[]): GPart => ({ mimeType: "multipart/alternative", parts });
-  // As the real Wealthsimple email has it: an empty body tag and thousands of U+034F.
+  // As the real A bank email has it: an empty body tag and thousands of U+034F.
   const JUNK = `<body></body>\r\n${"\u034f".repeat(6000)}\r\n${"\u200b\u200c\u00ad\ufeff".repeat(500)}\r\n`;
   const HTML = "<html><head><style>p{color:red}</style></head><body><p>Your statement is <b>ready</b>.</p></body></html>";
 
@@ -186,7 +186,7 @@ describe("a text/plain part that shows nothing", () => {
     expect(messageBody({ mimeType: "multipart/mixed", parts: [mail(part("text/plain", JUNK), part("text/html", HTML))] })).toBe("Your statement is ready.");
   });
   test("mapped: the message has the HTML's words, with none of the junk", () => {
-    const m = mapGmailMessage({ id: "m1", threadId: "t1", internalDate: "1700000000000", labelIds: ["INBOX"], payload: { ...mail(part("text/plain", JUNK), part("text/html", HTML)), headers: [{ name: "From", value: "Wealthsimple <a@wealthsimple.com>" }] } }, "owner@example.com");
+    const m = mapGmailMessage({ id: "m1", threadId: "t1", internalDate: "1700000000000", labelIds: ["INBOX"], payload: { ...mail(part("text/plain", JUNK), part("text/html", HTML)), headers: [{ name: "From", value: "A bank <a@bank.example>" }] } }, "owner@example.com");
     expect(m?.text).toBe("Your statement is ready.");
   });
   test("with no HTML part it stays as it was", () => {

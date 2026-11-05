@@ -496,7 +496,7 @@ The connector runs Gmail accounts next to Beeper. Rules every peer relies on:
   `isLowPriority` = a message carries `CATEGORY_PROMOTIONS`/`SOCIAL`/`UPDATES`/`FORUMS` (so Gmail's
   other tabs stay out of the primary inbox and `unread_summary`); `isPinned` = STARRED; `type` = group
   when more than one other person is on the thread; drafts never leave the Mac (`hasDraft` only).
-  Message `text` = the text/plain part, else the HTML part as plain text (also when the plain part shows nothing once tags and invisible characters are gone, as a real Wealthsimple email's `<body></body>` and thousands of U+034F); `email = {subject, from,
+  Message `text` = the text/plain part, else the HTML part as plain text (also when the plain part shows nothing once tags and invisible characters are gone, as a real A bank email's `<body></body>` and thousands of U+034F); `email = {subject, from,
   to[], cc[]}`; `senderName` = the From display name.
 - **Actions on Gmail chats.** `read_chat` (cursor `jg.`), `mark_read` (UNREAD on the thread, or up to
   `messageID`), `archive` (INBOX), `draft_reply` (a reply-all draft; `CONFLICT` when the thread has a
