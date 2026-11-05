@@ -148,7 +148,7 @@ describe("agentActionResponse", () => {
   });
 });
 
-import { agentMediaResult, authorizeRoomAccess, canBindRoom, offlineAlertDue, ownerNoticeText, approvalTicket } from "../src/agent.ts";
+import { AGENT_ACCESS_OFF_MESSAGE, AGENT_META, AGENT_NOT_ALLOWED_MESSAGE, agentMediaResult, authorizeAgentList, authorizeRoomAccess, canBindRoom, offlineAlertDue, ownerNoticeText, approvalTicket } from "../src/agent.ts";
 
 describe("spec-r1-F9: agent get_media returns JSON (base64), not raw bytes", () => {
   test("small files inline as base64 with metadata", () => {
@@ -276,5 +276,31 @@ describe("approval caps and grouped notices", () => {
     expect(t).not.toContain("javascript:");
     expect(t).not.toContain("](");
     expect(ownerNoticeText({ kind: "approval_requested", agentName: "javajavascript:script:x", action: "react", approveURL: "https://inbox.example.com/a", expiresAt: "2026-10-25T12:10:00Z" })).not.toMatch(/javascript:/i);
+  });
+});
+
+describe("the owner's list of agents (authorizeAgentList)", () => {
+  const sub = "agent-1";
+  test("allowed: agent access on and the agent on the list", () => {
+    expect(authorizeAgentList({ agentsEnabled: true, allowedAgentIDs: ["other", sub], sub })).toEqual({ ok: true });
+  });
+  test("a list never saved, empty or without the agent is nobody; never everybody", () => {
+    for (const allowedAgentIDs of [undefined, null, [], ["other"], "agent-1" as never, { includes: () => true } as never]) expect(authorizeAgentList({ agentsEnabled: true, allowedAgentIDs, sub })).toEqual({ ok: false, reason: "not_allowed", message: AGENT_NOT_ALLOWED_MESSAGE });
+    for (const bad of ["", "x".repeat(129), undefined as never, null as never]) expect(authorizeAgentList({ agentsEnabled: true, allowedAgentIDs: [bad as string], sub: bad }).ok).toBe(false);
+  });
+  test("agent access off, or a key that does not say, is nothing for anyone", () => {
+    for (const agentsEnabled of [false, undefined, 1 as never, "true" as never]) expect(authorizeAgentList({ agentsEnabled, allowedAgentIDs: [sub], sub })).toEqual({ ok: false, reason: "off", message: AGENT_ACCESS_OFF_MESSAGE });
+  });
+  test("the refusal says who decides, and nothing about chats, accounts or the computer", () => {
+    expect(AGENT_NOT_ALLOWED_MESSAGE).toBe("The owner has not allowed this agent in J-Inbox Settings > Agents.");
+    for (const m of [AGENT_NOT_ALLOWED_MESSAGE, AGENT_ACCESS_OFF_MESSAGE]) expect(m).not.toMatch(/chat|account|online|offline|computer|connector|gmail|beeper/i);
+  });
+  test("the manifest tells agents the rule; no text says an agent may read without being allowed", () => {
+    const m: any = buildRaftManifest({ origin, service: "j-inbox" });
+    expect(m.description).toContain("Only agents the owner allowed in J-Inbox Settings > Agents can use it");
+    expect(m.description).toContain("any other agent gets NOT_ALLOWED from every action except whoami");
+    expect(m.description).not.toContain("Read freely");
+    expect(AGENT_META.whoami.description).toContain("Only an allowed agent");
+    expect(parse(AGENT_META.whoami.result, { principal: { type: "agent", sub, name: null }, serverSlug: "s", owner: null, online: false, allowed: false }).ok).toBe(true);
   });
 });

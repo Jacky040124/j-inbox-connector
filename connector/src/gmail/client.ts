@@ -182,7 +182,14 @@ export function createGmailClient(o: GmailClientOptions) {
       }
     });
     queue = turn.catch(() => {});
-    return turn;
+    if (!signal) return turn;
+    // Whoever gave up while waiting stops waiting now, not at its turn (which then takes no place: it sees the abort first).
+    return new Promise<void>((resolve) => {
+      if (signal.aborted) return resolve();
+      const done = () => (signal.removeEventListener("abort", done), resolve());
+      signal.addEventListener("abort", done, { once: true });
+      turn.then(done, done);
+    });
   }
   const retryDelays = o.retryDelaysMs ?? [1000, 3000];
 

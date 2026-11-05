@@ -26,7 +26,7 @@ Changes must be **additive** and recorded in the root README changelog (see "Rul
 | `delegations.ts` | Delegations to agents as Raft tasks: `delegationMeta` (what the cloud keeps), `delegationView` (+ the instruction from the computer), `delegationRequestForAgent`, `delegationRequestID` (`dlg_`), channels (`raftChannel`, `CHANNEL_PATTERN`, `normalizeChannel`, `sameChannel`), `delegationTask`, `cleanDelegationReason`, `coerceReportParams`, `DELEGATION_STATUSES` / `SHOWN_` / `OPEN_`, limits (`DELEGATION_DEADLINE_MS` 30 min, `MAX_ACTIVE_DELEGATIONS` 50, `MAX_SHOWN_DELEGATIONS` 200, `MAX_RECENT_CHANNELS` 20, `MAX_DELEGATION_REASON_LENGTH` 200), the Raft event (`delegationEventSummary`, `delegationEventPayload`). `drafts.ts` adds `storedRequestID` (`drq_` or `dlg_`: the connector's one request store). |
 | `uploads.ts` | Files sent from J-Inbox (since 2026-10-29): `uploadID` (`upl_`), `uploadOwner` / `uploadOwnerTag(caller)`, `fileName` / `sanitizeFileName`, `cleanMimeType`, `uploadInfo`, `uploadHead` (POST /api/upload's first line), `uploadBeginParams`, `fileSizeLabel`, limits (`MAX_UPLOAD_BYTES` = `MAX_MEDIA_BYTES` 25 MiB, `UPLOAD_CHUNK_BYTES` 256 KiB, `MAX_UPLOAD_CHUNKS` 100, `AGENT_UPLOAD_FILE_MAX_BYTES` 512 KiB, `UPLOAD_TTL_MS` 1 h, `MAX_STORED_UPLOADS` 60, `MAX_UPLOAD_STORE_BYTES` 256 MiB, `UPLOAD_BEGIN_PER_MINUTE` 10, `UPLOAD_CHUNK_PER_MINUTE` 240, `SEND_WITH_FILE_TIMEOUT_MS` 2 min). See "Files". |
 | `email-frame.ts` | HTML email (since 2026-11-04, `"email-html.v1"`): `EMAIL_FRAME_PATH`, `EMAIL_FRAME_SANDBOX`, `emailFrameCsp`, `emailFrameHeaders`, the document around the email (`emailFrameOpen`, `emailFrameClose`, `emailFrameFailure`: our one script), `parseEmailFrameMessage` (what the parent may believe, the height clamped), `emailFrameFragment`, the ticket's shape, limits (`EMAIL_FRAME_TTL_MS` 1 min, `MAX_EMAIL_HTML_BYTES` 2 MiB, `MAX_EMAIL_CID_IMAGE_BYTES` 4 MiB, `MAX_EMAIL_CID_TOTAL_BYTES` 8 MiB). No schema in it, so `dist/email-frame.js` can import it alone. See "HTML email". |
-| `noise.ts` | Noise (since 2026-10-29): `noiseDefinition`, `noiseLines` (the definition's lines as Jev gets them), `noiseDecision`, `noiseSettings`, `NOISE_PROBLEMS`, limits (`MAX_NOISE_DEFINITION_LENGTH` 4000, `MAX_NOISE_LINES` 50, `MAX_NOISE_DECISIONS` 20), `NOISE_CONFIDENCE_THRESHOLD` (0.7), `OWNER_NOISE_REASON`. `model.ts` has `chatNoise` (`ChatSummary.noise`), `NOISE_SOURCES`, `MAX_NOISE_LINE_LENGTH`. See "Noise". |
+| `noise.ts` | Noise (since 2026-10-29): `noiseDefinition`, `noiseLines` (the definition's lines as Jev gets them), `noiseDecision`, `noiseSettings`, `NOISE_PROBLEMS`, limits (`MAX_NOISE_DEFINITION_LENGTH` 4000, `MAX_NOISE_LINES` 50, `MAX_NOISE_DECISIONS` 20), `NOISE_CONFIDENCE_THRESHOLD` (0.7), `OWNER_NOISE_REASON`; the noise list of senders: `parseNoiseSender`, `noiseSender`, `noiseSenders`, `noiseSenderAdded`, `noiseSenderValue`, `SENDER_NOISE_REASON`, `MAX_NOISE_SENDERS` (500), `NOISE_SENDER_LEARN_AT` (2). `model.ts` has `chatNoise` (`ChatSummary.noise`), `NOISE_SOURCES`, `MAX_NOISE_LINE_LENGTH`. See "Noise". |
 | `web.ts` | Browser API routes and shapes, CSRF header, `mediaResponseHeaders`, `WEB_HTML_HEADERS`, `NO_SESSION_TIMING`, human and agent session cookies, logout, local-cache rules, upgrade `Origin` checks, `/live` messages. |
 | `auth.ts` | Login with Raft (`startHumanLogin`, `handleRaftCallback`: state + nonce + PKCE for humans, stateless only for proven agents), session lifetimes (`sessionExpired`, `agentSessionMaxAge`), surfaces (`surfaceForPath`, `sessionKindForSurface`, `authorizeSurface`). |
 | `pairing.ts` | Device-code pairing flow, user/device codes, device tokens, `hashToken`, `checkPairConfirm`, `approximateIP`, `PairingGuard` attempt limits. |
@@ -118,7 +118,11 @@ camelCase (like Beeper). Agent writes marked "approval" go through the approval 
 | `discard_upload` | `uploadId` | `{uploadId, deleted}` (false: not there, or on an agent's draft) | yes (`humanOnly`) | n/a | the connector's upload store |
 | `get_noise_settings` | – | `noiseSettings {definition, enabled, keySet, problem, noiseCount, decisions[]}` | (`humanOnly`) | n/a | the connector's noise store (see "Noise") |
 | `set_noise_definition` | `definition(0-4000, multi-line)` | `noiseSettings` | yes (`humanOnly`) | n/a | the connector's noise store; empty turns noise off |
-| `set_noise` | `chatID noise` | `{chatID, noise}` | yes (`humanOnly`) | n/a | the connector's noise store (`read_chat` limit 5 for the owner's example); never Beeper or Gmail |
+| `set_noise` | `chatID noise` | `{chatID, noise, learned?}` | yes (`humanOnly`) | n/a | the connector's noise store (`read_chat` limit 5 for the owner's example); never Beeper or Gmail |
+| `get_noise_senders` | – | `noiseSenders {items[]}` | (`humanOnly`) | n/a | the connector's noise store (see "The noise list of senders") |
+| `add_noise_sender` | `entry` (lowercase address or domain) | `noiseSenderAdded {entry, added}` | yes (`humanOnly`) | n/a | the connector's noise store; Gmail `threads.list` and metadata in the background |
+| `add_noise_sender_of_chat` | `chatID` | `noiseSenderAdded {entry, added, chatNoise}` | yes (`humanOnly`) | n/a | Gmail `threads.get` metadata (From, Subject) |
+| `remove_noise_sender` | `entry undo?` | `{entry, removed}` | yes (`humanOnly`) | n/a | the connector's noise store |
 | `set_todo` | `chatID todo upTo?(iso time: for Done, the newest message on the owner's screen)` | `{chatID, todo}`: the flag as it now stands (idempotent) | yes (`humanOnly`) | n/a | the connector's To do store (see "To do"); never Beeper or Gmail |
 | `get_older_unread` | `source`(`beeper` or `gmail`: which sources) | `{items: {source, count (null: not known), adding, counting}[]}`: what To do's first run left out, a source with nothing to say not listed | (`humanOnly`) | n/a | none: the connector's To do store, where the first run left its count (see "To do") |
 | `add_older_unread` | `source`(`beeper`, or `gmail:<address>`) | `{source, adding}` (idempotent; false: nothing to bring in) | yes (`humanOnly`) | n/a | none as an answer; in the background, the same reads as a first run, never a write |
@@ -235,7 +239,7 @@ owner's computer are ordinary connector actions:
 The owner asks an allowed agent of the Raft server to draft a reply; the agent drafts, the owner
 sends (or edits, discards, asks again). Nothing is written into Beeper or Gmail drafts.
 
-- **Who may be asked**: Settings > Agents. `list_raft_agents` answers the directory the cloud read
+- **Who may be asked**: the agents allowed in Settings > Agents (the same list gates everything an agent does, see "Raft agent surface"). `list_raft_agents` answers the directory the cloud read
   from Raft (`GET <raft>/api/oauth/agents` with the owner's Login-with-Raft token, scope
   `agent:read`, at sign-in and on `refresh: true`; `signInNeeded: true` when the session's token
   is expired or lacks the scope) and `allowedAgentIDs`. `set_draft_agents` stores the allowed ids
@@ -421,11 +425,11 @@ Low priority. Nothing changes in Beeper or Gmail: never read, never archived.
   is the one already judged is not asked again.
 - **What Jev gets** per conversation (one `choice` question each): network, title, group or not,
   whether Beeper or Gmail already put it in low priority, whether the owner started it and whether
-  anyone else wrote, and the last 5 messages (`me` / `other`, the other's name, the text cut to 300
+  anyone else wrote, and the last 5 messages (`me` / `other`, the other's name, an email sender's address, the text cut to 300
   characters). The criteria: `"Not noise"` (anything a person would want to see: real people writing
   to the owner, replies to the owner's emails, ...) plus one choice per definition line (name
   `"Noise: <first words>"`, description = the line). `state` says what J-Inbox is and lists the
-  owner's last 20 corrections as examples (a compact summary -> noise or not noise).
+  owner's last 40 corrections as examples (a compact summary, with an email's sender -> noise or not noise).
 - **Verdict.** Noise only when Jev chose a definition line with confidence at least
   `NOISE_CONFIDENCE_THRESHOLD` (0.7); anything else, a missing or unknown answer included, is not
   noise. The chosen line is the reason. A later not-noise verdict (the cold email got a reply) brings
@@ -437,7 +441,7 @@ Low priority. Nothing changes in Beeper or Gmail: never read, never archived.
   While the definition is empty no verdict is applied.
 - **The owner's corrections** (`set_noise {chatID, noise}`): they stick. Jev never judges that
   conversation again until the owner changes it (also when someone writes later: the owner said so),
-  and the last 20 are examples for Jev's next calls. `noise: true` has the reason
+  and the last 40 are examples for Jev's next calls. `noise: true` has the reason
   `OWNER_NOISE_REASON` and confidence 1, `source: "owner"`.
 - **Failures** (no key, network, timeout 20 s, 4xx/5xx): previous verdicts stay, the conversations
   are asked again later (5 s doubling to 10 min), the inbox never waits for Jev. `noiseSettings.problem`
@@ -446,6 +450,22 @@ Low priority. Nothing changes in Beeper or Gmail: never read, never archived.
   there; a Jev verdict whose line was removed is forgotten.
 - **Capability** `"noise.v1"`: without it the cloud answers the three actions `NOT_SUPPORTED` and the
   web shows no Noise UI. Agents never see the actions (`humanOnly`).
+
+### The noise list of senders (`noise.ts`; added 2026-11-05, `"noise-senders.v1"`)
+
+Warm-up mail is written to look personal, and Jev passes it; anyone can see what it is by who sent it. So, before Jev, a list of senders: on the owner's computer only (`noise.json`), Gmail only (a Beeper `senderID` is no address).
+
+- **An entry** is an exact address or a whole domain (`parseNoiseSender`: spaces and case do not count, `@example.com` and `*@example.com` are the domain; a subdomain is another domain), by the owner's hand (`origin: "owner"`) or learned (`"learned"`). At most `MAX_NOISE_SENDERS`.
+- **The rule.** A conversation whose **newest** message is from someone other than the owner, and from a sender on the list, is noise, with no Jev call: `noise {reason: SENDER_NOISE_REASON, confidence: 1, source: "sender"}`. So a real person replying is not caught, nor a thread whose newest message is the owner's own, and one caught earlier comes back when that happens. **The owner's verdict on a conversation always wins.** It needs no definition and no Jev key. With a list and no definition, Jev's verdicts stay off, and the owner's apply. With no definition and no list, nothing is noise. `noiseSettings.enabled` still says only whether Jev has a definition.
+- **When it looks.** As Gmail threads are mapped for a list, a read or a search, at no cost (so what is listed is right before anything filters it); on new mail, just before the poller announces it, one batch of `threads.get` metadata (`From`, `Subject`), only while the list has an entry, so To do and open pages hear of a caught thread as noise from the start. If that read fails or is cut short (20 threads a poll), the judge's read decides, about 5 s later: the only way such a mail can show in To do for those seconds.
+- **Learning.** An exact address with at least `NOISE_SENDER_LEARN_AT` conversations the owner marked noise and none marked not noise becomes a learned entry. A mark counts only when every message in the thread by anyone but the owner is from one single address (read from the thread's metadata at the mark, all of its From headers): a group or mailing-list thread teaches nothing, so a colleague in one is never learned. Each owner's verdict on a Gmail conversation keeps that address (`sender`, or none). The mark that teaches it answers `set_noise {…, learned: <address>}`, and the page says "Mail from <address> is now noise." with Undo (which takes it off for good), so learning is never silent. Never the owner's own addresses or aliases (one found to be an alias later goes), never a domain. A Not noise mark on a conversation from a learned address ends it (and the mark itself keeps it from coming back).
+- **Older marks.** Once, in the background, 2 minutes after a start: each owner's Gmail verdict without a sender is looked up (`threads.get`, metadata, only `From`, the thread as it was at the mark: messages after it do not count), ten a second at most, through the account's client and its pacing. Found ones go to disk batch by batch, so a restart goes on where it stopped; a thread that is gone has no sender. When none is left it is marked done on disk and asks Gmail nothing again. Failures are logged by count and tried again (1 min doubling to 30). Nothing about mail is logged.
+- **Taken off stays off.** An address the owner removes is recorded and not learned again, unless the owner adds it; whoever put it there. `undo` on `remove_noise_sender` takes back an add just made, as if it never happened.
+- **Existing mail.** An entry that comes on the list, by hand or learned, is walked: Gmail's ids for `in:inbox from:<entry> after:<30 days ago>`, at most 500 threads, ten a second at most, each checked by the rule (no Jev; a non-match keeps its verdict; a thread with an owner's verdict is not read). They leave To do as any noise does. Waiting walks are on disk; one that fails is tried again up to 5 times, and new mail is caught regardless. Removing an entry clears the verdicts that came from it (those another entry still catches stay, with that entry), and those conversations are judged again on their next activity. To do keeps what it knew: nothing here says Done, so they come back as they were.
+- **Nothing before 2 minutes after a start**: no learning, no walk, no look at old marks (they make the first verdicts from the list, which an old Worker cannot read; the deploy puts the connector first). What waits then, one round does.
+- **The bound.** The owner's verdicts are never pushed out by Jev's or the list's: those go first at 5000, and the owner's have their own 5000, past which their oldest go.
+- **To do.** A first run and Add older unread take in an unread chat the list caught (it shows when the entry goes, as new mail from a listed sender does); other noise they still leave out.
+- **Capability** `"noise-senders.v1"`: without it the cloud answers the four actions `NOT_SUPPORTED` and the web shows neither the section nor the menu item. Agents never see the actions (`humanOnly`), and read `noise` on chats like any other mark.
 
 ### To do (`ChatSummary.todo`, `set_todo`; added 2026-11-04, `"todo.v1"`)
 
@@ -644,9 +664,21 @@ both                 ping {t} / pong {t}                    every 25 s; 60 s sil
 - Agent `get_media` answers JSON `agentMediaResult` `{mimeType, size, fileName, encoding:"base64", data}` for files up to `AGENT_MEDIA_INLINE_MAX_BYTES` (1 MiB), else `TOO_LARGE`. No raw bytes and no download URLs for agents.
 - Login: the single registered return URL is `RAFT_CALLBACK_PATH` (`/auth/raft/callback`), handled by `handleRaftCallback` (`auth.ts`). Agents arrive there with `?code=` and no login state and are accepted only if `userinfo.type === "agent"`; they get the **agent** session cookie (`__Host-jinbox_agent`, `Path=/`, at most 1 h and never past the Raft token). Humans must come through `startHumanLogin` (OIDC authorize, `state` + `nonce` + PKCE S256 in a sealed 10-minute login-init cookie); a human without valid login-init state is refused with 4xx and no Set-Cookie.
 - Agent sessions work only on `/api/raft/actions/*`; human sessions only on the web surface (`authorizeSurface`).
+- **Which agents** (since 2026-11-05): the owner's list in Settings > Agents (`set_draft_agents`,
+  each id in Raft's directory; one never saved is nobody) is the gate for every agent action.
+  `authorizeAgentList({agentsEnabled, allowedAgentIDs, sub})`: agent access must be on and the
+  agent on the list. Anyone else gets `403 NOT_ALLOWED` with `AGENT_NOT_ALLOWED_MESSAGE` ("The
+  owner has not allowed this agent in J-Inbox Settings > Agents.", or `AGENT_ACCESS_OFF_MESSAGE`
+  while access is off), the same bytes for every action and whatever the inbox's state, before
+  its body is read. `whoami` still answers: `allowed`, and `owner: null`, `online: false` unless
+  allowed. An allowed agent reads everything, drafts cards and asks for approvals. A removal takes
+  effect on the agent's next call (sessions already open included); its waiting approvals end as
+  `denied` with `error.code NOT_ALLOWED`. One exception: `report_delegation` from an agent taken
+  off the list, for its own delegation that is still pending, still lands (the task may already
+  exist); anything else it sends gets the refusal.
 - Approval caps (`canCreateApproval`): 5 pending per agent, 20 per room, and creations count against the action's `rateLimitPerMinute`; more is `RATE_LIMITED`. Approval DMs are grouped (`approvalNoticeDue`, `approvals_pending`).
 - Responses (`agentActionResponse`): `200 {ok:true, status:"done", result}`, `202 {ok:true, status:"pending_approval", approval:{id, action, expiresAt, approveURL}}`, or `4xx/5xx {ok:false, status:"error", error}`.
-- **Approval** (Raft has no manifest flag for it): the owner opens `approveURL` in the web UI, sees `approvalView` (who asked, which chat, the exact text), approves or denies; the cloud runs the action; the agent reads the outcome with `approval_status {approvalID}`. Pending approvals live in memory only and expire after `APPROVAL_TTL_MS` (10 min).
+- **Approval** (Raft has no manifest flag for it): the owner opens `approveURL` in the web UI, sees `approvalView` (who asked, which chat, the exact text), approves or denies; the cloud runs the action if the agent still has access at that moment (else the request ends `denied` with `error.code NOT_ALLOWED` and nothing runs); the agent reads the outcome with `approval_status {approvalID}`. Pending approvals live in memory only and expire after `APPROVAL_TTL_MS` (10 min).
 - **Telling the owner** (plan step 3): the cloud sends a Raft DM from the **J-Inbox App Bot**
   (`enableBot`, per-server bot grant, `sk_agent_*` key minted by the backend; docs.raft.build
   "App Bot") to the room owner with `ownerNoticeText({kind:"approval_requested", ...})`, and the
@@ -659,7 +691,8 @@ both                 ping {t} / pong {t}                    every 25 s; 60 s sil
 - **Room binding** (who reaches which inbox): one owner per Raft server per installation.
   `canBindRoom(human, existing)` lets only a server `owner`/`admin` pair, and refuses a second
   owner on an already bound server (`CONFLICT`). `authorizeRoomAccess(principal, binding)` runs on
-  every request: humans only reach their own room; agents only the room bound to their server.
+  every request: humans only reach their own room; agents only the room bound to their server,
+  and in it only the agents the owner allowed (`authorizeAgentList`, above).
 - Meta actions (cloud-only, never forwarded): `whoami`, `approval_status`, `get_draft_request`, `submit_draft` (see "Drafts by agents"), `get_delegation_request`, `report_delegation` (see "Delegations"), `upload_file`, `upload_begin`, `upload_chunk`, `upload_commit` (see "Files").
 
 ## Browser API (`web.ts`)

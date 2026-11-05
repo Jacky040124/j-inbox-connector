@@ -3,13 +3,41 @@ import { ACTIONS, parseActionParams, parseActionResult } from "../src/actions.ts
 import { AGENT_META, buildRaftManifest } from "../src/agent.ts";
 import { CAPABILITIES } from "../src/frames.ts";
 import { chatSummary } from "../src/model.ts";
-import { MAX_NOISE_DECISIONS, MAX_NOISE_DEFINITION_LENGTH, MAX_NOISE_LINES, NOISE_CONFIDENCE_THRESHOLD, noiseDecision, noiseLines, noiseSettings } from "../src/noise.ts";
+import { MAX_NOISE_DECISIONS, MAX_NOISE_DEFINITION_LENGTH, MAX_NOISE_LINES, NOISE_CONFIDENCE_THRESHOLD, SENDER_NOISE_REASON, noiseDecision, noiseLines, noiseSender, noiseSenderValue, noiseSettings, parseNoiseSender } from "../src/noise.ts";
 import { parse } from "../src/schema.ts";
 import { WEB_PAGES } from "../src/web.ts";
 import { chat, chatID } from "./fixtures/examples.ts";
 
 const settings = { definition: "Newsletters\nCold emails I sent that nobody answered", enabled: true, keySet: true, problem: null, noiseCount: 2, decisions: [] };
 const decision = { chatID, title: "Weekly digest", network: "Gmail", noise: true, reason: "Newsletters", confidence: 0.91, source: "jev", at: "2026-10-29T10:00:00.000Z" };
+
+describe("the noise list of senders", () => {
+  test("an entry: what the owner typed, as an address or a domain; what can't be matched or could be a search operator is neither", () => {
+    expect(parseNoiseSender(" Warm@Example.COM ")).toEqual({ kind: "address", value: "warm@example.com" });
+    expect(parseNoiseSender("Example.com")).toEqual({ kind: "domain", value: "example.com" });
+    expect(parseNoiseSender("@example.com")).toEqual({ kind: "domain", value: "example.com" });
+    expect(parseNoiseSender("*@mail.example.co.uk")).toEqual({ kind: "domain", value: "mail.example.co.uk" });
+    expect(parseNoiseSender("a.b+c_d@xn--bcher-kva.example")).toEqual({ kind: "address", value: "a.b+c_d@xn--bcher-kva.example" });
+    for (const bad of ["", "@", "a", "localhost", "a@b", "a@b.c", "a b@example.com", "a@example.com b", "a@example.com OR b", "from:a@example.com", "{a@example.com}", "(a@example.com)", '"a"@example.com', "a@-example.com", "a@example.com.", "a@@example.com", `${"a".repeat(65)}@example.com`, `a@${"b".repeat(64)}.com`, `${"x.".repeat(150)}com`, "unknown@unknown.invalid", 7, null]) expect(parseNoiseSender(bad)).toBeNull();
+  });
+  test("the schema takes only what parseNoiseSender makes", () => {
+    expect(parse(noiseSenderValue, "warm@example.com").ok).toBe(true);
+    expect(parse(noiseSenderValue, "example.com").ok).toBe(true);
+    expect(parse(noiseSenderValue, "Warm@example.com").ok).toBe(false);
+    expect(parse(noiseSender, { value: "example.com", kind: "domain", origin: "learned", addedAt: "2026-11-05T10:00:00.000Z" }).ok).toBe(true);
+    expect(parse(noiseSender, { value: "example.com", kind: "domain", origin: "someone", addedAt: "2026-11-05T10:00:00.000Z" }).ok).toBe(false);
+  });
+  test("the mark, the decision: its own source and reason; owner only, never in the manifest", () => {
+    expect(parse(chatSummary, { ...chat, isLowPriority: true, noise: { reason: SENDER_NOISE_REASON, confidence: 1, source: "sender" } }).ok).toBe(true);
+    expect(parse(noiseDecision, { ...decision, source: "sender", reason: SENDER_NOISE_REASON, confidence: null }).ok).toBe(true);
+    expect(CAPABILITIES.noiseSenders).toBe("noise-senders.v1");
+    const manifest = JSON.stringify(buildRaftManifest({ origin: "https://inbox.example.com", service: "j-inbox" }));
+    for (const name of ["get_noise_senders", "add_noise_sender", "add_noise_sender_of_chat", "remove_noise_sender"]) {
+      expect(ACTIONS[name as keyof typeof ACTIONS].humanOnly).toBe(true);
+      expect(manifest).not.toContain(name);
+    }
+  });
+});
 
 describe("noise definition lines", () => {
   test("one idea per line: trimmed, bullets and numbers dropped, empty and repeated lines left out", () => {

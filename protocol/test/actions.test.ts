@@ -17,8 +17,8 @@ import { MAX_PAGE_LIMIT, MAX_SEND_TEXT_LENGTH } from "../src/limits.ts";
 import { account, chat, chatID, message } from "./fixtures/examples.ts";
 import { parse } from "../src/schema.ts";
 
-const EXPECTED = ["status", "list_chats", "unread_summary", "read_chat", "search_messages", "draft_reply", "send_message", "react", "mark_read", "archive", "remove_account", "compose_email", "gmail_connect", "snooze_chat", "unsnooze_chat", "list_snoozed", "request_draft", "cancel_draft", "discard_draft", "mark_draft_sent", "list_drafts", "list_raft_agents", "set_draft_agents", "request_delegation", "cancel_delegation", "dismiss_delegation", "list_delegations", "draft_store_put", "draft_store_get", "draft_store_set_text", "draft_store_delete", "upload_store_begin", "upload_store_chunk", "upload_store_commit", "upload_store_delete", "upload_store_read", "get_email_html", "discard_upload", "get_noise_settings", "set_noise_definition", "set_noise", "set_todo", "get_older_unread", "add_older_unread", "get_media"];
-const NOISE_OWNER: string[] = ["get_noise_settings", "set_noise_definition", "set_noise"];
+const EXPECTED = ["get_noise_senders", "add_noise_sender", "add_noise_sender_of_chat", "remove_noise_sender", "status", "list_chats", "unread_summary", "read_chat", "search_messages", "draft_reply", "send_message", "react", "mark_read", "archive", "remove_account", "compose_email", "gmail_connect", "snooze_chat", "unsnooze_chat", "list_snoozed", "request_draft", "cancel_draft", "discard_draft", "mark_draft_sent", "list_drafts", "list_raft_agents", "set_draft_agents", "request_delegation", "cancel_delegation", "dismiss_delegation", "list_delegations", "draft_store_put", "draft_store_get", "draft_store_set_text", "draft_store_delete", "upload_store_begin", "upload_store_chunk", "upload_store_commit", "upload_store_delete", "upload_store_read", "get_email_html", "discard_upload", "get_noise_settings", "set_noise_definition", "set_noise", "set_todo", "get_older_unread", "add_older_unread", "get_media"];
+const NOISE_OWNER: string[] = ["get_noise_settings", "set_noise_definition", "set_noise", "get_noise_senders", "add_noise_sender", "add_noise_sender_of_chat", "remove_noise_sender"];
 const DRAFT_OWNER: string[] = ["request_draft", "cancel_draft", "discard_draft", "mark_draft_sent", "list_drafts", "list_raft_agents", "set_draft_agents"];
 const DELEGATION_OWNER: string[] = ["request_delegation", "cancel_delegation", "dismiss_delegation", "list_delegations"];
 const DRAFT_STORE: string[] = ["draft_store_put", "draft_store_get", "draft_store_set_text", "draft_store_delete"];
@@ -30,7 +30,7 @@ describe("catalogue", () => {
   test("has exactly the agreed actions", () => expect([...ACTION_NAMES].sort() as string[]).toEqual([...EXPECTED].sort()));
   test("write flags", () => {
     const writes = ACTION_NAMES.filter((n) => ACTIONS[n].write).sort() as string[];
-    expect(writes).toEqual(["archive", "cancel_delegation", "cancel_draft", "compose_email", "discard_draft", "discard_upload", "dismiss_delegation", "draft_reply", "draft_store_delete", "draft_store_put", "draft_store_set_text", "add_older_unread", "gmail_connect", "mark_draft_sent", "mark_read", "react", "remove_account", "request_delegation", "request_draft", "send_message", "set_draft_agents", "set_noise", "set_noise_definition", "set_todo", "snooze_chat", "unsnooze_chat", "upload_store_begin", "upload_store_chunk", "upload_store_commit", "upload_store_delete"].sort());
+    expect(writes).toEqual(["add_noise_sender", "add_noise_sender_of_chat", "remove_noise_sender", "archive", "cancel_delegation", "cancel_draft", "compose_email", "discard_draft", "discard_upload", "dismiss_delegation", "draft_reply", "draft_store_delete", "draft_store_put", "draft_store_set_text", "add_older_unread", "gmail_connect", "mark_draft_sent", "mark_read", "react", "remove_account", "request_delegation", "request_draft", "send_message", "set_draft_agents", "set_noise", "set_noise_definition", "set_todo", "snooze_chat", "unsnooze_chat", "upload_store_begin", "upload_store_chunk", "upload_store_commit", "upload_store_delete"].sort());
   });
   test("human-only actions: remove_account, the draft and delegation actions and the cloud-only gmail_connect and draft store, and never one that agents could get approved", () => {
     expect(ACTION_NAMES.filter((n) => ACTIONS[n].humanOnly === true) as string[]).toEqual(["remove_account", "gmail_connect", ...DRAFT_OWNER, ...DELEGATION_OWNER, ...DRAFT_STORE, ...UPLOAD_STORE, "get_email_html", "discard_upload", ...NOISE_OWNER, "set_todo", "get_older_unread", "add_older_unread"]);
@@ -140,6 +140,10 @@ const VALID: Record<ActionName, unknown[]> = {
   get_noise_settings: [{}],
   set_noise_definition: [{ definition: "Newsletters, ads, app notifications\nCold emails I sent that nobody has replied to yet" }, { definition: "" }],
   set_noise: [{ chatID, noise: true }, { chatID: "gmail:owner@example.com:18c2f0a1b2c3d4e5", noise: false }],
+  get_noise_senders: [{}],
+  add_noise_sender: [{ entry: "warm@example.com" }, { entry: "example.com" }, { entry: "a.b+c@mail.example.co.uk" }],
+  add_noise_sender_of_chat: [{ chatID: "gmail:owner@example.com:18c2f0a1b2c3d4e5" }],
+  remove_noise_sender: [{ entry: "warm@example.com" }, { entry: "example.com", undo: true }],
   set_todo: [{ chatID, todo: true }, { chatID: "gmail:owner@example.com:18c2f0a1b2c3d4e5", todo: false }],
   get_older_unread: [{ source: "beeper" }, { source: "gmail" }],
   add_older_unread: [{ source: "beeper" }, { source: "gmail:owner@example.com" }],
@@ -224,6 +228,10 @@ const INVALID: Record<ActionName, unknown[]> = {
   get_noise_settings: [{ definition: "x" }],
   set_noise_definition: [{}, { definition: "x".repeat(4001) }, { definition: 1 }],
   set_noise: [{ chatID }, { chatID, noise: "true" }, { noise: true }, { chatID, noise: true, reason: "x" }],
+  get_noise_senders: [{ entry: "x" }],
+  add_noise_sender: [{}, { entry: "" }, { entry: "not an address" }, { entry: "Warm@Example.com" }, { entry: "from:x OR y" }, { entry: "a@b" }, { entry: "localhost" }, { entry: "warm@example.com", origin: "learned" }],
+  add_noise_sender_of_chat: [{}, { chatID: "" }, { chatID, entry: "warm@example.com" }],
+  remove_noise_sender: [{}, { entry: "x" }, { entry: "warm@example.com", undo: "yes" }],
   set_todo: [{ chatID }, { chatID, todo: "true" }, { chatID, todo: 1 }, { todo: true }, { chatID, todo: true, at: "x" }, { chatID: "a b", todo: true }],
   get_older_unread: [{}, { source: "other" }, { source: "gmail", extra: 1 }],
   add_older_unread: [{}, { source: "" }, { source: 1 }, { source: "a b" }, { source: "beeper", extra: 1 }],
@@ -327,7 +335,11 @@ const RESULTS: Record<ActionName, unknown> = {
   discard_upload: { uploadId: UPL, deleted: true },
   get_noise_settings: { definition: "Newsletters", enabled: true, keySet: false, problem: "no_key", noiseCount: 0, decisions: [] },
   set_noise_definition: { definition: "", enabled: false, keySet: true, problem: null, noiseCount: 0, decisions: [{ chatID, title: "Weekly digest", network: "Gmail", noise: true, reason: "Newsletters", confidence: 0.9, source: "jev", at: "2026-10-29T10:00:00.000Z" }] },
-  set_noise: { chatID, noise: true },
+  set_noise: { chatID, noise: true, learned: "warm@example.com" },
+  get_noise_senders: { items: [{ value: "warm@example.com", kind: "address", origin: "learned", addedAt: "2026-11-05T10:00:00.000Z" }, { value: "example.com", kind: "domain", origin: "owner", addedAt: "2026-11-05T09:00:00.000Z" }] },
+  add_noise_sender: { entry: { value: "example.com", kind: "domain", origin: "owner", addedAt: "2026-11-05T09:00:00.000Z" }, added: true },
+  add_noise_sender_of_chat: { entry: { value: "warm@example.com", kind: "address", origin: "owner", addedAt: "2026-11-05T09:00:00.000Z" }, added: false, chatNoise: true },
+  remove_noise_sender: { entry: "warm@example.com", removed: true },
   set_todo: { chatID, todo: false },
   get_older_unread: { items: [{ source: "gmail:owner@example.com", count: 2400, adding: false, counting: false }, { source: "beeper", count: null, adding: true, counting: false }, { source: "gmail:other@example.com", count: null, adding: false, counting: true }] },
   add_older_unread: { source: "beeper", adding: true },

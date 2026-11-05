@@ -10,7 +10,7 @@ import { AssetAllowlist } from "./assets.ts";
 import { AuditLog } from "./audit.ts";
 import { createBeeperClient } from "./beeper-client.ts";
 import { CloudLink, type LinkState, type SocketFactory } from "./cloud-link.ts";
-import { gmailPollOverride, googleEndpoints, loadConfig, noiseDebounceOverride, typesafeURL, writeAtomic, type Paths } from "./config.ts";
+import { gmailPollOverride, googleEndpoints, loadConfig, noiseDebounceOverride, noiseSendersWaitOverride, typesafeURL, writeAtomic, type Paths } from "./config.ts";
 import { createDispatcher } from "./dispatcher.ts";
 import { BeeperEventStream, HealthMonitor, Reconciler } from "./events.ts";
 import { EventBuffer } from "./event-buffer.ts";
@@ -22,6 +22,8 @@ import { cloudTokenRefresher } from "./gmail/client.ts";
 import { createGmailService } from "./gmail/service.ts";
 import { NoiseStore } from "./noise/store.ts";
 import { NoiseJudge } from "./noise/judge.ts";
+import { SenderRules } from "./noise/senders.ts";
+import { isAnyOwnAddress } from "./gmail/own.ts";
 import { TodoStore } from "./todo/store.ts";
 import { TodoTracker } from "./todo/tracker.ts";
 import { GmailAccounts } from "./gmail/accounts.ts";
@@ -130,11 +132,13 @@ export async function startService(o: ServiceOptions): Promise<Service> {
   let pollMs: number | undefined;
   let jevURL: string;
   let noiseDebounceMs: number | undefined;
+  let sendersWaitMs: number | undefined;
   try {
     config = loadConfig(o.paths);
     google = googleEndpoints(o.env ?? {}, o.paths);
     jevURL = typesafeURL(o.env ?? {}, o.paths);
     noiseDebounceMs = o.noiseDebounceMs ?? noiseDebounceOverride(o.env ?? {}, o.paths);
+    sendersWaitMs = noiseSendersWaitOverride(o.env ?? {}, o.paths);
     pollMs = o.gmailPollIntervalMs ?? gmailPollOverride(o.env ?? {}, o.paths);
   } catch (e) {
     return exitNow("config_error", (e as Error).message);
@@ -151,12 +155,29 @@ export async function startService(o: ServiceOptions): Promise<Service> {
   const assets = new AssetAllowlist({ path: o.paths.assetsFile });
   const idempotency = createWriteDedupe({ journal: new FileIdempotencyJournal(o.paths.idempotencyFile) });
   const noise = new NoiseStore({ path: o.paths.noiseFile });
+  // A verdict that moves a chat in or out of Low priority is announced like any change (metadata only), so open pages refetch.
+  const noiseMoved = (ids: string[]) => {
+    const ts = new Date().toISOString();
+    for (const chatID of ids) emit({ type: "event", kind: "chat", op: "upserted", chatID, ts });
+  };
+  const sourcesNow = () => gmail.sources().filter((s) => gmail.status(s.email) !== "reconnect_required");
+  // The noise list of senders: Gmail only, with what it costs paced (noise/senders.ts).
+  const senders = new SenderRules({
+    store: noise,
+    sources: sourcesNow,
+    known: (email) => gmail.has(email),
+    isOwn: isAnyOwnAddress,
+    ownAddressesReady: () => gmail.refreshOwnAddresses(),
+    onChange: noiseMoved,
+    log: (m) => log(m),
+    ...(sendersWaitMs !== undefined ? { timing: { startDelayMs: sendersWaitMs } } : {}),
+  });
   // Late-bound: the tracker walks Beeper and Gmail through what is built next.
   const todo: TodoTracker = new TodoTracker({
     store: new TodoStore({ path: o.paths.todoFile, log: (m) => log(m) }),
     noise,
     beeperPage: (cursor, ctx) => actions.internals.chatsPage(cursor, ctx),
-    gmail: () => gmail.sources().filter((s) => gmail.status(s.email) !== "reconnect_required"),
+    gmail: sourcesNow,
     readChat: (p, ctx) => readChat(p, ctx),
     onChange: (chatID, flag) => emit({ type: "event", kind: "chat", op: "upserted", chatID, ts: new Date().toISOString(), todo: flag }),
     log: (m) => log(m),
@@ -183,12 +204,14 @@ export async function startService(o: ServiceOptions): Promise<Service> {
       if (e === "gmail.connected") void todo.sync();
     },
     onNewAccount: (email) => todo.meetAccount(email),
+    onChat: (c) => senders.seeChat(c),
+    beforeAnnounce: (s, ids) => senders.lookAt(s, ids),
+    onOwnAddresses: () => senders.ownAddressesChanged(),
   });
   const drafts = new DraftStore({ path: o.paths.draftsFile });
   const uploads = new UploadStore({ dir: o.paths.uploadsDir, draftAlive: (id) => drafts.has(id) });
   // Jev reads conversations through the dispatcher's router; the key is read from the Keychain each batch.
   let readChat: ConstructorParameters<typeof NoiseJudge>[0]["readChat"] = async () => ({ ok: false, error: { code: "INTERNAL", message: "starting" } });
-  // A verdict that moves a chat in or out of Low priority is announced like any change (metadata only), so open pages refetch.
   const judge = new NoiseJudge({
     store: noise,
     readChat: (p, ctx) => readChat(p, ctx),
@@ -197,12 +220,9 @@ export async function startService(o: ServiceOptions): Promise<Service> {
     fetchImpl: o.fetchImpl,
     debounceMs: noiseDebounceMs,
     log: (m) => log(m),
-    onChange: (ids) => {
-      const ts = new Date().toISOString();
-      for (const chatID of ids) emit({ type: "event", kind: "chat", op: "upserted", chatID, ts });
-    },
+    onChange: noiseMoved,
   });
-  const dispatcher = createDispatcher({ actions, client, assets, gmail, idempotency, drafts, uploads, noise, judge, todo });
+  const dispatcher = createDispatcher({ actions, client, assets, gmail, idempotency, drafts, uploads, noise, judge, todo, senders });
   readChat = dispatcher.readChat;
 
   let link: CloudLink;
@@ -212,7 +232,7 @@ export async function startService(o: ServiceOptions): Promise<Service> {
   const emit = (f: EventFrame) => link.sendEvent(f) || (!connected() && pending.add(f));
   // New activity (a message in, or the owner's own out) is judged again, and To do hears who wrote; the event goes on as before.
   const touch = (f: EventFrame) => {
-    if (f.kind === "message" && f.op === "upserted") judge.touch(f.chatID);
+    if (f.kind === "message" && f.op === "upserted") judge.touch(f.chatID, f.messageIDs);
     todo.event(f);
   };
   const send = (f: EventFrame) => (touch(f), emit(f));
@@ -323,6 +343,7 @@ export async function startService(o: ServiceOptions): Promise<Service> {
       health.stop();
       gmail.stopPolling();
       judge.stop();
+      senders.stop();
       todo.stop();
       clearInterval(flushTimer);
       await link.stop(graceMs);
@@ -336,6 +357,7 @@ export async function startService(o: ServiceOptions): Promise<Service> {
   audit.lifecycle("service.started");
   log(`j-inbox ${o.version}: starting (device ${config.deviceID})`);
   todo.start();
+  senders.start();
   health.start();
   events.start();
   gmail.startPolling(sendNow, connected);

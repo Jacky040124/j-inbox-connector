@@ -24,6 +24,16 @@ export function isOwnAddress(address: string | null | undefined, email: string):
   return false;
 }
 
+/** Any connected account's address or alias. */
+export function isAnyOwnAddress(address: string | null | undefined): boolean {
+  return isOwnAddress(address, "");
+}
+
+/** Its aliases have been asked for, or it stands alone until they have. */
+export function knowsOwnAddresses(email: string): boolean {
+  return known.has(email);
+}
+
 /** More than the one mailbox being read: a message without SENT may still be the owner's, and only its headers tell. */
 export function hasOtherOwnAddresses(email: string): boolean {
   for (const [account, set] of known) if (account !== email || set.size > 1) return true;

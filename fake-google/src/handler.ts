@@ -53,7 +53,7 @@ export type FailRule = {
   times?: number;
 };
 
-export type RequestLog = { method: string; path: string; /** Its Gmail search, if it had one. */ q?: string; status: number; email: string | null; grant?: string; /** One call inside a POST /batch/gmail/v1 (logged after it). */ inBatch?: true };
+export type RequestLog = { method: string; path: string; /** Its Gmail search, if it had one. */ q?: string; /** The format and headers a read asked for. */ format?: string; metadataHeaders?: string[]; status: number; email: string | null; grant?: string; /** One call inside a POST /batch/gmail/v1 (logged after it). */ inBatch?: true };
 
 /** threads.list's resultSizeEstimate on a page with more after it, as real Gmail said it on 2026-11-05 (README). */
 const THREADS_ESTIMATE_MORE_PAGES = 201;
@@ -275,7 +275,9 @@ export class FakeGoogle {
     // One wait per HTTP request: the calls inside a batch share the batch's.
     if (this.latencyMs && !inBatch) await new Promise((r) => setTimeout(r, this.latencyMs));
     const q = url.searchParams.get("q");
-    const log: RequestLog = { method: req.method, path, ...(q !== null ? { q } : {}), status: 0, email: null, ...(inBatch ? { inBatch: true as const } : {}) };
+    const format = url.searchParams.get("format");
+    const metadataHeaders = url.searchParams.getAll("metadataHeaders");
+    const log: RequestLog = { method: req.method, path, ...(q !== null ? { q } : {}), ...(format !== null ? { format } : {}), ...(metadataHeaders.length ? { metadataHeaders } : {}), status: 0, email: null, ...(inBatch ? { inBatch: true as const } : {}) };
     let res: Response;
     try {
       res = await this.route(req, url, log);

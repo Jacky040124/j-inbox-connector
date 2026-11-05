@@ -116,6 +116,11 @@ export class TodoTracker {
   }
 
   private isNoise = (chatID: string) => !!this.o.noise?.active() && this.o.noise.isNoise(chatID);
+  /**
+   * What a first run and Add older unread leave out: noise, but not the list's. The list walks existing mail, and a chat it caught must come back
+   * to To do when its entry goes; so it is taken in as any unread chat is, and kept out of view by noise, like new mail from a listed sender.
+   */
+  private leftOut = (chatID: string) => this.isNoise(chatID) && !this.o.noise?.isListNoise?.(chatID);
 
   /** The chat's flag as lists and results show it: stored, and in the main inbox. */
   effective(c: ChatSummary, o: { hinted?: boolean } = {}): boolean {
@@ -472,7 +477,7 @@ export class TodoTracker {
         let told = 0;
         for (const id of ids) {
           const chatID = gmailChatID(s.email, id);
-          if (this.isNoise(chatID)) continue;
+          if (this.leftOut(chatID)) continue;
           if (this.store.markUnreadAtFirstRun(chatID) && told++ < FIRST_RUN_EVENTS_PER_PAGE) this.tell(chatID);
         }
       };
@@ -494,7 +499,7 @@ export class TodoTracker {
           mark(ids.filter((id) => active.has(id)));
           for (const id of ids) {
             const chatID = gmailChatID(s.email, id);
-            if (!active.has(id) && !found.has(id) && !this.store.heardOf(chatID) && !this.isNoise(chatID)) older.add(id);
+            if (!active.has(id) && !found.has(id) && !this.store.heardOf(chatID) && !this.leftOut(chatID)) older.add(id);
           }
         };
         if (!(await this.walkIds(s, qBeforeCut(state.cut), live, before))) return;
@@ -567,10 +572,10 @@ export class TodoTracker {
       let told = 0;
       for (const [i, id] of ids.entries()) {
         const chatID = gmailChatID(s.email, id);
-        if (this.isNoise(chatID)) continue;
+        if (this.leftOut(chatID)) continue;
         const added = this.store.markOlder(chatID);
         if (added === null) {
-          this.olderNoRoom(key, ids.slice(i).filter((rest) => !this.store.heardOf(gmailChatID(s.email, rest)) && !this.isNoise(gmailChatID(s.email, rest))).length);
+          this.olderNoRoom(key, ids.slice(i).filter((rest) => !this.store.heardOf(gmailChatID(s.email, rest)) && !this.leftOut(gmailChatID(s.email, rest))).length);
           return false;
         }
         if (added && told++ < FIRST_RUN_EVENTS_PER_PAGE) this.tell(chatID);

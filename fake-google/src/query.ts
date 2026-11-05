@@ -99,6 +99,16 @@ function dateArg(v: string): number | null {
   return m ? Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;
 }
 
+/** Gmail reads from: by whole words of the header, never inside one: a@example.com is not in ba@example.com, and example.com is in x@mail.example.com but not in x@notexample.com. */
+function hasWords(header: string, value: string): boolean {
+  const words = (s: string) => s.split(/[^\p{L}\p{N}_]+/u).filter(Boolean);
+  const hay = words(header);
+  const want = words(value);
+  if (!want.length) return false;
+  for (let i = 0; i + want.length <= hay.length; i++) if (want.every((w, k) => hay[i + k] === w)) return true;
+  return false;
+}
+
 function termMatches(t: Extract<Node, { kind: "term" }>, m: MessageView, self: string): boolean {
   const has = (l: string) => m.labelIds.includes(l);
   const v = t.value;
@@ -108,7 +118,7 @@ function termMatches(t: Extract<Node, { kind: "term" }>, m: MessageView, self: s
       return hay.includes(v);
     }
     case "from":
-      return v === "me" ? m.from.toLowerCase().includes(self) : m.from.toLowerCase().includes(v);
+      return v === "me" ? m.from.toLowerCase().includes(self) : hasWords(m.from.toLowerCase(), v);
     case "to":
       return v === "me" ? m.to.toLowerCase().includes(self) : m.to.toLowerCase().includes(v);
     case "cc":

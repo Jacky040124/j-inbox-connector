@@ -1,8 +1,8 @@
 // The connector's Gmail side: the accounts (gmail.json + Keychain), one client and source per
 // account, connecting a new account (gmail_connect), removing one (revoke at Google, forget),
 // and the history poller.
-import { aliasesOf, forgetOwnAddresses, setOwnAddresses } from "./own.ts";
-import { GMAIL_NETWORK, gmailAccountID, makeError, normalizeGmailAddress, type Account, type ErrorBody, type EventFrame } from "@j-inbox/protocol";
+import { aliasesOf, forgetOwnAddresses, knowsOwnAddresses, setOwnAddresses } from "./own.ts";
+import { GMAIL_NETWORK, gmailAccountID, makeError, normalizeGmailAddress, type Account, type ChatSummary, type ErrorBody, type EventFrame } from "@j-inbox/protocol";
 import type { RequestContext } from "../actions.ts";
 import type { SecretStore } from "../secrets.ts";
 import { GmailAccounts } from "./accounts.ts";
@@ -31,6 +31,12 @@ export type GmailServiceOptions = {
   onLifecycle?: (event: "gmail.connected" | "gmail.removed" | "gmail.reauth") => void;
   /** connect brought an account this computer did not have (not a reconnect, which keeps all that is known about it). */
   onNewAccount?: (email: string) => void;
+  /** Every thread as it is mapped (GmailSource onChat). */
+  onChat?: (c: ChatSummary) => void;
+  /** Threads with new mail, before the poller announces them (PollerOptions beforeAnnounce). */
+  beforeAnnounce?: (s: GmailSource, threadIds: string[]) => Promise<void>;
+  /** The owner's addresses were asked for again (own.ts). */
+  onOwnAddresses?: () => void;
 };
 
 const err = (code: ErrorBody["code"], message: string) => ({ ok: false as const, error: makeError(code, message) });
@@ -65,7 +71,7 @@ export function createGmailService(o: GmailServiceOptions) {
       },
       onHealthy: () => accounts.setStatus(email, "connected"),
     });
-    s = createGmailSource({ email, client, scan: o.scan, now: o.now, metaCache });
+    s = createGmailSource({ email, client, scan: o.scan, now: o.now, metaCache, onChat: o.onChat });
     sources.set(email, s);
     return s;
   }
@@ -73,11 +79,13 @@ export function createGmailService(o: GmailServiceOptions) {
   /** Each connected account and its aliases (own.ts). An alias Gmail will not list costs nothing: the address itself still counts. */
   async function refreshOwnAddresses(): Promise<void> {
     for (const { email } of accounts.list()) {
-      setOwnAddresses(email, []);
+      // What was known stands until there is an answer: a moment without an account's aliases would make them someone else's.
+      if (!knowsOwnAddresses(email)) setOwnAddresses(email, []);
       const s = sourceFor(email);
       const r = await s.sendAs().catch(() => null);
       if (r?.ok) setOwnAddresses(email, aliasesOf(r.data));
     }
+    o.onOwnAddresses?.();
   }
 
   return {
@@ -154,10 +162,10 @@ export function createGmailService(o: GmailServiceOptions) {
 
     /** `send` true = handed to a connected cloud link; `canSend` false while the link is down (see GmailPoller). */
     startPolling(send: (f: EventFrame) => boolean, canSend?: () => boolean) {
-      for (const { email } of accounts.list()) setOwnAddresses(email, []);
+      for (const { email } of accounts.list()) if (!knowsOwnAddresses(email)) setOwnAddresses(email, []);
       void refreshOwnAddresses();
       setInterval(() => void refreshOwnAddresses(), OWN_ADDRESSES_REFRESH_MS).unref?.();
-      poller ??= new GmailPoller({ sources: () => this.sources(), send, canSend, intervalMs: o.pollIntervalMs, activeIntervalMs: o.activePollIntervalMs, log: o.log, skip: (e) => accounts.get(e)?.status === "reconnect_required" });
+      poller ??= new GmailPoller({ sources: () => this.sources(), send, canSend, intervalMs: o.pollIntervalMs, activeIntervalMs: o.activePollIntervalMs, log: o.log, skip: (e) => accounts.get(e)?.status === "reconnect_required", beforeAnnounce: o.beforeAnnounce });
       poller.start();
     },
     /** The cloud's viewers count: poll faster while the owner has a page open. */

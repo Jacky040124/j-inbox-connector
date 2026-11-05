@@ -68,7 +68,7 @@ import {
 } from "./drafts.ts";
 import { MAX_RECENT_CHANNELS, MAX_SHOWN_DELEGATIONS, delegationInstruction, delegationRequestID, delegationView, raftChannel } from "./delegations.ts";
 import { MAX_STORED_UPLOADS, MAX_UPLOAD_BYTES, MAX_UPLOAD_CHUNKS, fileName, uploadChunkData, uploadID, uploadInfo, uploadOwner } from "./uploads.ts";
-import { noiseDefinition, noiseSettings } from "./noise.ts";
+import { noiseDefinition, noiseSenderAdded, noiseSenderValue, noiseSenders, noiseSettings } from "./noise.ts";
 
 
 type Shape = Record<string, Schema<any>>;
@@ -570,7 +570,7 @@ export const ACTIONS = {
   }),
 
   list_raft_agents: define({
-    description: "The agents of the owner's Raft server (from Raft, read at sign-in or on refresh) and which of them may be asked to draft. Owner only.",
+    description: "The agents of the owner's Raft server (from Raft, read at sign-in or on refresh) and which of them are allowed in J-Inbox. Owner only.",
     params: object({ refresh: optional(boolean()) }),
     paramDocs: { refresh: "Read the list from Raft again now (needs a recent sign-in that allows agent:read)" },
     defaults: {},
@@ -585,7 +585,7 @@ export const ACTIONS = {
   }),
 
   set_draft_agents: define({
-    description: "Which agents of the Raft server may be asked to draft (agent ids only). Owner only.",
+    description: "Which agents of the Raft server are allowed in J-Inbox (agent ids only). An allowed agent can read all the owner's chats and messages, draft replies, and send only with the owner's approval; any other agent gets nothing. A removed agent is refused from its next call and its waiting approvals end. Owner only.",
     params: object({ agentIDs: array(raftAgentID, { max: MAX_DRAFT_AGENTS }) }),
     paramDocs: { agentIDs: "Agent ids from list_raft_agents" + ARRAY_DOC },
     defaults: {},
@@ -877,7 +877,8 @@ export const ACTIONS = {
     params: object({ chatID, noise: boolean() }),
     paramDocs: { chatID: "Chat ID", noise: "true: noise; false: not noise" },
     defaults: {},
-    result: object({ chatID, noise: boolean() }),
+    // learned ("noise-senders.v1"): this mark made the conversation's sender a learned entry on the noise list.
+    result: object({ chatID, noise: boolean(), learned: optional(noiseSenderValue) }),
     write: true,
     needsApprovalForAgents: false,
     humanOnly: true,
@@ -885,6 +886,65 @@ export const ACTIONS = {
     timeoutMs: REQUEST_TIMEOUT_MS,
     rateLimitPerMinute: 60,
     beeper: "none (the connector's noise store; read_chat limit 5 for the example)",
+  }),
+
+  get_noise_senders: define({
+    description: "Settings > Noise, Senders: the owner's noise list, each entry an exact address or a whole domain, added by the owner or learned from their marks. Gmail only. Nothing is changed. Owner only.",
+    params: object({}),
+    paramDocs: {},
+    defaults: {},
+    result: noiseSenders,
+    write: false,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    beeper: "none (the connector's noise store)",
+  }),
+
+  add_noise_sender: define({
+    description: "Put an exact address or a whole domain on the owner's noise list. A conversation whose newest message is from it, and on which the owner has no verdict, is noise without asking Jev. Existing Gmail threads follow in the background. Nothing changes in Gmail. Owner only.",
+    params: object({ entry: noiseSenderValue }),
+    paramDocs: { entry: "An address (name@example.com) or a domain (example.com), lowercase" },
+    defaults: {},
+    result: noiseSenderAdded,
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    rateLimitPerMinute: 60,
+    beeper: "none (the connector's noise store); Gmail threads.list and threads.get metadata in the background",
+  }),
+
+  add_noise_sender_of_chat: define({
+    description: "Put the exact address of the newest person other than the owner in a Gmail conversation on the owner's noise list. Answers CONFLICT when nobody else wrote in it. Owner only.",
+    params: object({ chatID }),
+    paramDocs: { chatID: "A Gmail chat ID" },
+    defaults: {},
+    result: noiseSenderAdded,
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    rateLimitPerMinute: 60,
+    beeper: "none (Gmail threads.get metadata, From and Subject only)",
+  }),
+
+  remove_noise_sender: define({
+    description: "Take an entry off the owner's noise list. The verdicts that came from it are cleared, and those conversations are judged again on their next activity. An address taken off is not learned again unless the owner adds it. undo: only take back an add a moment ago. Owner only.",
+    params: object({ entry: noiseSenderValue, undo: optional(boolean()) }),
+    paramDocs: { entry: "The entry, as get_noise_senders says it", undo: "True when this takes back the add a moment ago (Undo on its toast)" },
+    defaults: {},
+    result: object({ entry: noiseSenderValue, removed: boolean() }),
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    rateLimitPerMinute: 60,
+    beeper: "none (the connector's noise store)",
   }),
 
   set_todo: define({

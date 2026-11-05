@@ -26,7 +26,7 @@ import { SourceFailure, type MergeItem, type SourcePage } from "../merge.ts";
 import { CursorTooLong, RequestAborted } from "../pager.ts";
 import type { RequestContext } from "../actions.ts";
 import type { GCall, GmailClient } from "./client.ts";
-import { activityMs, charsetOfPart, header, htmlParts, inlineHtmlOf, isDraft, mapGmailMessage, mapGmailThread, partsByContentId, threadMessages, type GMessage, type GPart, type GThread } from "./map.ts";
+import { activityMs, charsetOfPart, header, htmlParts, inlineHtmlOf, isDraft, mapGmailMessage, mapGmailThread, partsByContentId, threadMessages, threadSendersOf, type GMessage, type GPart, type GThread, type ThreadSenders } from "./map.ts";
 import { imageDataUri } from "./email-html.ts";
 import { cidReferencesIn, compareInWorker, sanitizeInWorker } from "./email-html-run.ts";
 import { b64urlToBytes, buildMessage, decodeCharset, headerText, parseAddressList, rawForGmail, replyAllRecipients, replyReferences, replySubject, splitQuoted, type OutgoingFile } from "./mime.ts";
@@ -131,8 +131,24 @@ export function noiseLaneFilter(p: Partial<ActionParams<"list_chats">>, isNoise:
 
 export type GmailSource = ReturnType<typeof createGmailSource>;
 
-export function createGmailSource(o: { email: string; client: GmailClient; scan?: { maxPages?: number; budgetMs?: number }; now?: () => number; metaCache?: ThreadMetaCache; htmlKeptMs?: number }) {
+/** One thread's answer to threadSenders. */
+export type SenderLook = { status: "ok"; senders: ThreadSenders } | { status: "gone" } | { status: "failed"; error: ErrorBody };
+
+export function createGmailSource(o: {
+  email: string;
+  client: GmailClient;
+  scan?: { maxPages?: number; budgetMs?: number };
+  now?: () => number;
+  metaCache?: ThreadMetaCache;
+  htmlKeptMs?: number;
+  /** Every thread as it is mapped for a list, a read or a search, before anything filters it (the noise list of senders: its newest sender is known here, at no cost). */
+  onChat?: (c: ChatSummary) => void;
+}) {
   const { email, client } = o;
+  const seen = (c: ChatSummary | null): ChatSummary | null => {
+    if (c) o.onChat?.(c);
+    return c;
+  };
   const now = o.now ?? Date.now;
   const opts = (ctx: RequestContext) => ({ signal: ctx.signal });
 
@@ -214,7 +230,7 @@ export function createGmailSource(o: { email: string; client: GmailClient; scan?
           const after: Pos = idx + 1 < ids.length ? { t: pos.t, o: idx + 1, ...counted } : next ? { t: next, o: 0, ...counted } : { t: pos.t, o: ids.length, ...counted };
           const urls: string[] = [];
           const t = threadOf.get(chunk[j]!);
-          const chat = t ? mapGmailThread(t, email, { onAsset: (u) => urls.push(u) }) : null;
+          const chat = t ? seen(mapGmailThread(t, email, { onAsset: (u) => urls.push(u) })) : null;
           if (chat && filter.lowPriority !== undefined) chat.isLowPriority = filter.lowPriority;
           if (chat && filter.keep(chat)) kept.push({ item: { value: chat, time: activityMs(chat), key: chat.id, urls }, after });
           allMet = !!only && met >= only.total;
@@ -272,6 +288,17 @@ export function createGmailSource(o: { email: string; client: GmailClient; scan?
     return { ids, next: typeof list?.nextPageToken === "string" && list.nextPageToken ? list.nextPageToken : null };
   }
 
+  /** Who wrote in these threads, in one Gmail batch: threads.get metadata with only `headers`, 10 quota units each, in the order asked. `until[i]`: thread i's `sole` as it was then. */
+  async function threadSenders(ids: string[], headers: readonly string[], ctx: RequestContext, until: (number | undefined)[] = []): Promise<SenderLook[]> {
+    checkTime(ctx);
+    const got = await client.batchGet(ids.map((id) => client.path(["threads", id], { format: "metadata", metadataHeaders: [...headers] })), opts(ctx));
+    return got.map((r, i): SenderLook => {
+      if (!r.ok) return r.error.code === "NOT_FOUND" ? { status: "gone" } : { status: "failed", error: r.error };
+      const senders = threadSendersOf(r.body, email, { until: until[i] });
+      return senders ? { status: "ok", senders } : { status: "gone" };
+    });
+  }
+
   /** The main inbox's chats, newest first, one page (metadata from the cache while a thread's historyId stands). */
   async function primaryPage(cursor: string | null, ctx: RequestContext): Promise<{ items: ChatSummary[]; next: string | null }> {
     const page = await listThreads({ q: Q_PRIMARY, keep: () => true, lowPriority: false }, cursor, 50, ctx);
@@ -301,7 +328,7 @@ export function createGmailSource(o: { email: string; client: GmailClient; scan?
     if (!r.ok) return r;
     const t = r.body as GThread;
     const chatURLs: string[] = [];
-    const chat = mapGmailThread(t, email, { onAsset: (u) => chatURLs.push(u) });
+    const chat = seen(mapGmailThread(t, email, { onAsset: (u) => chatURLs.push(u) }));
     if (!chat) return fail("NOT_FOUND", "This email thread is empty or was deleted.");
     const msgs = threadMessages(t);
     const end = Math.max(0, msgs.length - offset);
@@ -358,7 +385,7 @@ export function createGmailSource(o: { email: string; client: GmailClient; scan?
     threads.forEach((chatID, i) => {
       const t = metas[i];
       const urls: string[] = [];
-      const chat = t ? mapGmailThread(t, email, { onAsset: (u) => urls.push(u) }) : null;
+      const chat = t ? seen(mapGmailThread(t, email, { onAsset: (u) => urls.push(u) })) : null;
       if (chat) chats.set(chatID, { chat: { ...chat, preview: null }, urls });
     });
     const items = kept.filter((k) => chats.has(k.item.value.chatID));
@@ -622,5 +649,5 @@ export function createGmailSource(o: { email: string; client: GmailClient; scan?
     return { ok: true, data: { emailAddress: e, historyId: h } };
   }
 
-  return { email, client, sendAs, listThreads, threadIDs, primaryPage, unread, readThread, readCursor, search, markRead, modifyThread, draftReply, sendReply, compose, attachment, emailHtml, profile };
+  return { email, client, sendAs, listThreads, threadIDs, threadSenders, primaryPage, unread, readThread, readCursor, search, markRead, modifyThread, draftReply, sendReply, compose, attachment, emailHtml, profile };
 }

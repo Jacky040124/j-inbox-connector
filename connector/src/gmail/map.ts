@@ -262,6 +262,40 @@ export function mapGmailThread(raw: unknown, email: string, o: GmailMapOptions =
   return chat;
 }
 
+/** Who wrote in a thread, from its metadata (noise/senders.ts). */
+export type ThreadSenders = {
+  lastMessageID: string;
+  /** The newest message's sender, or null when it is the owner's own (or says no address). */
+  newest: string | null;
+  /** The address of the newest message by anyone but the owner, or null when nobody else wrote. */
+  newestOther: string | null;
+  /** The one address every message by anyone but the owner came from (up to `until`), or null: nobody else, several, or one From that says no address. What a mark counts for. */
+  sole: string | null;
+  title: string;
+};
+
+/** A thread's senders; all it takes is threads.get format=metadata with From. `until`: `sole` as the thread was then (epoch ms). null: no message that is not a draft. */
+export function threadSendersOf(raw: unknown, email: string, o: { until?: number } = {}): ThreadSenders | null {
+  if (!isObj(raw)) return null;
+  const msgs = threadMessages(raw as GThread);
+  const last = msgs.at(-1);
+  if (typeof last?.id !== "string") return null;
+  const other = (m: GMessage) => {
+    const address = parseAddressList(header(m.payload, "From"), 1)[0]?.address;
+    return address && !has(m, "SENT") && !isOwnAddress(address, email) ? address : null;
+  };
+  let newestOther: string | null = null;
+  for (let i = msgs.length - 1; i >= 0 && !newestOther; i--) newestOther = other(msgs[i]!);
+  const theirs = new Set<string | null>();
+  for (const m of msgs) {
+    if (o.until !== undefined && dateOf(m)! > o.until) break;
+    const own = has(m, "SENT") || isOwnAddress(parseAddressList(header(m.payload, "From"), 1)[0]?.address, email);
+    if (!own) theirs.add(other(m));
+  }
+  const sole = theirs.size === 1 ? [...theirs][0]! : null;
+  return { lastMessageID: last.id, newest: other(last), newestOther, sole, title: headerText(header(msgs[0]!.payload, "Subject"), MAX_TITLE_LENGTH) || NO_SUBJECT };
+}
+
 /** Epoch ms of a chat's last activity (0 when unknown). */
 export function activityMs(c: ChatSummary): number {
   const t = c.lastActivity ? Date.parse(c.lastActivity) : NaN;

@@ -25,6 +25,11 @@ export type PollerOptions = {
   log?: (msg: string, fields?: Record<string, string | number | boolean | null>) => void;
   /** Accounts not to poll (reconnect required). */
   skip?: (email: string) => boolean;
+  /**
+   * Threads with new mail that may be someone else's, before any event about them goes out (the noise list of senders: a read of who wrote, so that To do
+   * and open pages hear of a caught thread as noise from the start). Failing or slow costs nothing: the events go out anyway.
+   */
+  beforeAnnounce?: (s: GmailSource, threadIds: string[]) => Promise<void>;
 };
 
 const MAX_HISTORY_PAGES = 10;
@@ -167,6 +172,8 @@ export class GmailPoller {
       pageToken = typeof body.nextPageToken === "string" && body.nextPageToken ? body.nextPageToken : undefined;
       if (!pageToken) break;
     }
+    const fromOthers = [...added.keys()].filter((id) => senders.get(id) !== "self");
+    if (fromOthers.length) await this.o.beforeAnnounce?.(s, fromOthers).catch(() => {});
     const ts = new Date().toISOString();
     let n = 0;
     let all = true;

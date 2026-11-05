@@ -6,10 +6,14 @@
 // saw, is skipped. Jev failing never blocks anything: the verdicts stay as they were and the
 // conversations are asked about again later (5 s doubling to 10 min). Only new activity while the
 // definition is not empty and the key is set is judged: nothing is caught up later. Logs carry counts.
-import { makeError, type ActionResult, type ErrorBody, type NoiseProblem } from "@j-inbox/protocol";
+//
+// The noise list of senders comes first (store.ts applyRule): a Gmail conversation the rule catches is not
+// asked about, and one it no longer catches goes on to Jev. The rule needs no definition and no key, so with
+// either missing only Gmail conversations wait, only while the list has an entry, and only for the rule.
+import { makeError, parseGmailChatID, type ActionResult, type ErrorBody, type NoiseProblem } from "@j-inbox/protocol";
 import type { Outcome, RequestContext } from "../actions.ts";
 import { buildJevRequest, callJev, conversationOf, verdictOf, type JevConversation } from "./jev.ts";
-import type { NoiseStore } from "./store.ts";
+import type { NoiseStore, RuleFacts } from "./store.ts";
 
 export const DEBOUNCE_MS = 5_000;
 export const BATCH_MAX = 40;
@@ -40,6 +44,8 @@ export type NoiseJudgeOptions = {
   /** Conversations that became noise or stopped being noise (the service tells open pages with metadata-only `chat` events). */
   onChange?: (chatIDs: string[]) => void;
 };
+
+type Read = { chatID: string; conversation: JevConversation; lastMessageID: string | null; title: string; network: string; rule: RuleFacts | null };
 
 export class NoiseJudge {
   private pending = new Set<string>();
@@ -78,9 +84,11 @@ export class NoiseJudge {
     return this.keyKnown;
   }
 
-  /** New activity in a conversation: ask about it again soon (while the definition is not empty). */
-  touch(chatID: string) {
-    if (this.stopped || !this.o.store.active() || this.o.store.isOwners(chatID)) return;
+  /** New activity in a conversation: ask about it again soon (while there is a definition, or a list of senders for an email). `messageIDs`: what the activity was, when the rule may have answered already. */
+  touch(chatID: string, messageIDs: readonly string[] = []) {
+    const store = this.o.store;
+    if (this.stopped || !store.active() || store.isOwners(chatID) || store.caughtAlready(chatID, messageIDs)) return;
+    if (!store.judging() && !(store.hasSenders() && parseGmailChatID(chatID))) return;
     this.pending.delete(chatID);
     this.pending.add(chatID);
     while (this.pending.size > MAX_PENDING) this.pending.delete(this.pending.values().next().value!);
@@ -148,21 +156,27 @@ export class NoiseJudge {
     if (!this.pending.size) return;
     const now = this.now();
     this.calls = this.calls.filter((t) => now - t < 60_000);
-    if (this.calls.length >= (this.o.callsPerMinute ?? CALLS_PER_MINUTE)) return this.schedule(this.calls[0]! + 60_000 - now);
+    if (store.judging() && this.calls.length >= (this.o.callsPerMinute ?? CALLS_PER_MINUTE)) return this.schedule(this.calls[0]! + 60_000 - now);
     let key: string | null = null;
-    try {
-      key = await this.o.apiKey();
-    } catch {}
-    this.keyKnown = !!key;
+    if (store.judging()) {
+      try {
+        key = await this.o.apiKey();
+      } catch {}
+      this.keyKnown = !!key;
+    }
     if (!key) {
-      // No key: classification is off; nothing waits to be caught up later.
-      this.pending.clear();
-      return;
+      // No key or no definition: classification is off; nothing waits to be caught up later. The rule needs neither, and is for email.
+      for (const id of this.pending) if (!store.hasSenders() || !parseGmailChatID(id)) this.pending.delete(id);
+      if (!this.pending.size) return;
     }
     const ids = [...this.pending].slice(0, this.o.batchMax ?? BATCH_MAX);
     for (const id of ids) this.pending.delete(id);
     const read = await this.readAll(ids.filter((id) => !store.isOwners(id)));
-    const fresh = read.filter((r) => !(r.lastMessageID && store.verdict(r.chatID)?.source === "jev" && store.verdict(r.chatID)?.lastMessageID === r.lastMessageID));
+    // The list of senders first: what it catches goes no further. (Reading a Gmail thread may have told it already, and then this changes nothing.)
+    const moved = store.applyRule(read.flatMap((r) => (r.rule ? [{ ...r.rule, title: r.title, network: r.network }] : [])), { clear: true, note: true });
+    if (moved.length) this.o.onChange?.(moved);
+    if (!key) return this.next();
+    const fresh = read.filter((r) => store.verdict(r.chatID)?.source !== "sender" && !(r.lastMessageID && store.verdict(r.chatID)?.source === "jev" && store.verdict(r.chatID)?.lastMessageID === r.lastMessageID));
     if (!fresh.length) return this.next();
     const lines = store.lines();
     const req = buildJevRequest({ lines, conversations: fresh.map((r) => r.conversation), examples: store.examples() });
@@ -192,7 +206,7 @@ export class NoiseJudge {
       const stillThere = !v.noise || now2.includes(v.reason!);
       return { chatID: a.chatID, noise: v.noise && stillThere, ...(v.noise && stillThere ? { reason: v.reason } : {}), confidence: v.confidence, ...(a.lastMessageID ? { lastMessageID: a.lastMessageID } : {}), title: a.title, network: a.network };
     });
-    if (!store.active()) return;
+    if (!store.judging()) return;
     const before = out.map((x) => store.isNoise(x.chatID));
     store.setJev(out);
     const changed = out.filter((x, i) => store.isNoise(x.chatID) !== before[i]).map((x) => x.chatID);
@@ -206,8 +220,8 @@ export class NoiseJudge {
   }
 
   /** read_chat for each (a few at a time); a chat that is gone is dropped, one that failed waits for its next activity. */
-  private async readAll(ids: string[]): Promise<{ chatID: string; conversation: JevConversation; lastMessageID: string | null; title: string; network: string }[]> {
-    const out: ({ chatID: string; conversation: JevConversation; lastMessageID: string | null; title: string; network: string } | null)[] = new Array(ids.length).fill(null);
+  private async readAll(ids: string[]): Promise<Read[]> {
+    const out: (Read | null)[] = new Array(ids.length).fill(null);
     let next = 0;
     await Promise.all(
       Array.from({ length: Math.min(READ_CONCURRENCY, ids.length) }, async () => {
@@ -223,7 +237,8 @@ export class NoiseJudge {
           }
           if (!r.ok) continue;
           const c = conversationOf(r.data);
-          out[i] = { chatID: id, ...c, title: r.data.chat.title, network: r.data.chat.network };
+          const newest = r.data.items.at(-1);
+          out[i] = { chatID: id, ...c, title: r.data.chat.title, network: r.data.chat.network, rule: newest ? { chatID: id, lastMessageID: newest.id, address: newest.isSender ? null : (newest.senderID ?? null) } : null };
         }
       }),
     );

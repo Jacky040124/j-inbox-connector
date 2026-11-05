@@ -32,7 +32,7 @@ matches (ignoring `Re:`/`Fwd:`) and `In-Reply-To`/`References` name a message of
 rule; otherwise it starts a new thread), a send without recipients is 400, every change bumps the
 mailbox `historyId` and is recorded for `history.list`. The query language (`compileQuery`)
 covers words and phrases, `from: to: cc: subject: in: is: label: category: has:attachment after:
-before: rfc822msgid:`, `-` negation, `{a b}` and `(a OR b)`; it is evaluated per message.
+before: rfc822msgid:`, `-` negation, `{a b}` and `(a OR b)`; it is evaluated per message. `from:` matches whole words of the header, as Gmail does: `from:a@example.com` is not found in `ba@example.com`, `from:example.com` is found in `x@mail.example.com` but not in `x@notexample.com`.
 
 The request log keeps a list's search (`requests[i].q`), and `failNext({ search: /pageToken=/ })` fails only a later page.
 

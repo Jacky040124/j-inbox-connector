@@ -228,6 +228,12 @@ describe("query language", () => {
     expect(m("{category:social category:promotions}")).toBe(true);
     expect(m("(category:social OR category:forums)")).toBe(false);
     expect(m('"big sale" from:shop')).toBe(true);
+    // from: is by whole words, as Gmail's is.
+    expect(m("from:deals@shop.example")).toBe(true);
+    expect(m("from:shop.example")).toBe(true);
+    expect(m("from:eals@shop.example")).toBe(false);
+    expect(m("from:hop.example")).toBe(false);
+    expect(m("from:deals@shop.exampl")).toBe(false);
     expect(m("after:2026/10/19 before:2026/10/21")).toBe(true);
     expect(m(`after:${Date.parse("2026-10-21T00:00:00Z") / 1000}`)).toBe(false);
     expect(m("to:me")).toBe(true);

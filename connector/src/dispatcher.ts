@@ -6,7 +6,8 @@
 // the upload_store_* actions and discard_upload keep files being sent in its upload store (and
 // upload_store_read streams one back for the owner's preview); the noise
 // actions keep the owner's definition and verdicts in its noise store; set_todo keeps the owner's To do
-// state in its To do store, and get_older_unread and add_older_unread ask it what its first run left out. Chats in every result carry their noise mark (noise/store.ts decorate) and To do flag.
+// state in its To do store, and get_older_unread and add_older_unread ask it what its first run left out; get_noise_senders, add_noise_sender,
+// add_noise_sender_of_chat and remove_noise_sender keep the noise list of senders (noise/senders.ts). Chats in every result carry their noise mark (noise/store.ts decorate) and To do flag.
 import {
   ACTIONS,
   encodeFrame,
@@ -34,6 +35,8 @@ import type { GmailService } from "./gmail/service.ts";
 import { DraftStore } from "./drafts.ts";
 import { UploadError, UploadStore } from "./uploads.ts";
 import { NoiseStore } from "./noise/store.ts";
+import { SenderRules } from "./noise/senders.ts";
+import { isAnyOwnAddress } from "./gmail/own.ts";
 import { conversationOf, exampleOf } from "./noise/jev.ts";
 import { TodoStore } from "./todo/store.ts";
 import { TodoTracker } from "./todo/tracker.ts";
@@ -126,19 +129,22 @@ export function createDispatcher(o: {
   judge?: NoiseStatus;
   /** The To do tracker (todo/tracker.ts). Without one (tests): chats carry no flag, and set_todo keeps it in memory. */
   todo?: TodoTracker;
+  /** The noise list of senders, with Gmail (noise/senders.ts). Without one (tests): over this dispatcher's accounts, with nothing in the background. */
+  senders?: SenderRules;
 }) {
   // Without a file (tests): in memory.
   const drafts = o.drafts ?? new DraftStore();
   const uploads = o.uploads ?? new UploadStore({ draftAlive: (id) => drafts.has(id) });
   const noise = o.noise ?? new NoiseStore();
   const todo = o.todo ?? new TodoTracker({ store: new TodoStore() });
+  const senders = o.senders ?? new SenderRules({ store: noise, sources: () => o.gmail?.sources() ?? [], known: (email) => !!o.gmail?.has(email), isOwn: isAnyOwnAddress });
   const router = createRouter({ beeper: o.actions, gmail: o.gmail ?? null, assets: o.assets, idempotency: o.idempotency, uploads, noise, todo });
   const checked = (name: ConnectorActionName, data: unknown): DispatchResult => {
     const r = parseActionResult(name, data);
     return r.ok ? { kind: "res", ok: true, data: r.value } : fail("INTERNAL", "The connector produced an invalid result.");
   };
   const via =
-    (name: Exclude<ConnectorActionName, "get_media" | "get_email_html" | "discard_upload" | `draft_store_${string}` | `upload_store_${string}` | "get_noise_settings" | "set_noise_definition" | "set_noise" | "set_todo" | "get_older_unread" | "add_older_unread">): Handler =>
+    (name: Exclude<ConnectorActionName, "get_media" | "get_email_html" | "discard_upload" | `draft_store_${string}` | `upload_store_${string}` | "get_noise_settings" | "set_noise_definition" | "set_noise" | "get_noise_senders" | "add_noise_sender" | "add_noise_sender_of_chat" | "remove_noise_sender" | "set_todo" | "get_older_unread" | "add_older_unread">): Handler =>
     async (p, ctx) => {
       const r = await (router[name] as (p: unknown, ctx: RequestContext) => Promise<{ ok: boolean; data?: unknown; error?: ErrorBody }>)(p, ctx);
       if (!r.ok) return { kind: "res", ok: false, error: r.error! };
@@ -152,7 +158,7 @@ export function createDispatcher(o: {
     };
   const noiseSettings = async () => {
     const keySet = o.judge ? await o.judge.keySet() : false;
-    return { definition: noise.definition, enabled: noise.active(), keySet, problem: keySet ? (o.judge?.problem ?? null) : ("no_key" as const), noiseCount: noise.noiseCount(), decisions: noise.decisions() };
+    return { definition: noise.definition, enabled: noise.judging(), keySet, problem: keySet ? (o.judge?.problem ?? null) : ("no_key" as const), noiseCount: noise.noiseCount(), decisions: noise.decisions() };
   };
 
   const handlers = {
@@ -224,11 +230,25 @@ export function createDispatcher(o: {
       const r = await router.read_chat({ chatID: p.chatID, limit: 5 }, ctx).catch(() => null);
       if (r && !r.ok && r.error.code === "NOT_FOUND") return { kind: "res", ok: false, error: r.error };
       const about = r?.ok ? { title: r.data.chat.title, network: r.data.chat.network, example: exampleOf(conversationOf(r.data).conversation) } : {};
-      noise.setOwner(p.chatID, p.noise, about);
+      // Who it is from, as it is now: the one other sender in it, or none (noise/senders.ts).
+      const sender = await senders.senderOfChat(p.chatID, ctx);
+      noise.setOwner(p.chatID, p.noise, { ...about, ...(parseGmailChatID(p.chatID) && sender !== undefined ? { sender } : {}) });
       // Marked as noise by the owner's hand: handled. Only that way: Jev's verdict hides a chat, and leaves what the owner has not handled.
       if (p.noise) todo.setByOwner(p.chatID, false);
-      return checked("set_noise", { chatID: p.chatID, noise: p.noise });
+      // Learned with this mark: the page says so, with Undo (learning is never silent).
+      const learned = senders.ownerMarked(p.chatID, sender !== undefined);
+      return checked("set_noise", { chatID: p.chatID, noise: p.noise, ...(sender && learned.includes(sender) ? { learned: sender } : {}) });
     },
+    get_noise_senders: async () => checked("get_noise_senders", { items: noise.senders() }),
+    add_noise_sender: async (p: { entry: string }) => {
+      const r = senders.add(p.entry);
+      return r.ok ? checked("add_noise_sender", r.data) : { kind: "res", ok: false, error: r.error };
+    },
+    add_noise_sender_of_chat: async (p: { chatID: string }, ctx) => {
+      const r = await senders.addOfChat(p.chatID, ctx);
+      return r.ok ? checked("add_noise_sender_of_chat", r.data) : { kind: "res", ok: false, error: r.error };
+    },
+    remove_noise_sender: async (p: { entry: string; undo?: boolean }) => checked("remove_noise_sender", { entry: p.entry, removed: senders.remove(p.entry, { undo: p.undo }) }),
     set_todo: async (p: { chatID: string; todo: boolean; upTo?: string }) => {
       // Done with something newer than the owner's screen stays To do, and says so.
       const now = todo.setByOwner(p.chatID, p.todo, p.upTo !== undefined ? { upTo: Date.parse(p.upTo) } : {});

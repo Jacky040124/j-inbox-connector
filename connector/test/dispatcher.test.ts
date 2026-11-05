@@ -61,6 +61,11 @@ const CASES: Record<ConnectorActionName, { params: () => Record<string, unknown>
   get_older_unread: { params: () => ({ source: "beeper" }), routes: [] },
   add_older_unread: { params: () => ({ source: "beeper" }), routes: [] },
   set_noise: { params: () => ({ chatID: CHAT_IDS.imessageAlice, noise: true }), routes: ["GET /v1/chats/{chatID}", "GET /v1/chats/{chatID}/messages"] },
+  // The noise list of senders is local too, and Gmail's (noise-senders.test.ts).
+  get_noise_senders: { params: () => ({}), routes: [] },
+  add_noise_sender: { params: () => ({ entry: "example.com" }), routes: [] },
+  add_noise_sender_of_chat: { params: () => ({ chatID: CHAT_IDS.imessageAlice }), routes: [], error: "NOT_SUPPORTED" },
+  remove_noise_sender: { params: () => ({ entry: "example.com" }), routes: [] },
 };
 
 describe("dispatcher whitelist", () => {

@@ -210,6 +210,16 @@ export function gmailPollOverride(env: Record<string, string | undefined>, p: Pa
   return n;
 }
 
+/** J_INBOX_NOISE_SENDERS_WAIT_MS (tests only, with J_INBOX_CONFIG_DIR): a shorter wait after a start before the noise list learns or walks. undefined: the default. */
+export function noiseSendersWaitOverride(env: Record<string, string | undefined>, p: Paths): number | undefined {
+  const v = env.J_INBOX_NOISE_SENDERS_WAIT_MS;
+  if (v === undefined || v === "") return undefined;
+  if (!p.testMode) throw new Error("J_INBOX_NOISE_SENDERS_WAIT_MS is only allowed together with J_INBOX_CONFIG_DIR (tests and local development).");
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 0 || n > 600_000) throw new Error("J_INBOX_NOISE_SENDERS_WAIT_MS must be 0-600000.");
+  return n;
+}
+
 /** J_INBOX_NOISE_DEBOUNCE_MS (tests only, with J_INBOX_CONFIG_DIR): a shorter collection window for the noise judge. undefined: the default. */
 export function noiseDebounceOverride(env: Record<string, string | undefined>, p: Paths): number | undefined {
   const v = env.J_INBOX_NOISE_DEBOUNCE_MS;

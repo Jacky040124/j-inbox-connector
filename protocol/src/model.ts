@@ -168,8 +168,8 @@ export type MessageItem = Infer<typeof messageItem>;
 export const CHAT_TYPES = ["single", "group"] as const;
 const count = integer({ min: 0, max: 1_000_000_000 });
 
-/** Who decided a conversation is noise (noise.ts): Jev (TypeSafe's System One) or the owner by hand. */
-export const NOISE_SOURCES = ["jev", "owner"] as const;
+/** Who decided a conversation is noise (noise.ts): Jev (TypeSafe's System One), the owner by hand, or the owner's noise list of senders ("noise-senders.v1"). */
+export const NOISE_SOURCES = ["jev", "owner", "sender"] as const;
 /** A line of the owner's noise definition, and so a noise verdict's reason. */
 export const MAX_NOISE_LINE_LENGTH = 300;
 /**

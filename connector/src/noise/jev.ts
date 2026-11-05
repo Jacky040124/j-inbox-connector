@@ -3,10 +3,10 @@
 // the owner's definition (name "Noise: <first words>", description = the line), so the chosen line
 // is the verdict's reason. `state` says what J-Inbox is and carries the owner's corrections as
 // examples. Each conversation is compact: network, title, group, low priority already, who started
-// it, whether anyone else wrote, the last few messages (me / other) cut short. Noise only when a line
+// it, whether anyone else wrote, the last few messages (me / other, an email's sender with its address) cut short. Noise only when a line
 // was chosen with confidence >= NOISE_CONFIDENCE_THRESHOLD; everything else is not noise. Nothing
 // here logs; the key is only ever in the Authorization header.
-import { NOISE_CONFIDENCE_THRESHOLD, sanitizeLine, truncateText, type ActionResult, type NoiseProblem } from "@j-inbox/protocol";
+import { NOISE_CONFIDENCE_THRESHOLD, parseGmailChatID, sanitizeLine, truncateText, type ActionResult, type NoiseProblem } from "@j-inbox/protocol";
 
 export const JEV_MODEL = "jev-latest";
 export const JEV_PATH = "/v1/systemone";
@@ -16,6 +16,8 @@ export const NOT_NOISE_DESCRIPTION =
 /** Messages per conversation, and characters per message. */
 export const JEV_MESSAGES = 5;
 export const JEV_MESSAGE_CHARS = 300;
+/** An email sender's address, as Jev reads it and in an example. */
+export const JEV_ADDRESS_CHARS = 100;
 export const JEV_TIMEOUT_MS = 20_000;
 /** A request body stays under this many characters (System One reads 64k tokens; criteria repeat per question). */
 export const JEV_MAX_BODY_CHARS = 120_000;
@@ -34,7 +36,8 @@ export type JevConversation = {
   startedByMe: boolean | null;
   /** Someone other than the owner wrote in it (null: not in what was read, and there is more). */
   othersReplied: boolean | null;
-  messages: { from: "me" | "other"; name?: string; text: string }[];
+  /** `address`: an email's sender (Gmail only; a Beeper senderID is no address). */
+  messages: { from: "me" | "other"; name?: string; address?: string; text: string }[];
 };
 
 const oneLine = (s: string, max: number) => sanitizeLine(String(s ?? "").replace(/\s+/g, " "), max);
@@ -49,10 +52,12 @@ export function conversationOf(r: ActionResult<"read_chat">): { conversation: Je
   const items = r.items.filter((m) => m.type !== "REACTION" && !m.isDeleted);
   const last = items.slice(-JEV_MESSAGES);
   const others = items.some((m) => !m.isSender);
+  const email = !!parseGmailChatID(r.chat.id);
   const messages = last.map((m) => {
     const text = m.text ? cut(m.text, JEV_MESSAGE_CHARS) : m.attachments?.length ? `[${m.attachments.map((a) => a.type).join(", ")}]` : `[${m.type.toLowerCase()}]`;
     const name = !m.isSender && m.senderName ? oneLine(m.senderName, 60) : "";
-    return { from: m.isSender ? ("me" as const) : ("other" as const), ...(name ? { name } : {}), text };
+    const address = email && !m.isSender && m.senderID ? cut(m.senderID, JEV_ADDRESS_CHARS) : "";
+    return { from: m.isSender ? ("me" as const) : ("other" as const), ...(name ? { name } : {}), ...(address ? { address } : {}), text };
   });
   return {
     conversation: {
@@ -72,7 +77,8 @@ export function conversationOf(r: ActionResult<"read_chat">): { conversation: Je
 export function exampleOf(c: JevConversation): string {
   const yn = (b: boolean | null) => (b === null ? "unknown" : b ? "yes" : "no");
   const lastText = c.messages.length ? `; last message from ${c.messages[c.messages.length - 1]!.from}: "${cut(c.messages[c.messages.length - 1]!.text, 120)}"` : "";
-  return oneLine(`${c.network}${c.group ? " group" : ""} "${cut(c.title, 80)}"; started by the owner: ${yn(c.startedByMe)}; others replied: ${yn(c.othersReplied)}${lastText}`, 400);
+  const sender = c.messages.filter((m) => m.address).at(-1)?.address;
+  return oneLine(`${c.network}${c.group ? " group" : ""} "${cut(c.title, 80)}"${sender ? `; sender: ${cut(sender, JEV_ADDRESS_CHARS)}` : ""}; started by the owner: ${yn(c.startedByMe)}; others replied: ${yn(c.othersReplied)}${lastText}`, 400);
 }
 
 /** Choice names for the definition's lines: "Noise: " + its first words, unique, never "Not noise". */
@@ -91,7 +97,7 @@ export function jevState(examples: { example: string; noise: boolean }[]): strin
   const head =
     'J-Inbox is the owner\'s unified inbox (chats on many networks, and email). Each question is one conversation that just had new activity. Decide whether it is noise for the owner, by the owner\'s own definition of noise: every choice other than "Not noise" is one line of that definition. Choose "Not noise" for anything a person would want to see, and whenever you are unsure.';
   if (!examples.length) return head;
-  return [head, "The owner's own decisions on earlier conversations (decide similar ones the same way):", ...examples.map((e) => `- ${e.example} => ${e.noise ? "Noise" : "Not noise"}`)].join("\n");
+  return [head, "The owner's own decisions on earlier conversations (decide similar ones the same way; a sender's address that is in them is strong evidence):", ...examples.map((e) => `- ${e.example} => ${e.noise ? "Noise" : "Not noise"}`)].join("\n");
 }
 
 export type JevRequest = { body: { model: string; state: string; questions: Record<string, { type: "choice"; instructions: string; criteria: Record<string, string> }> }; asked: number };

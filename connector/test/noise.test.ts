@@ -18,7 +18,7 @@ import { createBeeperClient } from "../src/beeper-client.ts";
 import { createDispatcher } from "../src/dispatcher.ts";
 import { cloudTokenRefresher } from "../src/gmail/client.ts";
 import { createGmailService } from "../src/gmail/service.ts";
-import { noiseDebounceOverride, resolvePaths, typesafeURL } from "../src/config.ts";
+import { noiseDebounceOverride, noiseSendersWaitOverride, resolvePaths, typesafeURL } from "../src/config.ts";
 import { JEV_MESSAGE_CHARS, NOT_NOISE, buildJevRequest, callJev, conversationOf, exampleOf, noiseLabels, verdictOf, type JevConversation } from "../src/noise/jev.ts";
 import { NoiseJudge } from "../src/noise/judge.ts";
 import { NoiseStore } from "../src/noise/store.ts";
@@ -116,6 +116,10 @@ describe("where Jev is", () => {
     expect(() => noiseDebounceOverride({ J_INBOX_NOISE_DEBOUNCE_MS: "300" }, real)).toThrow(/only allowed/);
     expect(noiseDebounceOverride({ J_INBOX_NOISE_DEBOUNCE_MS: "300" }, test_)).toBe(300);
     expect(() => noiseDebounceOverride({ J_INBOX_NOISE_DEBOUNCE_MS: "1" }, test_)).toThrow();
+    expect(() => noiseSendersWaitOverride({ J_INBOX_NOISE_SENDERS_WAIT_MS: "0" }, real)).toThrow(/only allowed/);
+    expect(noiseSendersWaitOverride({ J_INBOX_NOISE_SENDERS_WAIT_MS: "500" }, test_)).toBe(500);
+    expect(noiseSendersWaitOverride({}, real)).toBeUndefined();
+    expect(() => noiseSendersWaitOverride({ J_INBOX_NOISE_SENDERS_WAIT_MS: "soon" }, test_)).toThrow();
   });
 });
 
