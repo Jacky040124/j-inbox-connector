@@ -69,6 +69,14 @@ describe("parseSharedPost", () => {
     ])
       expect(parseSharedPost(s)).toBeNull();
   });
+  test("the same share as Beeper's chat list gives it, in Markdown: the same post", () => {
+    const md = "**poster.name A caption with @some_one\n\nand a second line**\n[https://www.instagram.com/p/Abc123/](https://www.instagram.com/p/Abc123/?carousel_share_child_media_id=1_2&is_sponsored=false)";
+    const p = parseSharedPost(md)!;
+    expect(p).toEqual({ network: "Instagram", author: "poster.name", caption: "A caption with @some_one\n\nand a second line", url: "https://www.instagram.com/p/Abc123/?carousel_share_child_media_id=1_2&is_sponsored=false" });
+    expect(parse(sharedPost, p).ok).toBe(true);
+    for (const s of ["**a b**\n[x](https://evil.example/p/1)", "**a b**\n[x](http://www.instagram.com/p/1)", "**a b**\n[x](javascript:alert(1))", "**a b**\n[x](https://www.instagram.com/p/1) and more", "a b\n[x](https://www.instagram.com/p/1)"])
+      expect(parseSharedPost(s)).toBeNull();
+  });
   test("markup inside the caption stays text", () => {
     const p = parseSharedPost('<strong>bob &lt;script&gt;alert(1)&lt;/script&gt;</strong><a href="https://www.instagram.com/reel/X/">x</a>')!;
     expect(p.caption).toBe("<script>alert(1)</script>");

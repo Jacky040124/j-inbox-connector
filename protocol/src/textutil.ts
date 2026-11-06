@@ -93,14 +93,17 @@ const POST_NETWORKS: [RegExp, string][] = [
 
 /**
  * A shared post in a message body, as Beeper's Instagram bridge sends it:
- * `<strong>{author} {caption…}</strong><p><a href="https://www.instagram.com/p/…">…</a></p>`.
+ * `<strong>{author} {caption…}</strong><p><a href="https://www.instagram.com/p/…">…</a></p>`, or as
+ * Beeper's chat list gives the same message, in Markdown: `**{author} {caption…}**\n[…](https://www.instagram.com/p/…)`.
  * Returns null for anything else. All parts are plain text; the url is https only.
  */
 export function parseSharedPost(body: string): { network: string; url: string; author?: string; caption?: string } | null {
   if (typeof body !== "string" || body.length > 20_000) return null;
-  const m = /^\s*<strong>([\s\S]*?)<\/strong>\s*(?:<p>\s*)?<a\s[^<>]*?href\s*=\s*"(https:\/\/[^"\s<>]+)"[^<>]*>[\s\S]*?<\/a>\s*(?:<\/p>)?\s*$/i.exec(body);
+  const html = /^\s*<strong>([\s\S]*?)<\/strong>\s*(?:<p>\s*)?<a\s[^<>]*?href\s*=\s*"(https:\/\/[^"\s<>]+)"[^<>]*>[\s\S]*?<\/a>\s*(?:<\/p>)?\s*$/i.exec(body);
+  const md = html ? null : /^\s*\*\*([\s\S]*?)\*\*\s*\[[^\[\]]*\]\((https:\/\/[^\s()<>]+)\)\s*$/.exec(body);
+  const m = html ?? md;
   if (!m) return null;
-  const url = m[2]!.replace(/&amp;/g, "&");
+  const url = html ? m[2]!.replace(/&amp;/g, "&") : m[2]!;
   let host: string;
   try {
     host = new URL(url).hostname;
@@ -109,7 +112,7 @@ export function parseSharedPost(body: string): { network: string; url: string; a
   }
   const network = POST_NETWORKS.find(([re]) => re.test(host))?.[1];
   if (!network) return null;
-  const head = htmlToPlainText(`<p>${m[1]}</p>`).trim();
+  const head = html ? htmlToPlainText(`<p>${m[1]}</p>`).trim() : m[1]!.trim();
   const out: { network: string; url: string; author?: string; caption?: string } = { network, url };
   // Instagram puts the poster's username first.
   const first = /^([A-Za-z0-9._]{1,30})(?:\s+|$)([\s\S]*)$/.exec(head);

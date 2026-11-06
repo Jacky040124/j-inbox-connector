@@ -33,8 +33,11 @@ import { b64urlToBytes, buildMessage, decodeCharset, headerText, parseAddressLis
 import { sniffImageType } from "../media.ts";
 import { GMAIL_BATCH_SIZE } from "./batch.ts";
 import { ThreadMetaCache, keptThread } from "./meta-cache.ts";
+import { ownSendName } from "./own.ts";
 
 const META_HEADERS = ["From", "To", "Cc", "Subject", "Date", "Message-ID"];
+/** How far back sentName looks: the newest sent mail may have gone out bare (J-Inbox's own, before it wrote a name). */
+const SENT_NAME_MESSAGES = 10;
 const REPLY_HEADERS = ["From", "To", "Cc", "Reply-To", "Subject", "Message-ID", "References", "In-Reply-To"];
 /**
  * Primary inbox: Gmail's own Primary tab (`category:primary`), which Gmail works out per account:
@@ -423,6 +426,9 @@ export function createGmailSource(o: {
     return { ok: true, data: null };
   }
 
+  /** The owner as Gmail's own From would show them: the account's "send mail as" name, then the address. */
+  const self = () => ({ name: ownSendName(email), address: email });
+
   /** The reply-all message for a thread (to its newest message, or to `replyTo`). */
   async function buildReply(threadId: string, text: string, replyTo: string | undefined, ctx: RequestContext, refuseIfDraft: boolean, attachment?: OutgoingFile): Promise<Out<{ raw: string }>> {
     const t = await client.get(client.path(["threads", threadId], { format: "metadata", metadataHeaders: REPLY_HEADERS }), opts(ctx));
@@ -447,7 +453,7 @@ export function createGmailSource(o: {
     const { to, cc } = replyAllRecipients(base, email);
     const refs = replyReferences(base);
     const raw = rawForGmail(
-      buildMessage({ from: email, to, cc, subject: replySubject(base.subject || firstSubject), text, ...(refs.inReplyTo ? { inReplyTo: refs.inReplyTo } : {}), ...(refs.references ? { references: refs.references } : {}), date: new Date(now()), ...(attachment ? { attachment } : {}) }),
+      buildMessage({ from: self(), to, cc, subject: replySubject(base.subject || firstSubject), text, ...(refs.inReplyTo ? { inReplyTo: refs.inReplyTo } : {}), ...(refs.references ? { references: refs.references } : {}), date: new Date(now()), ...(attachment ? { attachment } : {}) }),
     );
     return { ok: true, data: { raw } };
   }
@@ -473,7 +479,7 @@ export function createGmailSource(o: {
   async function compose(p: { to: string[]; cc?: string[]; subject: string; text?: string }, ctx: RequestContext, attachment?: OutgoingFile): Promise<Out<{ id: string; threadId: string }>> {
     let raw: string;
     try {
-      raw = rawForGmail(buildMessage({ from: email, to: p.to.map((a) => ({ address: a })), cc: (p.cc ?? []).map((a) => ({ address: a })), subject: p.subject, text: p.text ?? "", date: new Date(now()), ...(attachment ? { attachment } : {}) }));
+      raw = rawForGmail(buildMessage({ from: self(), to: p.to.map((a) => ({ address: a })), cc: (p.cc ?? []).map((a) => ({ address: a })), subject: p.subject, text: p.text ?? "", date: new Date(now()), ...(attachment ? { attachment } : {}) }));
     } catch {
       return fail("BAD_PARAMS", "An address is not valid.");
     }
@@ -634,10 +640,33 @@ export function createGmailSource(o: {
     return { ok: true, data: bytes };
   }
 
-  /** "Send mail as": the account's aliases (own.ts). */
+  /** "Send mail as": the account's aliases and their names (own.ts). */
   async function sendAs(): Promise<{ ok: true; data: unknown } | { ok: false }> {
     const r = await client.get(client.path(["settings", "sendAs"]));
     return r.ok ? { ok: true, data: r.body } : { ok: false };
+  }
+
+  /**
+   * The name Gmail put in the From of the account's newest sent mail from one of `addresses` (lower-case): for an
+   * address whose "send mail as" has no name of its own, the Google account's name, which no scope J-Inbox holds
+   * gives. One messages.list, then metadata reads one by one until a name: usually one, so the account's pacing
+   * (and what the owner opens meanwhile) hardly notices. name "" = none; not ok = Gmail did not say.
+   */
+  async function sentName(addresses: ReadonlySet<string>): Promise<{ ok: true; name: string } | { ok: false }> {
+    const list = await client.get(client.path(["messages"], { labelIds: "SENT", maxResults: String(SENT_NAME_MESSAGES) }));
+    if (!list.ok) return { ok: false };
+    const ids: string[] = Array.isArray(list.body?.messages) ? list.body.messages.map((m: any) => m?.id).filter((id: unknown): id is string => typeof id === "string" && GMAIL_ID_RE.test(id)) : [];
+    let unknown = false;
+    for (const id of ids) {
+      const r = await client.get(client.path(["messages", id], { format: "metadata", metadataHeaders: ["From"] }));
+      if (!r.ok) {
+        unknown ||= r.error.code !== "NOT_FOUND";
+        continue;
+      }
+      const from = parseAddressList(header((r.body as GMessage | null)?.payload, "From"), 1)[0];
+      if (from?.name && addresses.has(from.address)) return { ok: true, name: from.name };
+    }
+    return unknown ? { ok: false } : { ok: true, name: "" };
   }
 
   async function profile(ctx: RequestContext): Promise<Out<{ emailAddress: string; historyId: string }>> {
@@ -649,5 +678,5 @@ export function createGmailSource(o: {
     return { ok: true, data: { emailAddress: e, historyId: h } };
   }
 
-  return { email, client, sendAs, listThreads, threadIDs, threadSenders, primaryPage, unread, readThread, readCursor, search, markRead, modifyThread, draftReply, sendReply, compose, attachment, emailHtml, profile };
+  return { email, client, sendAs, sentName, listThreads, threadIDs, threadSenders, primaryPage, unread, readThread, readCursor, search, markRead, modifyThread, draftReply, sendReply, compose, attachment, emailHtml, profile };
 }

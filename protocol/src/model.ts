@@ -206,6 +206,11 @@ export const chatSummary = object({
   avatarURL: optional(assetUrl()),
   /** The owner has unsent text in the composer. The text itself never leaves the Mac. */
   hasDraft: optional(boolean()),
+  /**
+   * A text message thread (SMS or RCS) that Beeper lists as iMessage: the connector's reading of the other side's
+   * address (a short code, a 106 service number, a Google business sender). Absent: iMessage, or not known.
+   */
+  textMessage: optional(literal(true)),
   preview: optional(nullable(messageItem)),
   /** Noise (noise.ts): set when the owner's computer put this chat in Low priority as noise; isLowPriority is then true. */
   noise: optional(chatNoise),

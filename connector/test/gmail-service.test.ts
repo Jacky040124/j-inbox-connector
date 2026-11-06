@@ -6,7 +6,7 @@ import { mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startFakeBeeper, type FakeBeeper } from "@j-inbox/fake-beeper";
-import { FAKE_GOOGLE_CLIENT, OWNER_EMAIL, THREADS, startFakeGoogle, type RunningFakeGoogle } from "@j-inbox/fake-google";
+import { FAKE_GOOGLE_CLIENT, OWNER_EMAIL, OWNER_NAME, THREADS, startFakeGoogle, type RunningFakeGoogle } from "@j-inbox/fake-google";
 import { gmailPollOverride, googleEndpoints, resolvePaths, saveConfig } from "../src/config.ts";
 import { GmailAccounts } from "../src/gmail/accounts.ts";
 import { FileSecretStore, KeychainStore, MemorySecretStore, gmailSecretName } from "../src/secrets.ts";
@@ -94,6 +94,20 @@ describe("Gmail in the service", () => {
     expect(fg.google.isRevoked(rt)).toBe(true);
     expect(await secrets.get(gmailSecretName(OWNER_EMAIL))).toBeNull();
     expect(JSON.parse(readFileSync(paths.gmailFile, "utf8")).accounts).toEqual([]);
+  });
+
+  test("mail sent from J-Inbox goes out under the name Gmail's own does (no \"send mail as\" name: the one on its sent mail)", async () => {
+    const { cloud } = await boot();
+    const rt = fg.google.issueRefreshToken(OWNER_EMAIL);
+    expect((await cloud.req("gmail_connect", { email: OWNER_EMAIL, refreshToken: rt })).res.ok).toBe(true);
+    await cloud.waitFor(() => fg.google.requests.some((r) => r.path.endsWith("/settings/sendAs") && r.status === 200), 4000, "sendAs asked");
+    await Bun.sleep(50);
+    const reply = await cloud.req("send_message", { chatID: `gmail:${OWNER_EMAIL}:${THREADS.lunch}`, text: "A reply", idempotencyKey: "idem-svc-from01" });
+    expect(reply.res.ok).toBe(true);
+    const compose = await cloud.req("compose_email", { accountID: `gmail:${OWNER_EMAIL}`, to: ["someone@example.org"], subject: "A new one", text: "Hello", idempotencyKey: "idem-svc-from02" });
+    expect(compose.res.ok).toBe(true);
+    const froms = fg.google.sent().map((m) => m.headers.find((h) => h.name === "From")?.value);
+    expect(froms).toEqual([`${OWNER_NAME} <${OWNER_EMAIL}>`, `${OWNER_NAME} <${OWNER_EMAIL}>`]);
   });
 
   test("a restart is warm: the Gmail list metadata is kept sealed on disk (key in the secret store) and the next run lists without thread fetches", async () => {

@@ -89,7 +89,7 @@ describe("reply-all", () => {
 
 describe("building messages", () => {
   test("UTF-8 subject and names are RFC 2047, the body is base64 UTF-8, lines end in CRLF", () => {
-    const msg = buildMessage({ from: SELF, to: [{ name: "Jürgen Groß", address: "j@example.de" }, { name: "Bob, Jr.", address: "bob@example.com" }], cc: [{ address: "c@example.com" }], subject: "Grüße 🇨🇭 " + "x".repeat(80), text: "Hallo\nzwei Zeilen 👋", inReplyTo: "<a@b>", references: "<z@b> <a@b>" });
+    const msg = buildMessage({ from: { address: SELF }, to: [{ name: "Jürgen Groß", address: "j@example.de" }, { name: "Bob, Jr.", address: "bob@example.com" }], cc: [{ address: "c@example.com" }], subject: "Grüße 🇨🇭 " + "x".repeat(80), text: "Hallo\nzwei Zeilen 👋", inReplyTo: "<a@b>", references: "<z@b> <a@b>" });
     expect(msg.split("\r\n\r\n")[0]!.split("\r\n").every((l) => !l.includes("\n"))).toBe(true);
     expect(msg).toMatch(/^Subject: =\?UTF-8\?B\?/m);
     const parsed = parseRaw(b64urlDecode(rawForGmail(msg))!)!;
@@ -104,7 +104,7 @@ describe("building messages", () => {
     expect(parsed.text).toBe("Hallo\r\nzwei Zeilen 👋");
   });
   test("hostile values cannot add header lines", () => {
-    const msg = buildMessage({ from: SELF, to: [{ name: 'Eve"\r\nBcc: spy@evil.example', address: "eve@example.com" }], cc: [], subject: "Hi\r\nBcc: spy@evil.example", text: "body\r\n\r\nBcc: no", inReplyTo: "<x>\r\nBcc: y", references: "<a> \r\nBcc: z" });
+    const msg = buildMessage({ from: { address: SELF }, to: [{ name: 'Eve"\r\nBcc: spy@evil.example', address: "eve@example.com" }], cc: [], subject: "Hi\r\nBcc: spy@evil.example", text: "body\r\n\r\nBcc: no", inReplyTo: "<x>\r\nBcc: y", references: "<a> \r\nBcc: z" });
     const head = msg.split("\r\n\r\n")[0]!;
     expect(head).not.toMatch(/^Bcc:/im);
     // Not even inside an encoded word: the subject a recipient sees is one line.
@@ -112,8 +112,25 @@ describe("building messages", () => {
     expect(decodeHeader(subject)).toBe("Hi Bcc: spy@evil.example");
     expect(head).not.toContain("In-Reply-To");
     expect(head).not.toContain("References");
-    expect(() => buildMessage({ from: SELF, to: [{ address: "a@b.com\r\nBcc: x@y.z" }], cc: [], subject: "s", text: "t" })).toThrow();
-    expect(() => buildMessage({ from: SELF, to: [], cc: [], subject: "s", text: "t" })).toThrow();
+    expect(() => buildMessage({ from: { address: SELF }, to: [{ address: "a@b.com\r\nBcc: x@y.z" }], cc: [], subject: "s", text: "t" })).toThrow();
+    expect(() => buildMessage({ from: { address: SELF }, to: [], cc: [], subject: "s", text: "t" })).toThrow();
+  });
+  test("From carries the name the owner sends under, cleaned and encoded like To and Cc; without one, the bare address", () => {
+    const from = (name: string | undefined) => {
+      const msg = buildMessage({ from: { ...(name !== undefined ? { name } : {}), address: SELF }, to: [{ address: "a@example.com" }], cc: [], subject: "s", text: "t" });
+      return { head: msg.split("\r\n\r\n")[0]!, value: parseRaw(b64urlDecode(rawForGmail(msg))!)!.headers.find((h) => h.name === "From")!.value };
+    };
+    expect(from("Pat Owner").value).toBe(`Pat Owner <${SELF}>`);
+    expect(from("Owner, Pat").value).toBe(`"Owner, Pat" <${SELF}>`);
+    const intl = from("Zoë Ôwner 王");
+    expect(intl.value).toMatch(/^=\?UTF-8\?B\?/);
+    expect(decodeHeader(intl.value)).toBe(`Zoë Ôwner 王 <${SELF}>`);
+    expect(from(undefined).value).toBe(SELF);
+    expect(from("").value).toBe(SELF);
+    const hostile = from('Pat"\r\nBcc: spy@evil.example');
+    expect(hostile.head).not.toMatch(/^Bcc:/im);
+    expect(hostile.value).toBe(`"Pat\\" Bcc: spy@evil.example" <${SELF}>`);
+    expect(() => buildMessage({ from: { name: "Pat", address: "not an address" }, to: [{ address: "a@example.com" }], cc: [], subject: "s", text: "t" })).toThrow();
   });
   test("long subjects are split into several encoded words that each stay short", () => {
     const v = encodeHeaderValue("ü".repeat(200));

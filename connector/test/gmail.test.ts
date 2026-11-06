@@ -3,7 +3,7 @@
 // cloud's /google/token proxy (production cloudTokenRefresher).
 import { clearOwnAddresses } from "../src/gmail/own.ts";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { FAKE_GOOGLE_CLIENT, OTHER_EMAIL, OWNER_EMAIL, PDF_BYTES, PNG_BYTES, THREADS, decodeHeader, startFakeGoogle, type RunningFakeGoogle } from "@j-inbox/fake-google";
+import { FAKE_GOOGLE_CLIENT, OTHER_EMAIL, OWNER_EMAIL, OWNER_NAME, PDF_BYTES, PNG_BYTES, THREADS, decodeHeader, startFakeGoogle, type RunningFakeGoogle } from "@j-inbox/fake-google";
 import { startFakeBeeper, type FakeBeeper } from "@j-inbox/fake-beeper";
 import { parseActionResult, type ActionName, type ChatSummary, type EventFrame, type MessageItem } from "@j-inbox/protocol";
 import { createActions, createWriteDedupe } from "../src/actions.ts";
@@ -211,6 +211,9 @@ describe("reading Gmail", () => {
 });
 
 describe("writing Gmail", () => {
+  // The names the owner sends under are the module's: whatever an earlier test's service learned is gone.
+  beforeEach(clearOwnAddresses);
+
   test("mark_read and mark unread, archive and unarchive change Gmail's labels", async () => {
     const t = await make();
     expect(labelsOf(THREADS.lunch).has("UNREAD")).toBe(true);
@@ -230,6 +233,8 @@ describe("writing Gmail", () => {
 
   test("send_message is a reply-all in the thread: recipients, subject, threading headers, UTF-8 body", async () => {
     const t = await make();
+    // The name the reply goes out under: Gmail's "send mail as", or (its default) the one on the owner's sent mail.
+    await t.gmail.refreshOwnAddresses();
     const r = await t.ok("send_message", { chatID: chat("kickoff"), text: "Sounds good — see you Monday 👋" });
     expect(r.chatID).toBe(chat("kickoff"));
     const sent = fg.google.sent().at(-1)!;
@@ -240,7 +245,7 @@ describe("writing Gmail", () => {
     // Replying to Carol's message (the newest): Carol + her To (Bob; the owner removed), her Cc.
     expect(decodeHeader(h("to"))).toBe("Carol <carol@example.com>, Bob Builder <bob@example.com>");
     expect(h("cc")).toBe("dave@example.com");
-    expect(h("from")).toBe(OWNER_EMAIL);
+    expect(h("from")).toBe(`${OWNER_NAME} <${OWNER_EMAIL}>`);
     expect(h("subject")).toBe("Re: Project kickoff");
     const thread = box().thread(THREADS.kickoff);
     const carolId = thread[1]!.payload.headers.find((x) => x.name === "Message-ID")!.value;
@@ -250,6 +255,35 @@ describe("writing Gmail", () => {
     expect(sent.contentType).toBe("text/plain; charset=UTF-8");
     expect(sent.transferEncoding).toBe("base64");
     expect(sent.text).toBe("Sounds good — see you Monday 👋");
+  });
+
+  test("From when \"send mail as\" has no name (Gmail's default): the name Gmail put on the owner's own sent mail; a name of its own wins", async () => {
+    const t = await make();
+    const from = () => fg.google.sent().at(-1)!.headers.find((x) => x.name === "From")!.value;
+    const compose = (key: string) => t.ok("compose_email", { accountID: ACC, to: ["someone@example.org"], subject: "Hi", text: "Hello", idempotencyKey: `idem-from-${key}` });
+    const sentLooks = () => fg.google.requests.filter((r) => r.path === "/gmail/v1/users/me/messages" && r.status === 200).length;
+    expect(box().displayName).toBe("");
+    // Nothing known yet: bare, as before. That mail is now the newest sent one, and it has no name.
+    await compose("a0000001");
+    expect(from()).toBe(OWNER_EMAIL);
+    await t.gmail.refreshOwnAddresses();
+    expect(sentLooks()).toBe(1);
+    // One by one until a name (the account's pacing hardly notices): the bare one, then the one before it.
+    expect(fg.google.requests.filter((r) => /\/messages\/[^/]+$/.test(r.path) && r.metadataHeaders?.join() === "From").length).toBe(2);
+    await compose("a0000002");
+    expect(from()).toBe(`${OWNER_NAME} <${OWNER_EMAIL}>`);
+    // Gmail not answering keeps the name it gave last.
+    fg.google.failNext({ path: "/gmail/v1/users/me/messages", status: 400 });
+    await t.gmail.refreshOwnAddresses();
+    await compose("a0000003");
+    expect(from()).toBe(`${OWNER_NAME} <${OWNER_EMAIL}>`);
+    // A "send mail as" name of its own: that one, and no sent mail is read.
+    box().displayName = "Pat Custom";
+    const before = sentLooks();
+    await t.gmail.refreshOwnAddresses();
+    expect(sentLooks()).toBe(before);
+    await compose("a0000004");
+    expect(from()).toBe(`Pat Custom <${OWNER_EMAIL}>`);
   });
 
   test("send_message replying to an older message, and to the owner's own message", async () => {

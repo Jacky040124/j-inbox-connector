@@ -43,6 +43,8 @@ export type BMessage = {
   isUnread?: boolean;
   linkedMessageID?: string;
   reactions?: BReaction[];
+  /** An event Beeper keeps out of view: iMessage's tapback as a message of its own, a reaction on other networks. */
+  isHidden?: boolean;
 };
 export type BChat = {
   id: string;

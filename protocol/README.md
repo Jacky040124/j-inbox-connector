@@ -148,9 +148,30 @@ Notes for implementers:
   inbox.
   `REACTION` messages in history are passed through as `type: "REACTION"`. A message Beeper marks
   `isHidden` (iMessage's tapback as a message of its own) is left out of history and search; as a
-  chat's preview it stays, without Beeper's `{{sender}}` template. A number or address given as a
+  chat's preview it stays, without Beeper's `{{sender}}` template. A preview Beeper's chat list
+  sends with only who and when (no type, text or attachments: a reaction, a photo, an unsent
+  message) is filled in `list_chats` and `unread_summary` from the chat's newest history page
+  (`connector/src/preview-fill.ts`): the same message when history has it, else a `REACTION` whose
+  `text` is the reaction key and `replyToMessageID` the newest earlier message its sender reacted
+  to; else it stays `UNKNOWN`. A number or address given as a
   name or title becomes the name in the owner's Contacts when the optional helper is installed
   (`connector/src/contacts.ts`), and a group titled with numbers loses the owner's own.
+  A message is the owner's (`isSender: true`) when Beeper says so, or its sender is one of the
+  owner's user IDs, numbers or emails the connector has seen (participants marked `isSelf`, the
+  accounts' users, senders of the owner's messages), in any chat: iMessage marks the owner's
+  messages from another of the owner's numbers as someone else's. A sender name that is an ID
+  (Matrix, `imsg##…`, the sender ID itself) is dropped; a missing name comes from the chat's
+  participants (name, else number or email), else, in a one-to-one chat, the chat's title, else
+  the name the connector last saw for that user ID in another chat or message (bounded, in memory:
+  Beeper lists only 20 of a big group's people with the chat list).
+  System events Beeper sends as text become `type: "NOTICE"`: its iMessage templates
+  (`{{sender}} added {{+1…}} to the conversation`, with the people named, the owner as "You";
+  an add signed with the person added reads "You were added to the conversation"), the WhatsApp
+  bridge's join, invite and leave lines when the person named is the sender, a number, one of the
+  chat's people or, for an invite, the owner wrote it, its call notice ("📞 Voice call"), and
+  whatever a network bridge's bot writes. A one-to-one iMessage thread with a short code, a
+  Chinese service number (106…, 10086…, 1252…) or a Google business sender (`…@rbm.goog`) is a text message thread:
+  `textMessage: true` (Beeper does not say which service a thread uses).
 - **Big pages** (`connector/src/pager.ts` `fitToFrame`): a valid page can serialize to more than
   `MAX_FRAME_BYTES` (long CJK texts, many attachments and reactions). The connector then returns
   fewer items (newest kept), `hasMore: true` and a cursor that continues exactly after the last item

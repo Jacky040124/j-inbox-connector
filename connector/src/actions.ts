@@ -17,7 +17,8 @@ import {
 } from "@j-inbox/protocol";
 import type { BeeperCall, BeeperClient, CallOptions } from "./beeper-client.ts";
 import { UploadError } from "./uploads.ts";
-import { mapAccount, mapChat, mapMessage, selfIDsIn, type MapOptions } from "./beeper-map.ts";
+import { chatPeople, mapAccount, mapChat, mapMessage, namesIn, selfAddressesIn, selfIDsIn, type MapOptions } from "./beeper-map.ts";
+import { createPreviewFiller } from "./preview-fill.ts";
 import type { AssetAllowlist } from "./assets.ts";
 import { IdempotencyCache, hashKey, type IdempotencyJournal } from "./idempotency.ts";
 import { CursorExpired, CursorTooLong, RequestAborted, collect, decodePagerCursor, finishPage, fitToFrame, type BeeperPage, type PagerCursor } from "./pager.ts";
@@ -200,11 +201,23 @@ function tracked<T>(map: (raw: unknown, o: MapOptions & { onAsset: (u: string) =
 export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
   const dedupe = opts.idempotency ?? createWriteDedupe();
   const scan = opts.scan ?? {};
-  // The owner's user IDs seen so far (bounded): marks the owner's reactions in read_chat.
+  // The owner's user IDs, numbers and emails seen so far (bounded): mark the owner's reactions and messages, in
+  // every chat (iMessage signs the owner's messages from another of the owner's numbers as someone else's).
   const selfIDs = new Set<string>();
-  const learnSelf = (raw: unknown) => {
-    for (const id of selfIDsIn(raw)) if (selfIDs.size < 64 || selfIDs.has(id)) selfIDs.add(id);
+  const selfAddresses = new Set<string>();
+  // Names seen for user IDs (bounded, newest kept): Beeper lists only 20 of a big group's people with the chat list,
+  // so a preview's sender may be named only in another chat or a message read before.
+  const names = new Map<string, string>();
+  const learn = (raw: unknown) => {
+    for (const a of selfAddressesIn(raw)) if (selfAddresses.size < 64 || selfAddresses.has(a)) selfAddresses.add(a);
+    for (const id of selfIDsIn(raw, selfAddresses)) if (selfIDs.size < 64 || selfIDs.has(id)) selfIDs.add(id);
+    for (const [id, name] of namesIn(raw)) {
+      names.delete(id);
+      names.set(id, name);
+      if (names.size > 4096) names.delete(names.keys().next().value!);
+    }
   };
+  const mine: MapOptions = { selfIDs, selfAddresses, names };
 
   const chatsQuery = (q: Record<string, string | string[] | undefined>) => {
     const u = new URLSearchParams();
@@ -213,6 +226,16 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
   };
 
   const callOpts = (ctx: RequestContext): CallOptions => ({ signal: ctx.signal });
+  // Previews Beeper sends with only who and when (a reaction, a photo, an unsent message): what they were, from the chat's history.
+  const previews = createPreviewFiller({
+    ...mine,
+    history: async (chatID, signal) => {
+      const r = await client.get(client.chatPath(chatID, "messages"), { signal });
+      if (!r.ok || !isObj(r.body) || !Array.isArray(r.body.items)) return null;
+      for (const m of r.body.items) learn(m);
+      return r.body.items;
+    },
+  });
   const allow = (items: WithAssets<unknown>[], n: number) => {
     if (!opts.assets) return;
     for (const it of items.slice(0, n)) for (const u of it.urls) opts.assets.add(u);
@@ -220,7 +243,7 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
 
   /** A raw chat, in the main inbox and on the To do store's list. The store sees it first: this walk may be the first to hear of it. */
   const inTodo = (raw: unknown): boolean => {
-    const c = mapChat(raw);
+    const c = mapChat(raw, mine);
     return !!c && c.isArchived !== true && c.isLowPriority !== true && !opts.noise?.isNoise(c.id) && !!opts.todo?.inList(c);
   };
 
@@ -271,8 +294,9 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
       ...scan,
       ...ctx,
     });
-    for (const c of r.items) learnSelf(c);
-    const mapped = r.items.map((c) => tracked(mapChat, c)!);
+    for (const c of r.items) learn(c);
+    const mapped = r.items.map((c) => tracked(mapChat, c, mine)!);
+    await previews.fill(mapped, ctx);
     return { r, mapped, scope };
   }
 
@@ -300,7 +324,10 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
       ...scan,
       ...ctx,
     });
-    return { all: r.items.map((c) => tracked(mapChat, c)!), hasMore: r.hasMore };
+    for (const c of r.items) learn(c);
+    const all = r.items.map((c) => tracked(mapChat, c, mine)!);
+    await previews.fill(all, ctx);
+    return { all, hasMore: r.hasMore };
   }
 
   async function unread_summary(p: Partial<ActionParams<"unread_summary">>, ctx: RequestContext = {}): Promise<Outcome<ActionResult<"unread_summary">>> {
@@ -355,13 +382,14 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
       collected.catch(() => {});
       // The chat's own failure (NOT_FOUND for an unknown chat) is the answer, whatever the history did.
       const rawChat = must(await chatCall);
-      const chatT = tracked(mapChat, rawChat);
+      learn(rawChat);
+      const chatT = tracked(mapChat, rawChat, mine);
       if (!chatT) return err("BEEPER_DOWN", "Beeper sent an unexpected chat.");
-      learnSelf(rawChat);
       const chat = chatT.value;
       const r = await collected;
-      for (const m of r.items) learnSelf(m);
-      const newestFirst = r.items.map((m) => tracked(mapMessage, m, { selfIDs })!);
+      for (const m of r.items) learn(m);
+      const people = chatPeople(rawChat);
+      const newestFirst = r.items.map((m) => tracked(mapMessage, m, { ...mine, ...people })!);
       const build = (n: number) => ({ chat, ...finishPage(r, n, scope), items: newestFirst.slice(0, n).map((x) => x.value).reverse() as MessageItem[] });
       const n = fitToFrame(newestFirst.length, build);
       if (newestFirst.length && n === 0) return err("TOO_LARGE", "A single message is too large to send.");
@@ -436,6 +464,7 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
       const rawList: unknown[] = Array.isArray(rawAccounts) ? rawAccounts : isObj(rawAccounts) && Array.isArray(rawAccounts.items) ? rawAccounts.items : [];
       // Beeper's own account is neither a chat account to list nor a network to offer (chat-login.v1).
       const own = new Set(rawList.filter((a): a is Record<string, any> => isObj(a) && isBeeperOwnAccount(a) && typeof a.accountID === "string").map((a) => a.accountID as string));
+      for (const a of rawList) learn(a);
       const accounts = rawList.filter((a) => !(isObj(a) && isBeeperOwnAccount(a))).map(mapAccount).filter((a: Account | null): a is Account => a !== null).slice(0, 50);
       const chats = beeperPage(must(chatsCall)).items;
       const data = { ...base, beeper: { reachable: true, version, tokenValid: true }, accounts, networks: connectedNetworks(accounts, chats, own) };
@@ -480,9 +509,10 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
       ...scan,
       ...ctx,
     });
-    const items = r.items.map((m) => tracked(mapMessage, m)!);
+    for (const m of r.items) learn(m);
+    const items = r.items.map((m) => tracked(mapMessage, m, { ...mine, ...chatPeople(rawChats.get(String(m.chatID))) })!);
     const chatsOf = new Map<string, WithAssets<ChatSummary>>();
-    for (const m of items) if (!chatsOf.has(m.value.chatID)) chatsOf.set(m.value.chatID, tracked(mapChat, rawChats.get(m.value.chatID))!);
+    for (const m of items) if (!chatsOf.has(m.value.chatID)) chatsOf.set(m.value.chatID, tracked(mapChat, rawChats.get(m.value.chatID), mine)!);
     return { r, items, chatsOf, scope };
   }
 
@@ -567,7 +597,8 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
   /** One page of GET /v1/chats as it is, mapped, previews included: what the To do tracker walks. Throws when Beeper cannot answer. */
   async function chatsPage(cursor: string | null, ctx: RequestContext = {}): Promise<{ items: ChatSummary[]; next: string | null }> {
     const page = beeperPage(must(await client.get(`/v1/chats?${chatsQuery({ limit: "50", ...(cursor ? { cursor, direction: "before" } : {}) })}`, callOpts(ctx))));
-    return { items: page.items.map((c) => mapChat(c)).filter((c): c is ChatSummary => c !== null), next: page.hasMore && page.items.length ? page.oldestCursor : null };
+    for (const c of page.items) learn(c);
+    return { items: page.items.map((c) => mapChat(c, mine)).filter((c): c is ChatSummary => c !== null), next: page.hasMore && page.items.length ? page.oldestCursor : null };
   }
 
   async function archive(p: Partial<ActionParams<"archive">> & { chatID: string }, ctx: RequestContext = {}): Promise<Outcome<ActionResult<"archive">>> {

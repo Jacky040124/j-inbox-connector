@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mapGmailMessage, mapGmailThread } from "../src/gmail/map.ts";
 import { TodoStore } from "../src/todo/store.ts";
-import { aliasesOf, clearOwnAddresses, forgetOwnAddresses, hasOtherOwnAddresses, isOwnAddress, setOwnAddresses } from "../src/gmail/own.ts";
+import { aliasesOf, clearOwnAddresses, forgetOwnAddresses, hasOtherOwnAddresses, isOwnAddress, ownSendName, sendAsNamesOf, setOwnAddresses } from "../src/gmail/own.ts";
 
 const A = "a@gmail.com";
 const B = "b@example.com";
@@ -50,6 +50,59 @@ describe("the owner's addresses", () => {
   test("Gmail's answer", () => {
     expect(aliasesOf({ sendAs: [{ sendAsEmail: "x@y.z" }, { other: 1 }, null] })).toEqual(["x@y.z"]);
     for (const junk of [null, {}, { sendAs: "no" }, 5]) expect(aliasesOf(junk)).toEqual([]);
+  });
+});
+
+describe("the name the owner sends under", () => {
+  const answer = {
+    sendAs: [
+      { sendAsEmail: "B@Example.com", displayName: "Pat Owner", replyToAddress: "", signature: "", isPrimary: true, isDefault: true },
+      { sendAsEmail: "work@example.org", displayName: "Pat at Work", isDefault: false, treatAsAlias: true },
+      { sendAsEmail: "alias@example.com", displayName: "", isDefault: false, treatAsAlias: true },
+      { sendAsEmail: "odd@example.com", displayName: "Pat\r\nBcc: x@y.z" },
+      { displayName: "nobody" },
+      null,
+    ],
+  };
+
+  test("each address's display name from Gmail's answer; an alias without one goes out under the primary's, as Gmail does", () => {
+    expect([...sendAsNamesOf(answer)]).toEqual([
+      ["b@example.com", "Pat Owner"],
+      ["work@example.org", "Pat at Work"],
+      ["alias@example.com", "Pat Owner"],
+      ["odd@example.com", "Pat Bcc: x@y.z"],
+    ]);
+    expect([...sendAsNamesOf({ sendAs: [{ sendAsEmail: B, displayName: "", isPrimary: true }, { sendAsEmail: "alias@example.com" }] })]).toEqual([]);
+    for (const junk of [null, {}, { sendAs: "no" }, 5]) expect(sendAsNamesOf(junk).size).toBe(0);
+  });
+
+  test("a primary without a name is Gmail's default, the Google account's name: the account name given, for it and its nameless aliases", () => {
+    const fresh = { sendAs: [{ sendAsEmail: B, displayName: "", isPrimary: true }, { sendAsEmail: "work@example.org", displayName: "Pat at Work" }, { sendAsEmail: "alias@example.com", displayName: "" }] };
+    expect([...sendAsNamesOf(fresh, "Pat Owner")]).toEqual([
+      [B, "Pat Owner"],
+      ["work@example.org", "Pat at Work"],
+      ["alias@example.com", "Pat Owner"],
+    ]);
+    // A "send mail as" name of its own wins; a hostile one is one clean line.
+    expect(sendAsNamesOf(answer, "Someone Else").get("b@example.com")).toBe("Pat Owner");
+    expect(sendAsNamesOf(fresh, "Pat\r\nBcc: x@y.z").get(B)).toBe("Pat Bcc: x@y.z");
+    expect([...sendAsNamesOf(fresh, "")]).toEqual([["work@example.org", "Pat at Work"]]);
+  });
+
+  test("kept per account until Gmail answers again or the account goes; nothing known: no name", () => {
+    expect(ownSendName(B)).toBe("");
+    setOwnAddresses(B, aliasesOf(answer), sendAsNamesOf(answer));
+    expect(ownSendName(B)).toBe("Pat Owner");
+    expect(ownSendName(B, "Work@example.org")).toBe("Pat at Work");
+    expect(ownSendName(A)).toBe("");
+    // The service's placeholder before a refresh (no answer yet) keeps what was known.
+    setOwnAddresses(B, []);
+    expect(ownSendName(B)).toBe("Pat Owner");
+    setOwnAddresses(B, [], new Map());
+    expect(ownSendName(B)).toBe("");
+    setOwnAddresses(B, [], sendAsNamesOf(answer));
+    forgetOwnAddresses(B);
+    expect(ownSendName(B)).toBe("");
   });
 });
 

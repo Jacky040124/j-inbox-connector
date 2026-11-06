@@ -1,7 +1,7 @@
 // The connector's Gmail side: the accounts (gmail.json + Keychain), one client and source per
 // account, connecting a new account (gmail_connect), removing one (revoke at Google, forget),
 // and the history poller.
-import { aliasesOf, forgetOwnAddresses, knowsOwnAddresses, setOwnAddresses } from "./own.ts";
+import { aliasesOf, forgetOwnAddresses, knowsOwnAddresses, sendAsNamesOf, setOwnAddresses } from "./own.ts";
 import { GMAIL_NETWORK, gmailAccountID, makeError, normalizeGmailAddress, type Account, type ChatSummary, type ErrorBody, type EventFrame } from "@j-inbox/protocol";
 import type { RequestContext } from "../actions.ts";
 import type { SecretStore } from "../secrets.ts";
@@ -51,6 +51,8 @@ export function createGmailService(o: GmailServiceOptions) {
   const sources = new Map<string, GmailSource>();
   const metaCache = o.metaCache ?? new ThreadMetaCache();
   let poller: GmailPoller | null = null;
+  // Each account's name as its own sent mail shows it (sendAsNamesOf), last that Gmail said: it stands while Gmail does not answer.
+  const sentNames = new Map<string, string>();
 
   function sourceFor(email: string): GmailSource {
     let s = sources.get(email);
@@ -76,14 +78,24 @@ export function createGmailService(o: GmailServiceOptions) {
     return s;
   }
 
-  /** Each connected account and its aliases (own.ts). An alias Gmail will not list costs nothing: the address itself still counts. */
+  /** Each connected account, its aliases and the names they send under (own.ts). An alias Gmail will not list costs nothing: the address itself still counts. */
   async function refreshOwnAddresses(): Promise<void> {
     for (const { email } of accounts.list()) {
       // What was known stands until there is an answer: a moment without an account's aliases would make them someone else's.
       if (!knowsOwnAddresses(email)) setOwnAddresses(email, []);
       const s = sourceFor(email);
       const r = await s.sendAs().catch(() => null);
-      if (r?.ok) setOwnAddresses(email, aliasesOf(r.data));
+      if (!r?.ok) continue;
+      const aliases = aliasesOf(r.data);
+      let names = sendAsNamesOf(r.data);
+      if (!names.has(email)) {
+        // Gmail's default: no "send mail as" name, so the Google account's, which only the mail it sent shows.
+        const nameless = new Set([email, ...aliases.map((a) => a.trim().toLowerCase())].filter((a) => !names.has(a)));
+        const found = await s.sentName(nameless).catch(() => null);
+        if (found?.ok) sentNames.set(email, found.name);
+        names = sendAsNamesOf(r.data, sentNames.get(email));
+      }
+      setOwnAddresses(email, aliases, names);
     }
     o.onOwnAddresses?.();
   }
@@ -156,6 +168,7 @@ export function createGmailService(o: GmailServiceOptions) {
       poller?.forget(email);
       metaCache.forget(email);
       forgetOwnAddresses(email);
+      sentNames.delete(email);
       o.onLifecycle?.("gmail.removed");
       return { ok: true, revoked };
     },

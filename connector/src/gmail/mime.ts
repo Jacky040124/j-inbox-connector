@@ -432,7 +432,8 @@ function foldBase64(b: Uint8Array): string {
 }
 
 export type OutgoingEmail = {
-  from: string;
+  /** The owner: the account's address and the name it sends under ("" for none). */
+  from: EmailPerson;
   to: EmailPerson[];
   cc: EmailPerson[];
   subject: string;
@@ -484,10 +485,10 @@ function randomBoundary(): string {
 
 /** An RFC 5322 plain-text message (CRLF), UTF-8, base64 body; with a file, multipart/mixed. Throws on an invalid address. */
 export function buildMessage(m: OutgoingEmail): string {
-  if (!isAddress(m.from)) throw new Error("invalid from");
+  if (!isAddress(m.from.address)) throw new Error("invalid from");
   if (!m.to.length) throw new Error("no recipients");
   const lines = [
-    `From: ${m.from}`,
+    `From: ${formatPerson(m.from)}`,
     `To: ${m.to.map(formatPerson).join(",\r\n ")}`,
     ...(m.cc.length ? [`Cc: ${m.cc.map(formatPerson).join(",\r\n ")}`] : []),
     `Subject: ${encodeHeaderValue(sanitizeLine(m.subject, 900))}`,

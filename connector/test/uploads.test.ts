@@ -291,7 +291,7 @@ describe("UploadStore", () => {
 
 describe("gmail MIME with a file", () => {
   test("multipart/mixed: the text, then the file with an RFC 2231 name for non-ASCII; reply headers kept", () => {
-    const raw = buildMessage({ from: "jacky@example.com", to: [{ address: "a@example.com" }], cc: [], subject: "Re: Quote", text: "Here 👋", inReplyTo: "<m1@x>", references: "<m1@x>", attachment: { fileName: NAME, mimeType: "application/pdf", bytes: PDF_BYTES }, boundary: "=_jinbox_test" });
+    const raw = buildMessage({ from: { address: "owner@example.com" }, to: [{ address: "a@example.com" }], cc: [], subject: "Re: Quote", text: "Here 👋", inReplyTo: "<m1@x>", references: "<m1@x>", attachment: { fileName: NAME, mimeType: "application/pdf", bytes: PDF_BYTES }, boundary: "=_jinbox_test" });
     expect(raw).toContain('Content-Type: multipart/mixed; boundary="=_jinbox_test"');
     expect(raw).toContain("In-Reply-To: <m1@x>\r\nReferences: <m1@x>");
     expect(raw).toContain("--=_jinbox_test\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n");
@@ -301,7 +301,7 @@ describe("gmail MIME with a file", () => {
     expect(attachmentHeaders({ fileName: "plain.pdf", mimeType: "application/pdf" })[1]).toBe('Content-Disposition: attachment; filename="plain.pdf"');
   });
   test("without a file nothing changes", () => {
-    const raw = buildMessage({ from: "jacky@example.com", to: [{ address: "a@example.com" }], cc: [], subject: "s", text: "t" });
+    const raw = buildMessage({ from: { address: "owner@example.com" }, to: [{ address: "a@example.com" }], cc: [], subject: "s", text: "t" });
     expect(raw).toContain("Content-Type: text/plain; charset=UTF-8");
     expect(raw).not.toContain("multipart");
   });

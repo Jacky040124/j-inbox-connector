@@ -6,7 +6,7 @@
 //   POST /revoke                               revoke a refresh or access token (and its whole grant)
 //   GET  /oauth2/v3/userinfo                   sub, email, email_verified
 //   /gmail/v1/users/me/...                     profile, threads.list/get/modify, messages.list/get/send/modify,
-//                                              messages.attachments.get, drafts.create, history.list
+//                                              messages.attachments.get, drafts.create, history.list, settings.sendAs.list
 //   POST /batch/gmail/v1                       Gmail batch: one multipart/mixed request carrying many of the calls above
 //
 // Behaviour follows developers.google.com (OAuth 2.0 for web server apps, Gmail API reference):
@@ -541,6 +541,13 @@ export class FakeGoogle {
 
     if (rest === "profile" && req.method === "GET") {
       return json({ emailAddress: box.email, messagesTotal: box.messages.size, threadsTotal: box.threadIds().length, historyId: String(box.historyId) });
+    }
+
+    if (rest === "settings/sendAs" && req.method === "GET") {
+      // As Gmail's: the address itself first (isPrimary), then each alias. displayName "" is "use the Google account's
+      // name" (Gmail's default, for the address itself too): the name then shows only in the mail it sends.
+      const extra = { replyToAddress: "", signature: "" };
+      return json({ sendAs: [{ sendAsEmail: box.email, displayName: box.displayName, ...extra, isPrimary: true, isDefault: true }, ...box.aliases.map((a) => ({ ...a, ...extra, isDefault: false, treatAsAlias: true, verificationStatus: "accepted" }))] });
     }
 
     if (rest === "threads" && req.method === "GET") {

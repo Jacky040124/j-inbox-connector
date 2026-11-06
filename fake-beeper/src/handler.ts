@@ -46,13 +46,20 @@ export type Controls = {
    */
   unreadArchives: string[];
   unreadArchiveDelayMs: number;
+  /**
+   * Real Beeper (2026-11-06, LinkedIn, Instagram, X, WhatsApp): some chats' list `preview` says only
+   * who and when (no type, text or attachments) though history has the whole message (a photo, an
+   * unsent one). Chats (by id) whose preview comes like that. A reaction is a hidden event of its own
+   * with no type or text (BMessage.isHidden), so a chat whose last event is one has such a preview anyway.
+   */
+  barePreviewChats: string[];
   /** POST .../steps/{stepID} {type: display_and_wait} holds at most this long for the session to change (logins.ts). */
   loginWaitMs: number;
   /** A login session expires this long after it starts (Beeper then answers 404 for it). */
   loginTTLMs: number;
 };
 
-export const defaultControls = (): Controls => ({ latencyMs: 0, messageOrder: "desc", messagesPageSize: 20, settleMs: 0, dropEvents: false, emptyOlderPageForIMessage: false, wsReadyDelayMs: 0, wsNoReady: false, wsRejectApp: false, wsSilentSubscribe: false, unreadArchives: ["WhatsApp"], unreadArchiveDelayMs: 300, loginWaitMs: 20_000, loginTTLMs: 5 * 60_000 });
+export const defaultControls = (): Controls => ({ latencyMs: 0, messageOrder: "desc", messagesPageSize: 20, settleMs: 0, dropEvents: false, emptyOlderPageForIMessage: false, wsReadyDelayMs: 0, wsNoReady: false, wsRejectApp: false, wsSilentSubscribe: false, unreadArchives: ["WhatsApp"], unreadArchiveDelayMs: 300, barePreviewChats: [], loginWaitMs: 20_000, loginTTLMs: 5 * 60_000 });
 
 type Match = { method?: string; path?: string; route?: string; times?: number };
 export type FailRule = Match & { status: number; code?: string; message?: string; rawBody?: string; headers?: Record<string, string> };
@@ -148,12 +155,16 @@ const clone = <T>(v: T): T => structuredClone(v);
 function chatOut(c: BChat): BChat {
   return clone(c);
 }
-function chatWithPreview(state: FakeBeeperState, c: BChat) {
+function chatWithPreview(state: FakeBeeperState, c: BChat, controls: Controls) {
   const out: Record<string, unknown> = chatOut(c);
   const last = state.lastMessage(c.id);
-  if (last) out.preview = clone(last);
+  if (last) out.preview = controls.barePreviewChats.includes(c.id) ? barePreview(last) : clone(last);
   return out;
 }
+const barePreview = (m: BMessage) => {
+  const { id, chatID, accountID, senderID, senderName, timestamp, sortKey, isSender, isUnread } = m;
+  return clone({ id, chatID, accountID, senderID, senderName, timestamp, sortKey, isSender, isUnread });
+};
 
 const ts = (c: BChat) => Date.parse(c.lastActivity ?? "1970-01-01T00:00:00Z");
 const chatCmp = (a: { t: number; id: string }, b: { t: number; id: string }) => b.t - a.t || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
@@ -475,7 +486,7 @@ async function dispatch(method: string, r: Route, q: URLSearchParams, body: Reco
         .sort((a, b) => chatCmp({ t: ts(a), id: a.id }, { t: ts(b), id: b.id }));
       const { page, hasMore } = pageByCursor(sorted, (c) => ({ t: ts(c), id: c.id }), cursor, dir, limit);
       return json({
-        items: page.map((c) => chatWithPreview(state, c)),
+        items: page.map((c) => chatWithPreview(state, c, ctx.controls)),
         hasMore,
         oldestCursor: page.length ? encCursor({ k: "c", t: ts(page[page.length - 1]!), id: page[page.length - 1]!.id }) : null,
         newestCursor: page.length ? encCursor({ k: "c", t: ts(page[0]!), id: page[0]!.id }) : null,

@@ -48,6 +48,9 @@ export class Mailbox {
   oldestHistoryId = 1000;
   /** Fixture thread names -> thread ids. */
   names: Record<string, string> = {};
+  /** settings/sendAs: the name the address itself sends under ("" for none: Gmail's default, the Google account's name) and its "send mail as" aliases. */
+  displayName = "";
+  aliases: { sendAsEmail: string; displayName: string }[] = [];
   private seq = 0;
 
   constructor(

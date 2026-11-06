@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { FAKE_GOOGLE_CLIENT, FakeGoogle, GMAIL_MODIFY, OWNER_EMAIL, PDF_BYTES, THREADS, b64urlDecode, b64urlEncode, compileQuery, decodeHeader, parseRaw, startFakeGoogle } from "../src/index.ts";
+import { FAKE_GOOGLE_CLIENT, FakeGoogle, GMAIL_MODIFY, OTHER_EMAIL, OWNER_EMAIL, OWNER_NAME, PDF_BYTES, THREADS, b64urlDecode, b64urlEncode, compileQuery, decodeHeader, parseRaw, startFakeGoogle } from "../src/index.ts";
 
 const REDIRECT = "http://127.0.0.1:8787/auth/google/callback";
 const ORIGIN = "https://google.fake";
@@ -106,6 +106,23 @@ describe("OAuth", () => {
 });
 
 describe("Gmail", () => {
+  test("settings.sendAs: the address itself (primary, its display name), then its aliases", async () => {
+    const at = await accessToken();
+    g.mailbox().aliases.push({ sendAsEmail: "alias@example.com", displayName: "" });
+    const r = await gmail("settings/sendAs", at);
+    expect(r.status).toBe(200);
+    // Gmail's default: no name of its own ("use the Google account's name"), which only the owner's sent mail shows.
+    expect(r.body.sendAs).toEqual([
+      { sendAsEmail: OWNER_EMAIL, displayName: "", replyToAddress: "", signature: "", isPrimary: true, isDefault: true },
+      { sendAsEmail: "alias@example.com", displayName: "", replyToAddress: "", signature: "", isDefault: false, treatAsAlias: true, verificationStatus: "accepted" },
+    ]);
+    const sent = await gmail("messages?labelIds=SENT&maxResults=1", at);
+    const from = await gmail(`messages/${sent.body.messages[0].id}?format=metadata&metadataHeaders=From`, at);
+    expect(from.body.payload.headers).toEqual([{ name: "From", value: `${OWNER_NAME} <${OWNER_EMAIL}>` }]);
+    g.mailbox().displayName = "Pat Custom";
+    expect((await gmail("settings/sendAs", at)).body.sendAs[0].displayName).toBe("Pat Custom");
+    expect(g.mailbox(OTHER_EMAIL).displayName).toBe("");
+  });
   test("threads.list: newest first, paged, filtered with q and labelIds", async () => {
     const at = await accessToken();
     const p1 = await gmail("threads?maxResults=10", at);

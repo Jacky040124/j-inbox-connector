@@ -123,6 +123,12 @@ describe("shared posts", () => {
     expect(m.attachments?.length).toBe(1);
     expect(mapMessage({ ...raw, text: "just text" })!.sharedPost).toBeUndefined();
   });
+  test("a chat's preview gives the share in Markdown: the list's row has the post too", () => {
+    const preview = { id: "m3", chatID: "!c:beeper.local", accountID: "instagramgo", senderID: "u", timestamp: "2026-10-25T05:53:28.281Z", sortKey: "3", type: "TEXT",
+      text: "**poster.name A caption with @some_one**\n[https://www.instagram.com/p/Abc123/](https://www.instagram.com/p/Abc123/?is_sponsored=false&x=1)" };
+    const c = mapChat({ id: "!c:beeper.local", accountID: "instagramgo", network: "Instagram", title: "t", type: "single", participants: { items: [], hasMore: false, total: 2 }, unreadCount: 0, preview })!;
+    expect(c.preview?.sharedPost).toEqual({ network: "Instagram", author: "poster.name", caption: "A caption with @some_one", url: "https://www.instagram.com/p/Abc123/?is_sponsored=false&x=1" });
+  });
 });
 
 describe("asset URLs", () => {
