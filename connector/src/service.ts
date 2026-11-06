@@ -10,7 +10,9 @@ import { AssetAllowlist } from "./assets.ts";
 import { AuditLog } from "./audit.ts";
 import { createBeeperClient } from "./beeper-client.ts";
 import { CloudLink, type LinkState, type SocketFactory } from "./cloud-link.ts";
-import { gmailPollOverride, googleEndpoints, loadConfig, noiseDebounceOverride, noiseSendersWaitOverride, typesafeURL, writeAtomic, type Paths } from "./config.ts";
+import { gmailPollOverride, googleEndpoints, loadConfig, noiseDebounceOverride, noiseSendersWaitOverride, signinHelperExecutable, typesafeURL, writeAtomic, type Paths } from "./config.ts";
+import { createChatLogin } from "./chat-login.ts";
+import { createSigninWindows, signinExecutable } from "./signin-window.ts";
 import { createDispatcher } from "./dispatcher.ts";
 import { BeeperEventStream, HealthMonitor, Reconciler } from "./events.ts";
 import { EventBuffer } from "./event-buffer.ts";
@@ -30,6 +32,7 @@ import { GmailAccounts } from "./gmail/accounts.ts";
 import { ThreadMetaCache } from "./gmail/meta-cache.ts";
 import { isStorableSecret } from "./secrets.ts";
 import { randomBytes } from "node:crypto";
+import { UPDATE_COMMAND } from "./version.ts";
 
 export type ServiceOptions = {
   paths: Paths;
@@ -88,7 +91,7 @@ const MESSAGES: Partial<Record<ExitReason, string>> = {
   revoked: "This computer was removed in the J-Inbox web page. Run `j-inbox pair` to pair it again.",
   unauthenticated: "The cloud did not accept this computer's credential. Run `j-inbox pair`.",
   replaced: "Another computer was paired in this one's place. Run `j-inbox pair` to switch back.",
-  version: "This connector is too old for the cloud. Update it (brew upgrade j-inbox).",
+  version: `This connector is too old for the cloud. Update it: ${UPDATE_COMMAND}`,
 };
 
 export function readState(p: Paths): ServiceState | null {
@@ -130,6 +133,7 @@ export async function startService(o: ServiceOptions): Promise<Service> {
   let config;
   let google: { gmailURL: string; oauthURL: string };
   let pollMs: number | undefined;
+  let signinExe = "";
   let jevURL: string;
   let noiseDebounceMs: number | undefined;
   let sendersWaitMs: number | undefined;
@@ -140,6 +144,7 @@ export async function startService(o: ServiceOptions): Promise<Service> {
     noiseDebounceMs = o.noiseDebounceMs ?? noiseDebounceOverride(o.env ?? {}, o.paths);
     sendersWaitMs = noiseSendersWaitOverride(o.env ?? {}, o.paths);
     pollMs = o.gmailPollIntervalMs ?? gmailPollOverride(o.env ?? {}, o.paths);
+    signinExe = signinHelperExecutable(o.env ?? {}, o.paths, signinExecutable);
   } catch (e) {
     return exitNow("config_error", (e as Error).message);
   }
@@ -222,7 +227,9 @@ export async function startService(o: ServiceOptions): Promise<Service> {
     log: (m) => log(m),
     onChange: noiseMoved,
   });
-  const dispatcher = createDispatcher({ actions, client, assets, gmail, idempotency, drafts, uploads, noise, judge, todo, senders });
+  // Connecting chat apps from the page: Beeper's own sign-in, and for a website sign-in a window on this Mac.
+  const chatLogin = createChatLogin({ client, windows: createSigninWindows({ executable: signinExe }) });
+  const dispatcher = createDispatcher({ actions, client, assets, gmail, idempotency, drafts, uploads, noise, judge, todo, senders, chatLogin });
   readChat = dispatcher.readChat;
 
   let link: CloudLink;
@@ -346,6 +353,8 @@ export async function startService(o: ServiceOptions): Promise<Service> {
       senders.stop();
       todo.stop();
       clearInterval(flushTimer);
+      // Sign-ins in progress are cancelled on Beeper, and a sign-in window closes.
+      await chatLogin.stop().catch(() => {});
       await link.stop(graceMs);
       try {
         assets.flush();

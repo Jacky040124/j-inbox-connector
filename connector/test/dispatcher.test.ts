@@ -66,6 +66,12 @@ const CASES: Record<ConnectorActionName, { params: () => Record<string, unknown>
   add_noise_sender: { params: () => ({ entry: "example.com" }), routes: [] },
   add_noise_sender_of_chat: { params: () => ({ chatID: CHAT_IDS.imessageAlice }), routes: [], error: "NOT_SUPPORTED" },
   remove_noise_sender: { params: () => ({ entry: "example.com" }), routes: [] },
+  // Connecting chat apps: Beeper's bridges and its own sign-in (chat-login.test.ts runs every flow).
+  chat_apps: { params: () => ({}), routes: ["GET /v1/bridges", "GET /v1/bridges/{bridgeID}/login-flows"] },
+  chat_login_start: { params: () => ({ app: "slack" }), routes: ["GET /v1/bridges", "POST /v1/bridges/{bridgeID}/login-sessions"] },
+  chat_login_poll: { params: () => ({ sessionID: "cl_0123456789abcdef" }), routes: [], error: "NOT_FOUND" },
+  chat_login_submit: { params: () => ({ sessionID: "cl_0123456789abcdef", stepID: "s", fields: {} }), routes: [], error: "NOT_FOUND" },
+  chat_login_cancel: { params: () => ({ sessionID: "cl_0123456789abcdef" }), routes: [] },
 };
 
 describe("dispatcher whitelist", () => {

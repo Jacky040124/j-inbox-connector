@@ -113,6 +113,22 @@ describe("requests", () => {
     expect(logs[0]).toMatchObject({ action: "status", ok: true, caller: { type: "agent", name: "龙虾" } });
     expect(logs[1].caller).toBeUndefined();
   });
+  test("connecting or removing accounts for an agent is refused here too, before the dispatcher (chat_login_*, remove_account); the cloud's own store calls for an agent's draft still run", async () => {
+    const logs: any[] = [];
+    const { cloud, d } = await setup({ link: { onRequest: (r) => logs.push(r) } });
+    for (const [i, action] of (["chat_login_start", "chat_login_submit", "chat_apps", "remove_account"] as const).entries()) {
+      cloud.send({ type: "req", id: `ra${i}`, action, params: {}, caller: { type: "agent", name: "Agent" } });
+    }
+    await cloud.waitFor(() => logs.length === 4, 3000, "four logs");
+    expect(logs.map((l) => l.code)).toEqual(["NOT_ALLOWED", "NOT_ALLOWED", "NOT_ALLOWED", "NOT_ALLOWED"]);
+    expect(d.calls).toEqual([]);
+    // The owner's goes through, and so does the cloud's own call to the draft store for an agent's draft.
+    await cloud.req("chat_apps", {});
+    expect(d.calls).toEqual(["chat_apps"]);
+    cloud.send({ type: "req", id: "rd1", action: "draft_store_get", params: { requestIds: ["drq_0123456789abcdef"] }, caller: { type: "agent", name: "Agent" } });
+    await cloud.waitFor(() => d.calls.length === 2, 3000, "draft store call");
+    expect(d.calls).toEqual(["chat_apps", "draft_store_get"]);
+  });
   test("hello announces the protocol's capabilities", async () => {
     const { cloud } = await setup();
     const { CAPABILITIES } = await import("@j-inbox/protocol");

@@ -65,8 +65,11 @@ const JSON_LIMITS = { maxDepth: 32, maxKeys: 50_000 };
  * "email-html.v1" (added 2026-11-04): it answers get_email_html, so the owner's page can show an email's HTML.
  * "older-unread.v1" (added 2026-11-05): it answers get_older_unread and add_older_unread: what To do's first run left out, and bringing it in.
  * "noise-senders.v1" (added 2026-11-05): it keeps the owner's noise list of senders (get_noise_senders, add_noise_sender, add_noise_sender_of_chat, remove_noise_sender; `noise.source` "sender" on chats).
+ * "chat-login.v1" (added 2026-11-05): it lists J-Inbox's chat apps and connects, reconnects them through Beeper's own sign-in
+ * (chat_apps, chat_login_start, chat_login_poll, chat_login_submit, chat_login_cancel), and status leaves out Beeper's own
+ * account and its network.
  */
-export const CAPABILITIES = { media: "media.v1", gmail: "gmail.v1", drafts: "drafts.v1", delegations: "delegations.v1", attachments: "attachments.v1", noise: "noise.v1", viewers: "viewers.v1", listSource: "list-source.v1", uploadRead: "upload-read.v1", emailHtml: "email-html.v1", todo: "todo.v1", olderUnread: "older-unread.v1", noiseSenders: "noise-senders.v1" } as const;
+export const CAPABILITIES = { media: "media.v1", gmail: "gmail.v1", drafts: "drafts.v1", delegations: "delegations.v1", attachments: "attachments.v1", noise: "noise.v1", viewers: "viewers.v1", listSource: "list-source.v1", uploadRead: "upload-read.v1", emailHtml: "email-html.v1", todo: "todo.v1", olderUnread: "older-unread.v1", noiseSenders: "noise-senders.v1", chatLogin: "chat-login.v1" } as const;
 
 export const helloFrame = object({
   type: literal("hello"),

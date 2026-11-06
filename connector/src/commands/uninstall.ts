@@ -55,6 +55,7 @@ export async function uninstallCommand(ctx: Ctx): Promise<number> {
   const rm = (p: string) => rmSync(p, { recursive: true, force: true });
   rm(paths.dataDir);
   rm(paths.contactsHelperApp);
+  rm(paths.signinHelperApp);
   rm(paths.logDir);
   rm(paths.stateFile);
   if (!flags["keep-config"]) {

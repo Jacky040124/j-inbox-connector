@@ -4,6 +4,7 @@ import { loadConfig, type Config } from "../config.ts";
 import { LAUNCHD_LABEL, isAgentInstalled } from "../launchd.ts";
 import { pidHeldSince, probeBeeper } from "../probe.ts";
 import { readState } from "../service.ts";
+import { UPDATE_COMMAND } from "../version.ts";
 import type { Ctx } from "./context.ts";
 
 export type Check = { id: string; level: "ok" | "warn" | "fail"; message: string; fix?: string };
@@ -38,8 +39,8 @@ export async function runChecks(ctx: Ctx): Promise<Check[]> {
     });
   else {
     add({ id: "beeper", level: "ok", message: `${b.name ?? "Beeper"} ${b.version ?? ""} is running at ${config.beeperURL}` });
-    if (beeperToken && b.tokenValid === false) add({ id: "beeper-auth", level: "fail", message: "Beeper rejected the stored token", fix: "Create a new token in Beeper and run `j-inbox setup` again." });
-    else if (beeperToken && b.tokenValid) add({ id: "beeper-auth", level: b.accounts ? "ok" : "warn", message: b.accounts ? `Beeper accepted the token (${b.accounts} accounts)` : "Beeper accepted the token but has no chat accounts", ...(b.accounts ? {} : { fix: "Connect networks in Beeper (beeper accounts add)." }) });
+    if (beeperToken && b.tokenValid === false) add({ id: "beeper-auth", level: "fail", message: "Beeper rejected the stored token", fix: config.engine === "server" ? "Create a new token for Beeper Server and run `j-inbox setup` again." : "Create a new token in Beeper Desktop (Settings > Developers) and run `j-inbox setup` again." });
+    else if (beeperToken && b.tokenValid) add({ id: "beeper-auth", level: b.accounts ? "ok" : "warn", message: b.accounts ? `Beeper accepted the token (${b.accounts} accounts)` : "Beeper accepted the token but has no chat accounts", ...(b.accounts ? {} : { fix: config.engine === "server" ? "Connect chat networks in Beeper Server (beeper accounts add)." : "Connect your chat apps in J-Inbox's Settings > Chats (or sign in to your chat networks in Beeper Desktop)." }) });
   }
 
   let deviceToken: string | null = null;
@@ -61,7 +62,7 @@ export async function runChecks(ctx: Ctx): Promise<Check[]> {
   const running = !!state && pidHeldSince(state.pid, state.startedAt);
   if (state?.cloud.status === "stopped" && state.cloud.reason === "revoked") add({ id: "service", level: "fail", message: "This computer was removed in the J-Inbox web page", fix: "Run `j-inbox pair` to pair it again." });
   else if (state?.cloud.status === "stopped" && state.cloud.reason === "replaced") add({ id: "service", level: "fail", message: "Another computer was paired in place of this one", fix: "Run `j-inbox pair` to switch back to this computer." });
-  else if (state?.cloud.status === "stopped" && state.cloud.reason === "version") add({ id: "service", level: "fail", message: "The cloud needs a newer connector", fix: "Run `brew upgrade j-inbox`." });
+  else if (state?.cloud.status === "stopped" && state.cloud.reason === "version") add({ id: "service", level: "fail", message: "The cloud needs a newer connector", fix: `Update it: run \`${UPDATE_COMMAND}\` again.` });
   else if (!installed) add({ id: "service", level: "fail", message: "The background service is not installed", fix: "Run `j-inbox setup` (it installs the launchd agent)." });
   else if (!running) add({ id: "service", level: "fail", message: "The background service is not running", fix: `Run \`launchctl kickstart -k gui/${ctx.deps.uid}/${LAUNCHD_LABEL}\` and check \`j-inbox logs --service\`.` });
   else if (state!.cloud.status === "connected") add({ id: "service", level: "ok", message: `The service is running (pid ${state!.pid}) and connected` });

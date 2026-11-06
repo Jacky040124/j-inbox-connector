@@ -8,6 +8,8 @@
 // actions keep the owner's definition and verdicts in its noise store; set_todo keeps the owner's To do
 // state in its To do store, and get_older_unread and add_older_unread ask it what its first run left out; get_noise_senders, add_noise_sender,
 // add_noise_sender_of_chat and remove_noise_sender keep the noise list of senders (noise/senders.ts). Chats in every result carry their noise mark (noise/store.ts decorate) and To do flag.
+// chat_apps and chat_login_* connect the owner's chat apps through Beeper's own sign-in (chat-login.ts): owner only, and what
+// the owner types passes through to Beeper without being kept or logged.
 import {
   ACTIONS,
   encodeFrame,
@@ -40,6 +42,7 @@ import { isAnyOwnAddress } from "./gmail/own.ts";
 import { conversationOf, exampleOf } from "./noise/jev.ts";
 import { TodoStore } from "./todo/store.ts";
 import { TodoTracker } from "./todo/tracker.ts";
+import { createChatLogin, type ChatLogin } from "./chat-login.ts";
 
 export type DispatchResult =
   | { kind: "res"; ok: true; data: unknown; error?: undefined }
@@ -131,6 +134,8 @@ export function createDispatcher(o: {
   todo?: TodoTracker;
   /** The noise list of senders, with Gmail (noise/senders.ts). Without one (tests): over this dispatcher's accounts, with nothing in the background. */
   senders?: SenderRules;
+  /** Connecting chat apps (chat-login.ts). Without one (tests): over this dispatcher's client, with no sign-in window on the Mac. */
+  chatLogin?: ChatLogin;
 }) {
   // Without a file (tests): in memory.
   const drafts = o.drafts ?? new DraftStore();
@@ -138,13 +143,21 @@ export function createDispatcher(o: {
   const noise = o.noise ?? new NoiseStore();
   const todo = o.todo ?? new TodoTracker({ store: new TodoStore() });
   const senders = o.senders ?? new SenderRules({ store: noise, sources: () => o.gmail?.sources() ?? [], known: (email) => !!o.gmail?.has(email), isOwn: isAnyOwnAddress });
+  const chatLogin = o.chatLogin ?? createChatLogin({ client: o.client, windows: null });
+  /** The chat_apps and chat_login_* actions: owner only (the cloud and the connector's link refuse agents), what is typed passes through to Beeper. */
+  const login =
+    <N extends "chat_apps" | "chat_login_start" | "chat_login_poll" | "chat_login_submit" | "chat_login_cancel">(name: N): Handler =>
+    async (p, ctx) => {
+      const r = await (chatLogin[name] as (p: unknown, ctx: RequestContext) => Promise<Outcome<unknown>>)(p, ctx);
+      return r.ok ? checked(name, r.data) : { kind: "res", ok: false, error: r.error };
+    };
   const router = createRouter({ beeper: o.actions, gmail: o.gmail ?? null, assets: o.assets, idempotency: o.idempotency, uploads, noise, todo });
   const checked = (name: ConnectorActionName, data: unknown): DispatchResult => {
     const r = parseActionResult(name, data);
     return r.ok ? { kind: "res", ok: true, data: r.value } : fail("INTERNAL", "The connector produced an invalid result.");
   };
   const via =
-    (name: Exclude<ConnectorActionName, "get_media" | "get_email_html" | "discard_upload" | `draft_store_${string}` | `upload_store_${string}` | "get_noise_settings" | "set_noise_definition" | "set_noise" | "get_noise_senders" | "add_noise_sender" | "add_noise_sender_of_chat" | "remove_noise_sender" | "set_todo" | "get_older_unread" | "add_older_unread">): Handler =>
+    (name: Exclude<ConnectorActionName, "get_media" | "get_email_html" | "discard_upload" | `draft_store_${string}` | `upload_store_${string}` | "get_noise_settings" | "set_noise_definition" | "set_noise" | "get_noise_senders" | "add_noise_sender" | "add_noise_sender_of_chat" | "remove_noise_sender" | "set_todo" | "get_older_unread" | "add_older_unread" | "chat_apps" | `chat_login_${string}`>): Handler =>
     async (p, ctx) => {
       const r = await (router[name] as (p: unknown, ctx: RequestContext) => Promise<{ ok: boolean; data?: unknown; error?: ErrorBody }>)(p, ctx);
       if (!r.ok) return { kind: "res", ok: false, error: r.error! };
@@ -256,6 +269,11 @@ export function createDispatcher(o: {
     },
     get_older_unread: async (p: { source: "beeper" | "gmail" }) => checked("get_older_unread", { items: todo.olderUnread(p.source) }),
     add_older_unread: async (p: { source: string }) => checked("add_older_unread", { source: p.source, adding: todo.addOlder(p.source) }),
+    chat_apps: login("chat_apps"),
+    chat_login_start: login("chat_login_start"),
+    chat_login_poll: login("chat_login_poll"),
+    chat_login_submit: login("chat_login_submit"),
+    chat_login_cancel: login("chat_login_cancel"),
     get_media: async (p: { url: string }, ctx) => {
       if (p.url.startsWith("gmail://")) return openGmailMedia(o.gmail ?? null, o.assets, p.url, ctx);
       const r = await openMedia(o.client, o.assets, p.url, ctx.signal);

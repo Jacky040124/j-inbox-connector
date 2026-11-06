@@ -54,6 +54,8 @@ export type FakeBeeper = {
   wsClientCount(): number;
   /** Non-GET calls the fake handled, in order. */
   writes(): Call[];
+  /** The login sessions (logins.ts): `scan()` is the phone scanning the QR code, `fail()`, `expire()`, `rotate()`. */
+  readonly logins: FakeBeeperState["logins"];
   /** Stop listening (connections refused) but keep state; resume() listens on the same port again. */
   pause(): Promise<void>;
   resume(): Promise<void>;
@@ -198,6 +200,9 @@ export async function startFakeBeeper(opts: FakeBeeperOptions = {}): Promise<Fak
     },
     wsClientCount: () => clients.size,
     writes: () => state.calls.filter((c) => c.method !== "GET"),
+    get logins() {
+      return state.logins;
+    },
     async pause() {
       releaseHangs();
       for (const ws of [...clients]) ws.terminate();

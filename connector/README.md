@@ -4,6 +4,41 @@
 Beeper Client API (Beeper Server or Beeper Desktop, `127.0.0.1:23373`) and the owner's Gmail
 accounts to the user's J-Inbox cloud room, and only ever runs the actions in the protocol catalogue.
 
+## Install
+
+On a Mac with Apple silicon, in Terminal:
+
+```sh
+curl -fsSL https://inbox.jackyzhonghq.com/install.sh | sh
+```
+
+`install.sh` (this folder; the web app serves it) downloads `j-inbox-darwin-arm64` and
+`j-inbox-darwin-arm64.sha256` from the latest release of
+[Jacky040124/j-inbox-connector](https://github.com/Jacky040124/j-inbox-connector/releases), checks the
+SHA-256, puts the binary at `~/.local/bin/j-inbox` (no sudo; it prints the PATH line for `~/.zprofile`
+if that folder is not on the PATH, and edits no dotfile), then runs `j-inbox setup` in the terminal.
+Arguments after `sh -s --` go to setup. Run it again to upgrade: the binary is replaced by a rename (a
+running service keeps its old file; copying over a running binary gets it killed), and setup keeps
+the Beeper engine, the Beeper token and the pairing when they still work, and restarts the service on
+the new binary. It refuses anything but macOS on arm64 (a Rosetta terminal on Apple silicon is fine).
+`J_INBOX_DOWNLOAD_URL=<base>` takes the two files from elsewhere (https; plain http only for
+127.0.0.1/localhost, for tests); `J_INBOX_NO_SETUP=1` installs without running setup. Without a
+terminal (CI) it prints the setup command instead. Tests: `test/install-sh.test.ts`.
+
+Gatekeeper: the binary is only ad-hoc signed (no Apple developer account). curl does not set
+`com.apple.quarantine` (only apps that opt in do, such as browsers), so it runs; `spctl --assess` says
+"rejected", which only matters for quarantined files. A copy saved by a browser carries the attribute
+and Gatekeeper blocks it (it never starts; seen here with a Safari-style attribute, on both the
+build's signature and a fresh ad-hoc one), so use the curl line. `install.sh` also removes the
+attribute from the new file before it first runs. `bun build --compile` leaves a signature that
+`codesign -v` calls invalid; the release script signs it again (`codesign --sign -`).
+
+Release: `scripts/release-connector.sh` (in the J-Inbox repo, not in this package) builds from a clean checkout of HEAD, checks the
+binary (Mach-O arm64, signature, `--version`), writes the two assets and `install.sh` to a directory
+and prints the `gh release create` command; it publishes nothing.
+
+## Build and test
+
 **Test:** `cd connector && bun test` (one command; about 30 s; fakes only, nothing outside 127.0.0.1)
 
 **Build:** `cd connector && bun run build` -> `dist/j-inbox`, a single darwin-arm64 binary (`bun build --compile`, with `src/gmail/email-html-worker.ts` as a second entry point, which the sanitizer's Worker needs; no Node or Bun needed on the target Mac). `test/binary.test.ts` builds it and runs `--help`, `--version`, `status` and `run` against the fakes.
@@ -28,9 +63,12 @@ j-inbox run          # the service in the foreground (what launchd runs)
 `setup` options: `--engine desktop|server`, `--beeper-url URL` (loopback only), `--beeper-port N`,
 `--beeper-token-stdin`, `--cloud-url URL`, `--name NAME`, `--skip-pair`, `--no-service`, `--yes`.
 
-- **Desktop engine:** uses Beeper Desktop's API on 23373. The owner pastes an access token
-  (Beeper Desktop > Settings > Developers), or pipes it with `--beeper-token-stdin`.
-- **Server engine:** wraps the Beeper CLI (`brew install beeper/tap/cli`):
+- **Desktop engine (the default):** uses Beeper Desktop's API on 23373. Setup first checks that it
+  answers; if not, it says to install Beeper Desktop (https://www.beeper.com/download), sign in to the
+  chat networks and turn on Settings > Developers > Beeper Desktop API, and in a terminal checks again
+  on Enter. Then the owner pastes an access token (Settings > Developers), or pipes it with
+  `--beeper-token-stdin`. Setup run again keeps the engine and a stored token Beeper still accepts.
+- **Server engine (`--engine server`, or `s` at the Desktop prompt):** wraps the Beeper CLI (`brew install beeper/tap/cli`):
   `beeper targets add server j-inbox --port P`, `beeper setup --server --install --target j-inbox`
   (interactive: email code, device verification), `beeper targets enable j-inbox`. `P` is 23373
   when free, else the first free port from 23374 (Beeper Desktop usually holds 23373); the check
@@ -66,7 +104,7 @@ directory, under one directory. `J_INBOX_SECRETS=file` swaps the Keychain for a 
 and is refused unless `J_INBOX_CONFIG_DIR` is set (tests and local development only). The same holds
 for `J_INBOX_GMAIL_API_URL` / `J_INBOX_GOOGLE_OAUTH_URL` (a loopback fake instead of
 `gmail.googleapis.com` / `oauth2.googleapis.com`), `J_INBOX_TYPESAFE_URL` (a loopback fake instead of
-`api.typesafe.ai`), `J_INBOX_GMAIL_POLL_MS` (a shorter history poll), `J_INBOX_NOISE_SENDERS_WAIT_MS` (a shorter wait before the noise list learns and walks) and `J_INBOX_NOISE_DEBOUNCE_MS` (a
+`api.typesafe.ai`), `J_INBOX_SIGNIN_HELPER` (a stand-in for the sign-in window), `J_INBOX_GMAIL_POLL_MS` (a shorter history poll), `J_INBOX_NOISE_SENDERS_WAIT_MS` (a shorter wait before the noise list learns and walks) and `J_INBOX_NOISE_DEBOUNCE_MS` (a
 shorter noise collection window): refused without `J_INBOX_CONFIG_DIR`.
 
 ## How it works
@@ -78,8 +116,9 @@ shorter noise collection window): refused without `J_INBOX_CONFIG_DIR`.
 | `src/instance-lock.ts`, `src/commands/run.ts` | one `j-inbox run` per config dir: an atomic pid file `run.lock` with its `startedAt` (taken over when the holder is dead, or when its pid now belongs to a process that started after the lock was written: a pid reused after a reboot or kill -9, checked with `ps -o etime=`; `status` and `doctor` apply the same check to `state.json`); a second `run` exits 3 with "already running (pid N)" and touches nothing |
 | `src/cloud-link.ts` | `wss://<app>/connect` with `Authorization: Bearer <deviceToken>` (https only; http only for loopback dev); `hello` -> `welcome`; requests; heartbeat; reconnect |
 | `src/dispatcher.ts` | the whitelist: catalogue action -> `parseActionParams` -> the router -> `parseActionResult`; anything else `NOT_ALLOWED`. `get_media` on a `gmail://` URL streams an email attachment (allowlist first) |
+| `src/chat-login.ts`, `src/signin-window.ts`, `signin-helper/` | connecting chat apps from the owner's page ("chat-login.v1", Settings > Chats): `chat_apps` reads `GET /v1/bridges` (and each chosen bridge's `login-flows`) and answers only J-Inbox's ten chat apps (protocol `CHAT_APP_KEYS`, matched by bridge id and type), each with its accounts, never Beeper's own (`matrix`); a new account uses the on-device (`local-`) bridge when there is one, a Reconnect the account's own bridge with its `accountID` and `loginID`. `chat_login_start` / `_poll` / `_submit` / `_cancel` run one Beeper login session at a time (an earlier one is cancelled first): a display step (QR code, a code for the phone) is waited on in the background (`POST .../steps/{stepID} {type: display_and_wait}`); a form step's values go to Beeper as typed, never kept or logged, and a wrong code comes back as the same step with `retry`; a cookies step (a website's own sign-in) opens J-Inbox's sign-in window on this Mac (`signin-helper/`: "J-Inbox Sign-in.app", installed in `~/Applications` by `install.sh`, built by `signin-helper/build.sh` like the contacts helper, ad-hoc signed): the site in a WKWebView with a non-persistent data store and Beeper's user agent, and at Beeper's final URL exactly the cookies, local storage keys and request headers asked for (Beeper's `extractJS` run as an opaque helper) go over the helper's stdout to the connector and straight to Beeper (`source: webview`), then it closes. A session nobody asks about for a minute (the page went away; five while the step is in the phone app: a QR code, a code shown or sent) is cancelled on Beeper; one over 10 minutes expires; a stopped connector cancels what runs. The start runs on its own deadline: a session Beeper starts after the page was answered is cancelled when its answer comes, and a cancel Beeper does not confirm is tried again (and before the next start), so nothing half-done blocks the next attempt. Beeper's own error words never reach the page. The window opens on the owner's screen though the connector runs as a launchd agent (`gui/<uid>`): `test/signin-gui.test.ts` checks both (opt-in, `J_INBOX_GUI_TESTS=1`). `J_INBOX_SIGNIN_HELPER` (test mode only) is a stand-in |
 | `src/contacts.ts`, `contacts-helper/` | names for the numbers iMessage gives. Optional: `contacts-helper/install.sh` builds a small app that alone holds the Contacts permission and writes `contacts.json` hourly; without it numbers stay numbers |
-| `src/actions.ts` | the Beeper actions (`status`, `list_chats`, `unread_summary`, `read_chat`, `search_messages`, `draft_reply`, `send_message`, `react`, `mark_read`, `archive`, `remove_account`), plus the collecting building blocks the merged lists use |
+| `src/actions.ts` | the Beeper actions (`status`, `list_chats`, `unread_summary`, `read_chat`, `search_messages`, `draft_reply`, `send_message`, `react`, `mark_read`, `archive`, `remove_account`), plus the collecting building blocks the merged lists use. `status` leaves out Beeper's own account (`matrix`) and the network of its chats, by identity ("chat-login.v1"); its chats stay in the lists |
 | `src/sources.ts` | the router: `gmail:` ids go to Gmail, the rest to Beeper; `list_chats`, `unread_summary` and `search_messages` over both, merged (`list_chats` `source: beeper\|gmail`, "list-source.v1", 2026-10-31: the first page of one source only, the other never asked, no cursor; `todo`: Gmail's lane reads only the To do threads it meets in `threads.list`, and ends when all have come); `compose_email`, `gmail_connect`; `react` on email is `NOT_SUPPORTED`; `status` adds the Gmail accounts and the Gmail network |
 | `src/merge.ts` | k-way merge of newest-first sources with the `jm.` cursor (each source's own position, the boundary already returned, the last keys per source); failed sources reported, the others answer |
 | `src/gmail/client.ts` | Gmail REST client per account: access tokens from the cloud's `/google/token` proxy (`cloudTokenRefresher`, memory only), one refresh and retry on 401, capped bodies, no redirects, error mapping (`gmailErrorCode`: reads `UPSTREAM_DOWN`, lost writes `UNKNOWN_OUTCOME`, `invalid_grant` `REAUTH_REQUIRED`); `revokeAtGoogle` |

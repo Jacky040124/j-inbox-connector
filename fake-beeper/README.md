@@ -18,6 +18,18 @@ package as `@j-inbox/testkit/fake-beeper` for the closed packages. The spec-conf
 validate every response against the vendored Beeper OpenAPI spec live in `testkit/test/`
 (the spec file is not ours to relicense).
 
+Bridges and their sign-ins (`src/logins.ts`): `GET /v1/bridges` (a cloud and usually an on-device
+`local-` bridge per network, as Beeper Desktop 4.3 has them, Beeper's own `matrix` included; each
+bridge's accounts are `/v1/accounts`'s), `GET /v1/bridges/{id}` and `.../login-flows` (the flows
+measured on a real Beeper; Bluesky's answers 500, as measured), and login sessions: create, get,
+cancel and `POST .../steps/{stepID}`. Flows: a QR code (`display_and_wait`, held until the phone acts or
+`controls.loginWaitMs`), WhatsApp's pairing code, Telegram's phone and code, Slack's email and code,
+Messenger's password, tokens, and a `cookies` step for website sign-ins, whose page (`/fake-login/<site>`)
+sets the cookies and goes to its final URL. A wrong code or password answers the same step with an
+`error` (a retry); a second session on a busy bridge is 409; a session expires after
+`controls.loginTTLMs` (404). Tests act as the phone or the network with `fb.logins.scan()`, `rotate()`,
+`fail()` and `expire()`; `LOGIN_SECRETS` are what the fake accepts (made-up markers).
+
 Real-API behaviour it models (from the read-only smoke run, see `e2e/README.md`):
 
 - iMessage (`imsg##`) messages have no `type`; WhatsApp history contains `REACTION` messages.

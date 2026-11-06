@@ -69,6 +69,7 @@ import {
 import { MAX_RECENT_CHANNELS, MAX_SHOWN_DELEGATIONS, delegationInstruction, delegationRequestID, delegationView, raftChannel } from "./delegations.ts";
 import { MAX_STORED_UPLOADS, MAX_UPLOAD_BYTES, MAX_UPLOAD_CHUNKS, fileName, uploadChunkData, uploadID, uploadInfo, uploadOwner } from "./uploads.ts";
 import { noiseDefinition, noiseSenderAdded, noiseSenderValue, noiseSenders, noiseSettings } from "./noise.ts";
+import { CHAT_APP_KEYS, chatApp, chatLoginFields, chatLoginSessionID, chatLoginState, connectableChatApp, loginFlowID, loginStepID } from "./chat-login.ts";
 
 
 type Shape = Record<string, Schema<any>>;
@@ -990,6 +991,81 @@ export const ACTIONS = {
     timeoutMs: REQUEST_TIMEOUT_MS,
     rateLimitPerMinute: 60,
     beeper: "GET /v1/chats in the background (no write); Gmail threads.list, ids only, a page a second",
+  }),
+
+  chat_apps: define({
+    description: "The chat apps the owner can connect on the page (Settings > Chats), as Beeper has them on the owner's computer: each app's accounts, whether one can be added, and Beeper's ways to sign in. Only J-Inbox's chat apps; never Beeper's own account. Owner only.",
+    params: object({}),
+    paramDocs: {},
+    defaults: {},
+    result: object({ items: array(chatApp, { max: CHAT_APP_KEYS.length }) }),
+    write: false,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    rateLimitPerMinute: 30,
+    beeper: "GET /v1/bridges, GET /v1/bridges/{bridgeID}/login-flows",
+  }),
+
+  chat_login_start: define({
+    description: "Start connecting a chat app on the owner's computer, or reconnecting one of its accounts (accountID), through Beeper's own sign-in. One at a time: an earlier one is cancelled. Answers the first step. macWindow false: never open a sign-in window on the Mac (the page is on a phone). Owner only.",
+    params: object({ app: connectableChatApp, flowID: optional(loginFlowID), accountID: optional(accountID), macWindow: optional(boolean()) }),
+    paramDocs: { app: "The chat app", flowID: "One of the app's flows (default: Beeper's)", accountID: "Reconnect this account instead of adding one", macWindow: "Open a sign-in window on the Mac for a website sign-in (default true)" },
+    defaults: {},
+    result: chatLoginState,
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    rateLimitPerMinute: 10,
+    beeper: "GET /v1/bridges, POST /v1/bridges/{bridgeID}/login-sessions (and DELETE an earlier one)",
+  }),
+
+  chat_login_poll: define({
+    description: "Where a sign-in stands now: the next step, done, or over. The page asks every second or two; a sign-in nobody asks about for a minute (five while the step is in the phone app) is cancelled. Owner only.",
+    params: object({ sessionID: chatLoginSessionID }),
+    paramDocs: { sessionID: "sessionID from chat_login_start" },
+    defaults: {},
+    result: chatLoginState,
+    write: false,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    rateLimitPerMinute: 120,
+    beeper: "GET /v1/bridges/{bridgeID}/login-sessions/{loginSessionID}; POST .../steps/{stepID} {type: display_and_wait} in the background while a code is shown",
+  }),
+
+  chat_login_submit: define({
+    description: "Send what the owner typed for a sign-in's form step (a phone number, a code, a password) to Beeper. Kept nowhere, never logged. Owner only.",
+    params: object({ sessionID: chatLoginSessionID, stepID: loginStepID, fields: chatLoginFields }),
+    paramDocs: { sessionID: "sessionID from chat_login_start", stepID: "The form step's stepID", fields: "Values by field id" },
+    defaults: {},
+    result: chatLoginState,
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    rateLimitPerMinute: 20,
+    beeper: "POST /v1/bridges/{bridgeID}/login-sessions/{loginSessionID}/steps/{stepID} {type: user_input, fields}",
+  }),
+
+  chat_login_cancel: define({
+    description: "Stop a sign-in: Beeper cancels it and a sign-in window on the Mac closes; nothing half-done is left behind. Idempotent. Owner only.",
+    params: object({ sessionID: chatLoginSessionID }),
+    paramDocs: { sessionID: "sessionID from chat_login_start" },
+    defaults: {},
+    result: object({ sessionID: chatLoginSessionID, cancelled: literal(true) }),
+    write: true,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    rateLimitPerMinute: 20,
+    beeper: "DELETE /v1/bridges/{bridgeID}/login-sessions/{loginSessionID}",
   }),
 
   get_media: define({

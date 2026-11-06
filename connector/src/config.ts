@@ -26,6 +26,8 @@ export type Paths = {
   /** Names for numbers (contacts.ts): written by the helper app, which alone may read Contacts. */
   contactsFile: string;
   contactsHelperApp: string;
+  /** The sign-in window for website sign-ins (signin-window.ts), installed by install.sh. */
+  signinHelperApp: string;
   /** Gmail accounts this connector runs (addresses and status; the tokens are in the Keychain). */
   gmailFile: string;
   /** Draft requests' instructions and drafts (drafts.ts): kept here, never in the cloud. */
@@ -73,6 +75,7 @@ export function resolvePaths(env: Record<string, string | undefined>): Paths {
     assetsFile: join(dataDir, "assets.json"),
     contactsFile: join(dataDir, "contacts.json"),
     contactsHelperApp: override !== undefined ? join(override, "J-Inbox Contacts.app") : join(home!, "Applications", "J-Inbox Contacts.app"),
+    signinHelperApp: override !== undefined ? join(override, "J-Inbox Sign-in.app") : join(home!, "Applications", "J-Inbox Sign-in.app"),
     gmailFile: join(dataDir, "gmail.json"),
     draftsFile: join(dataDir, "drafts.json"),
     uploadsDir: join(dataDir, "uploads"),
@@ -198,6 +201,18 @@ export function typesafeURL(env: Record<string, string | undefined>, p: Paths): 
   const u = plainOrigin(v, "J_INBOX_TYPESAFE_URL");
   if (u.protocol !== "http:" || !LOOPBACK.has(u.hostname)) throw new Error("J_INBOX_TYPESAFE_URL must be a loopback http:// URL.");
   return u.origin;
+}
+
+/**
+ * The sign-in window's executable: J-Inbox Sign-in.app's, or J_INBOX_SIGNIN_HELPER, a stand-in (a
+ * script that answers like it), only in test mode (J_INBOX_CONFIG_DIR set).
+ */
+export function signinHelperExecutable(env: Record<string, string | undefined>, p: Paths, inApp: (app: string) => string): string {
+  const v = env.J_INBOX_SIGNIN_HELPER;
+  if (v === undefined || v === "") return inApp(p.signinHelperApp);
+  if (!p.testMode) throw new Error("J_INBOX_SIGNIN_HELPER is only allowed together with J_INBOX_CONFIG_DIR (tests and local development).");
+  if (!isAbsolute(v)) throw new Error("J_INBOX_SIGNIN_HELPER must be an absolute path.");
+  return v;
 }
 
 /** J_INBOX_GMAIL_POLL_MS (tests only, with J_INBOX_CONFIG_DIR): a shorter Gmail history poll. undefined: the default. */

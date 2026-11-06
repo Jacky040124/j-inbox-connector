@@ -1,5 +1,6 @@
 // Mutable in-memory world of the fake Beeper. Mutations emit domain events like /v1/ws does.
 import { buildFixture, chatAccount, type BAccount, type BAsset, type BAttachment, type BChat, type BMessage, type Fixture } from "./fixtures.ts";
+import { FakeLogins } from "./logins.ts";
 
 /** A file uploaded with POST /v1/assets/upload (or /upload/base64), kept until the fake is reset. */
 export type BUpload = { uploadID: string; fileName: string; mimeType: string; srcURL: string; bytes: Uint8Array };
@@ -38,6 +39,14 @@ export class FakeBeeperState {
   private pendingCounter = 0;
   /** Clock used for new messages; tests may replace it. */
   now: () => number = () => Date.now();
+  /** Bridges and their login sessions (logins.ts). `baseURL` is set by the server (the cookies step's page). */
+  baseURL = "http://127.0.0.1";
+  readonly logins = new FakeLogins(
+    () => this.accounts,
+    (a) => (this.accounts = a),
+    () => Date.now(),
+    () => this.baseURL,
+  );
 
   constructor(fixture: Fixture = buildFixture()) {
     this.accounts = fixture.accounts;

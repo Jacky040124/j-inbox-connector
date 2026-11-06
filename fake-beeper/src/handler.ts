@@ -1,6 +1,7 @@
 // HTTP side of the fake Beeper Client API as a web-standard (Request) => Response handler.
 // Behaviour follows vendor/beeper-client-api-spec.json; where the spec is silent the choice is noted.
 import type { BAttachment, BChat, BMessage } from "./fixtures.ts";
+import { LOGIN_FLOWS, fakeLoginPage } from "./logins.ts";
 import type { Call, FakeBeeperState } from "./state.ts";
 
 /** When each chat was last unarchived, for the unread-after-unarchive quirk (see POST /unread). */
@@ -45,9 +46,13 @@ export type Controls = {
    */
   unreadArchives: string[];
   unreadArchiveDelayMs: number;
+  /** POST .../steps/{stepID} {type: display_and_wait} holds at most this long for the session to change (logins.ts). */
+  loginWaitMs: number;
+  /** A login session expires this long after it starts (Beeper then answers 404 for it). */
+  loginTTLMs: number;
 };
 
-export const defaultControls = (): Controls => ({ latencyMs: 0, messageOrder: "desc", messagesPageSize: 20, settleMs: 0, dropEvents: false, emptyOlderPageForIMessage: false, wsReadyDelayMs: 0, wsNoReady: false, wsRejectApp: false, wsSilentSubscribe: false, unreadArchives: ["WhatsApp"], unreadArchiveDelayMs: 300 });
+export const defaultControls = (): Controls => ({ latencyMs: 0, messageOrder: "desc", messagesPageSize: 20, settleMs: 0, dropEvents: false, emptyOlderPageForIMessage: false, wsReadyDelayMs: 0, wsNoReady: false, wsRejectApp: false, wsSilentSubscribe: false, unreadArchives: ["WhatsApp"], unreadArchiveDelayMs: 300, loginWaitMs: 20_000, loginTTLMs: 5 * 60_000 });
 
 type Match = { method?: string; path?: string; route?: string; times?: number };
 export type FailRule = Match & { status: number; code?: string; message?: string; rawBody?: string; headers?: Record<string, string> };
@@ -248,6 +253,12 @@ function resolveRoute(method: string, segs: string[]): Route | null {
   if (n === 2 && a === "info") return { route: "/v1/info", params: {} };
   if (n === 2 && a === "accounts") return { route: "/v1/accounts", params: {} };
   if (n === 3 && a === "accounts") return { route: "/v1/accounts/{accountID}", params: { accountID: b! } };
+  if (n === 2 && a === "bridges" && method === "GET") return { route: "/v1/bridges", params: {} };
+  if (n === 3 && a === "bridges" && method === "GET") return { route: "/v1/bridges/{bridgeID}", params: { bridgeID: b! } };
+  if (n === 4 && a === "bridges" && c === "login-flows") return { route: "/v1/bridges/{bridgeID}/login-flows", params: { bridgeID: b! } };
+  if (n === 4 && a === "bridges" && c === "login-sessions") return { route: "/v1/bridges/{bridgeID}/login-sessions", params: { bridgeID: b! } };
+  if (n === 5 && a === "bridges" && c === "login-sessions") return { route: "/v1/bridges/{bridgeID}/login-sessions/{loginSessionID}", params: { bridgeID: b!, loginSessionID: d! } };
+  if (n === 7 && a === "bridges" && c === "login-sessions" && e === "steps") return { route: "/v1/bridges/{bridgeID}/login-sessions/{loginSessionID}/steps/{stepID}", params: { bridgeID: b!, loginSessionID: d!, stepID: f! } };
   if (n === 5 && a === "bridges" && c === "logins") return { route: "/v1/bridges/{bridgeID}/logins/{loginID}", params: { bridgeID: b!, loginID: d! } };
   if (n === 6 && a === "bridges" && c === "logins" && e === "remove") return { route: "/v1/bridges/{bridgeID}/logins/{loginID}/remove", params: { bridgeID: b!, loginID: d! } };
   if (n === 2 && a === "chats") return { route: "/v1/chats", params: {} };
@@ -269,6 +280,8 @@ export function createBeeperHandler(ctx: HandlerContext) {
   return async function handle(req: Request): Promise<Response> {
     const url = new URL(req.url);
     const method = req.method.toUpperCase();
+    // The website a cookies sign-in step opens (no token: it is a web page, not the API).
+    if (method === "GET" && url.pathname.startsWith("/fake-login/")) return fakeLoginPage(url) ?? error(404, "NOT_FOUND", "Route not found");
     let segs: string[];
     try {
       segs = url.pathname.split("/").slice(1).map((s) => decodeURIComponent(s));
@@ -278,6 +291,7 @@ export function createBeeperHandler(ctx: HandlerContext) {
     const found = resolveRoute(method, segs);
     const route = found?.route ?? url.pathname;
     const state = ctx.state();
+    state.baseURL = ctx.baseURL();
     if (ctx.controls.latencyMs > 0) await new Promise((r) => setTimeout(r, ctx.controls.latencyMs));
 
     // Read the body and log the call before anything can answer, so injected faults and
@@ -399,6 +413,55 @@ async function dispatch(method: string, r: Route, q: URLSearchParams, body: Reco
       if (typeof body.scope !== "string" || !removeScopes.includes(body.scope)) throw bad(`scope must be one of ${removeScopes.join(", ")}`);
       state.accounts = state.accounts.filter((x) => !accs.includes(x));
       return json({ bridgeID: r.params.bridgeID, loginID: r.params.loginID, affectedAccountIDs: accs.map((x) => x.accountID), status: "removed", scope: body.scope });
+    }
+
+    case "GET /v1/bridges":
+      return json({ items: state.logins.bridges() });
+
+    case "GET /v1/bridges/{bridgeID}": {
+      const b = state.logins.bridge(r.params.bridgeID!);
+      if (!b) throw notFound("Bridge");
+      return json(b);
+    }
+
+    case "GET /v1/bridges/{bridgeID}/login-flows": {
+      if (!state.logins.bridge(r.params.bridgeID!)) throw notFound("Bridge");
+      // Measured: Bluesky's on-device bridge answered 500 here (Beeper Desktop 4.3.123).
+      if (r.params.bridgeID === "local-bluesky") throw new HttpError(500, "INTERNAL_ERROR", "Internal error");
+      return json({ items: clone(LOGIN_FLOWS[r.params.bridgeID!] ?? []) });
+    }
+
+    case "POST /v1/bridges/{bridgeID}/login-sessions": {
+      onlyKeys(body, ["flowID", "accountID", "loginID"]);
+      for (const k of ["flowID", "accountID", "loginID"]) if (body[k] !== undefined && (typeof body[k] !== "string" || !body[k])) throw bad(`${k} must be a non-empty string`);
+      const out = state.logins.create(r.params.bridgeID!, body as { flowID?: string; accountID?: string; loginID?: string }, ctx.controls.loginTTLMs);
+      if ("status" in out) throw new HttpError(out.status, out.code, out.message);
+      return json(state.logins.view(out.session));
+    }
+
+    case "GET /v1/bridges/{bridgeID}/login-sessions/{loginSessionID}":
+    case "DELETE /v1/bridges/{bridgeID}/login-sessions/{loginSessionID}": {
+      const s = state.logins.get(r.params.loginSessionID!);
+      if (!s || s.bridgeID !== r.params.bridgeID) throw notFound("Login session");
+      if (method === "GET") return json(state.logins.view(s));
+      state.logins.cancel(s);
+      return json({ bridgeID: s.bridgeID, loginSessionID: s.loginSessionID, status: "cancelled" });
+    }
+
+    case "POST /v1/bridges/{bridgeID}/login-sessions/{loginSessionID}/steps/{stepID}": {
+      onlyKeys(body, ["type", "fields", "lastURL", "source"]);
+      const s = state.logins.get(r.params.loginSessionID!);
+      if (!s || s.bridgeID !== r.params.bridgeID) throw notFound("Login session");
+      const out = state.logins.submit(s, r.params.stepID!, body);
+      if ("status" in out) throw new HttpError(out.status, out.code, out.message);
+      // Waiting on a display step: hold until the phone acts (or the QR code changes), like mautrix's wait call.
+      if (body.type === "display_and_wait") {
+        const before = JSON.stringify(state.logins.view(s));
+        const until = Date.now() + ctx.controls.loginWaitMs;
+        while (Date.now() < until && !req.signal.aborted && JSON.stringify(state.logins.view(s)) === before && state.logins.get(s.loginSessionID)) await state.logins.waitChange(until - Date.now(), req.signal);
+        if (!state.logins.get(s.loginSessionID)) throw notFound("Login session");
+      }
+      return json(state.logins.view(s));
     }
 
     case "GET /v1/chats": {

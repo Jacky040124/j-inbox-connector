@@ -2,6 +2,7 @@
 // with parseActionParams; every result is built from mapped data and shrunk to fit one frame.
 import {
   READ_CHAT_DEFAULT_LIMIT,
+  isBeeperOwnAccount,
   makeError,
   parseActionResult,
   sanitizeLine,
@@ -123,11 +124,13 @@ const fingerprint = (parts: unknown[]) => hashKey(JSON.stringify(parts));
  * The chat networks the owner can use: for each account the network its chats show (accounts say
  * "X", chats say "Twitter/X"), plus chat networks with no account at all (iMessage), plus the
  * remaining accounts' own networks. Sorted, unique, no "Unknown". Also the `hello.networks` list.
+ * Beeper's own account (its Matrix login) is not a chat network the owner picks: chats of the
+ * accounts in `own` (by id, never by a network's name) name no network here, though they stay in All chats.
  */
-export function connectedNetworks(accounts: Account[], rawChats: unknown[]): string[] {
+export function connectedNetworks(accounts: Account[], rawChats: unknown[], own: ReadonlySet<string> = new Set()): string[] {
   const byAccount = new Map<string, string>();
   for (const c of rawChats) {
-    if (!isObj(c) || typeof c.accountID !== "string" || typeof c.network !== "string") continue;
+    if (!isObj(c) || typeof c.accountID !== "string" || typeof c.network !== "string" || own.has(c.accountID)) continue;
     const n = sanitizeLine(c.network, 64);
     if (n && !byAccount.has(c.accountID)) byAccount.set(c.accountID, n);
   }
@@ -430,9 +433,12 @@ export function createActions(client: BeeperClient, opts: ActionsOptions = {}) {
       const version = v || null;
       if (!acc.ok && acc.error.code === "BEEPER_UNAUTHORIZED") return { ok: true, data: { ...base, beeper: { reachable: true, version, tokenValid: false }, accounts: [], networks: [] } };
       const rawAccounts = must(acc);
-      const accounts = (Array.isArray(rawAccounts) ? rawAccounts : isObj(rawAccounts) && Array.isArray(rawAccounts.items) ? rawAccounts.items : []).map(mapAccount).filter((a: Account | null): a is Account => a !== null).slice(0, 50);
+      const rawList: unknown[] = Array.isArray(rawAccounts) ? rawAccounts : isObj(rawAccounts) && Array.isArray(rawAccounts.items) ? rawAccounts.items : [];
+      // Beeper's own account is neither a chat account to list nor a network to offer (chat-login.v1).
+      const own = new Set(rawList.filter((a): a is Record<string, any> => isObj(a) && isBeeperOwnAccount(a) && typeof a.accountID === "string").map((a) => a.accountID as string));
+      const accounts = rawList.filter((a) => !(isObj(a) && isBeeperOwnAccount(a))).map(mapAccount).filter((a: Account | null): a is Account => a !== null).slice(0, 50);
       const chats = beeperPage(must(chatsCall)).items;
-      const data = { ...base, beeper: { reachable: true, version, tokenValid: true }, accounts, networks: connectedNetworks(accounts, chats) };
+      const data = { ...base, beeper: { reachable: true, version, tokenValid: true }, accounts, networks: connectedNetworks(accounts, chats, own) };
       const checked = parseActionResult("status", data);
       return checked.ok ? { ok: true, data: checked.value } : err("INTERNAL", "Beeper sent an unexpected status.");
     });

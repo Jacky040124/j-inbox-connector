@@ -22,9 +22,23 @@ describe("status.accounts", () => {
     if (!r.ok) throw new Error(r.error.code);
     expect(parseActionResult("status", r.data).ok).toBe(true);
     const by = Object.fromEntries(r.data.accounts.map((a) => [a.accountID, a]));
-    expect(by.matrix).toMatchObject({ network: "Beeper", removable: false });
+    // Beeper's own account (its Matrix login) is no chat account of the owner's: not listed (chat-login.v1).
+    expect(by.matrix).toBeUndefined();
     expect(by.instagramgo).toMatchObject({ removable: true });
     expect(by.instagramgo!.name).toBeTruthy();
+  });
+  test("Beeper's own network is not offered either, by its account's identity: its chats stay in All chats", async () => {
+    // A chat on Beeper's own account, whose network has any name at all.
+    const id = "!beeper-own-chat:beeper.com";
+    fb.state.chats.set(id, { id, localChatID: null, accountID: "matrix", network: "Some Beeper Name", title: "Beeper Help", type: "single", participants: { items: [], hasMore: false, total: 0 }, lastActivity: new Date().toISOString(), unreadCount: 0 });
+    const a = make();
+    const r = await a.status({});
+    if (!r.ok) throw new Error(r.error.code);
+    expect(r.data.networks).not.toContain("Some Beeper Name");
+    expect(r.data.networks).not.toContain("Beeper");
+    expect(r.data.networks).toContain("WhatsApp");
+    const list = await a.list_chats({ limit: 50 } as never);
+    expect(list.ok && list.data.items.some((c) => c.id === id)).toBe(true);
   });
   test("mapAccount: names are single-line and capped; no loginID means not removable", () => {
     const a = mapAccount({ accountID: "x", loginID: "l", bridge: { id: "b", type: "x" }, status: "reconnect_required", statusText: "Sign in\nagain", user: { fullName: "A\u0000B " + "z".repeat(500) } })!;

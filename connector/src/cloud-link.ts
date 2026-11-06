@@ -43,6 +43,9 @@ export type LinkStatus = "idle" | "connecting" | "connected" | "disconnected" | 
 export type StopReason = "shutdown" | "revoked" | "unauthenticated" | "replaced" | "version";
 export type LinkState = { status: LinkStatus; since: number; closeCode?: number; reason?: StopReason };
 
+/** Actions this computer never runs for an agent, whoever relays them (remove_account, chat_apps, chat_login_*). */
+export const NEVER_FOR_AGENTS: ReadonlySet<string> = new Set(["remove_account", "chat_apps", "chat_login_start", "chat_login_poll", "chat_login_submit", "chat_login_cancel"]);
+
 export type RequestLog = { action: string; ok: boolean; code?: ErrorCode; ms: number; caller?: { type: "human" | "agent"; name?: string } };
 
 /** The subset of WebSocket the link uses, so tests or other runtimes can supply one. */
@@ -409,6 +412,13 @@ export class CloudLink {
   private onReq(f: ReqFrame) {
     if (this.pending.has(f.id)) return;
     if (this.stopping) return this.sendRes(f.id, { kind: "res", ok: false, error: makeError("OFFLINE", "The connector is shutting down. Try again shortly.") });
+    // Removing or connecting accounts is the owner's alone: the cloud never sends one for an agent; refused here too. (Not every
+    // owner-only action: the cloud's own calls to this computer's stores, cloudOnly, run for an agent's draft or upload.)
+    if (NEVER_FOR_AGENTS.has(f.action) && f.caller?.type === "agent") {
+      this.sendRes(f.id, { kind: "res", ok: false, error: makeError("NOT_ALLOWED", "Only the owner can do this, from the J-Inbox web page.") });
+      this.o.onRequest?.({ action: f.action, ok: false, code: "NOT_ALLOWED", ms: 0, caller: f.caller });
+      return;
+    }
     const media = ACTIONS[f.action].streamed;
     if (this.pending.size >= this.o.maxPending) return this.refuse(f, "Too many requests in flight on this computer.");
     if (media && this.mediaActive >= MAX_CONCURRENT_MEDIA_STREAMS) return this.refuse(f, "Too many media downloads at once.");

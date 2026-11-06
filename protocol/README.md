@@ -519,6 +519,35 @@ archives on WhatsApp) is never called for it.
   `set_todo` is not in the manifest and `humanOnly` refuses it on every path.
   `"older-unread.v1"`: without it the cloud answers `get_older_unread` and `add_older_unread` `NOT_SUPPORTED`, the web does not ask, and Settings has no such line.
 
+### Connecting chat apps (`chat-login.ts`; added 2026-11-05, `"chat-login.v1"`)
+
+Settings > Chats connects, reconnects and removes the owner's chat apps without the Beeper app. The sign-in is Beeper's own
+(Beeper Client API: bridges, login flows, login sessions and their steps), run by the connector; the cloud only relays.
+
+- **The apps**: `CHAT_APP_KEYS`, in the page's order: WhatsApp, Telegram, Instagram, Messenger, LinkedIn, X, Discord, Slack,
+  Signal, iMessage (shown, never connected from the page). Nothing else is offered. A Beeper bridge belongs to an app by its id
+  (without `local-`) or its type (`CHAT_APP_BRIDGES`, `chatAppOf`), never by a display name. Beeper's own account (`matrix`, its
+  Matrix login: `isBeeperOwnAccount`) is never an app, an account to list or a network: with this capability `status` leaves it
+  and the network of its chats out (its chats stay in the lists).
+- **Actions** (all `humanOnly`: never in the agent manifest, refused for agents by the cloud's relay and agent API, and by the
+  connector's link): `chat_apps` (each app's accounts, `state`, `onDevice`, Beeper's flows), `chat_login_start {app, flowID?,
+  accountID?, macWindow?}` (one at a time: an earlier one is cancelled; a Reconnect names the account), `chat_login_poll
+  {sessionID}`, `chat_login_submit {sessionID, stepID, fields}`, `chat_login_cancel {sessionID}`. The `sessionID` is the
+  connector's (`cl_...`), never Beeper's.
+- **State**: `waiting` (a `display` step: a QR code or a code for the phone; or a `browser` step: a sign-in window is open on
+  the Mac; or nothing yet), `input` (a `form` step; `retry` when what was sent did not work), `done` (`account.name`), `failed`,
+  `cancelled`, `expired`, with a `problem` the page has words for (`window-closed`, `no-window`, `needs-mac`, `busy`). No URL,
+  script, cookie, Beeper id or Beeper error text is ever in it (the schemas refuse them).
+- **Flows the page asks for** (`CHAT_APP_FLOWS`): a QR code on a computer (WhatsApp, Telegram, Signal, Discord); on a phone
+  WhatsApp and Telegram by phone number, Signal and Discord "on a computer", Instagram "on the Mac"; Slack by email; Messenger by
+  its `messenger-lite-android` form; LinkedIn and X by Beeper's default. A website sign-in (Beeper's `cookies` step) is done in
+  J-Inbox's sign-in window on the Mac (connector README), whose cookies go straight to Beeper.
+- **Secrets**: what the owner types, the QR code's data and a website's cookies pass through and are kept nowhere: not in the
+  cloud (D1, the room, logs: its audit keeps the action and the outcome), not in the connector's files or logs, not in the
+  browser's storage. `chatLoginFields` values are checked by shape only, and a refusal never repeats them.
+- **Capability** `"chat-login.v1"`: without it the cloud answers these actions `NOT_SUPPORTED`, and the web shows the list from
+  `status` with Remove only, and the words to update.
+
 ### Gmail (`gmail.ts`, design/gmail-plan.md)
 
 The connector runs Gmail accounts next to Beeper. Rules every peer relies on:

@@ -332,6 +332,22 @@ describe("doctor", () => {
     expect(j.checks.filter((c: any) => c.level === "fail")).toEqual([]);
     expect(code).toBe(0);
   });
+  test("a connector too old for the cloud: the fix is the install command, not brew", async () => {
+    const h = await pairedHarness();
+    writeFileSync(h.paths.stateFile, JSON.stringify({ v: 1, pid: process.pid, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), cloud: { status: "stopped", since: new Date().toISOString(), closeCode: 4426, reason: "version" }, beeper: { reachable: true, version: "x" } }));
+    await h.cli("doctor");
+    expect(h.text()).toContain("curl -fsSL https://inbox.jackyzhonghq.com/install.sh | sh");
+    expect(h.text()).not.toContain("brew");
+  });
+  test("Beeper Desktop with no chat accounts: the fix says to connect them in Settings > Chats, or in Beeper Desktop", async () => {
+    const h = await pairedHarness();
+    fb.state.accounts = [];
+    await h.cli("doctor");
+    expect(h.text()).toMatch(/\[warn\].*no chat accounts/);
+    expect(h.text()).toContain("Settings > Chats");
+    expect(h.text()).toContain("sign in to your chat networks");
+    expect(h.text()).not.toContain("beeper accounts add");
+  });
   test("a revoked computer is diagnosed with the fix", async () => {
     const h = await pairedHarness();
     writeFileSync(h.paths.stateFile, JSON.stringify({ v: 1, pid: process.pid, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), cloud: { status: "stopped", since: new Date().toISOString(), closeCode: 4403, reason: "revoked" }, beeper: { reachable: true, version: "x" } }));
@@ -410,6 +426,105 @@ describe("setup", () => {
     await h.cli("setup", "--engine", "desktop", "--beeper-url", fb.url, "--beeper-token-stdin", "--cloud-url", cloud.url, "--no-service", "--yes");
     expect(h.text()).toMatch(/sleep/i);
   });
+
+  // First run for someone who installed with install.sh: Beeper Desktop is the default, and it must
+  // answer before a token is asked for.
+  const DEAD = "http://127.0.0.1:1";
+  test("no --engine: Beeper Desktop is the default; when it does not answer, says how to get it (no terminal: stops), never the beeper CLI", async () => {
+    const h = harness();
+    expect(await h.cli("setup", "--beeper-url", DEAD)).toBe(1);
+    const t = h.text() + "\n" + h.err.join("\n");
+    expect(t).toContain("https://www.beeper.com/download");
+    expect(t).toContain("Settings > Developers > Beeper Desktop API");
+    expect(t).toContain("j-inbox setup");
+    expect(h.prog.calls.filter((c) => c.cmd[0] === "beeper")).toEqual([]);
+    expect(t).not.toMatch(/access token/i);
+    expect(await h.secrets.get("beeper-token")).toBeNull();
+  });
+  test("--engine desktop with Beeper down: the token is not asked for until Beeper answers; Enter checks again", async () => {
+    const cloud = await fakeCloud();
+    const h = harness();
+    h.deps.isTTY = true;
+    let down = true;
+    const events: string[] = [];
+    h.deps.fetchImpl = (async (input: any, init?: any) => {
+      if (down && String(input instanceof Request ? input.url : input).startsWith(fb.url)) throw new TypeError("fetch failed (connection refused)");
+      return guardedFetch(input, init);
+    }) as typeof fetch;
+    h.deps.prompt.line = async () => {
+      events.push(down ? "line:down" : "line:up");
+      if (events.length === 2) down = false;
+      return "";
+    };
+    h.deps.prompt.secret = async () => (events.push(down ? "secret:down" : "secret:up"), fb.token);
+    expect(await h.cli("setup", "--engine", "desktop", "--beeper-url", fb.url, "--cloud-url", cloud.url, "--no-service")).toBe(0);
+    expect(events).toEqual(["line:down", "line:down", "secret:up"]);
+    expect(h.text()).toContain("Still no answer");
+    expect(h.text()).toContain("Beeper Desktop answers.");
+    expect(h.text()).toMatch(/Beeper Desktop API is on, then create an access token/);
+    expect(await h.secrets.get("beeper-token")).toBe(fb.token);
+  });
+  test("q (or end of input) at the wait prompt stops without storing anything", async () => {
+    const h = harness();
+    h.deps.isTTY = true;
+    h.deps.prompt.line = async () => "q";
+    expect(await h.cli("setup", "--beeper-url", DEAD)).toBe(1);
+    expect(h.text()).toContain("once Beeper Desktop is running");
+    expect(existsSync(h.paths.configFile)).toBe(false);
+  });
+  test("s at the wait prompt installs Beeper Server instead (the secondary path)", async () => {
+    const h = harness({ stdin: fb.token });
+    h.deps.isTTY = true;
+    h.deps.prompt.line = async () => "s";
+    // No --beeper-url: Desktop's default 127.0.0.1:23373 is refused by the guarded fetch (never reached).
+    expect(await h.cli("setup", "--beeper-port", String(fb.port), "--beeper-token-stdin", "--skip-pair", "--no-service")).toBe(0);
+    expect(h.prog.calls.filter((c) => c.cmd[0] === "beeper").map((c) => c.cmd.join(" "))).toContain(`beeper targets add server j-inbox --port ${fb.port}`);
+    expect(loadConfig(h.paths)).toMatchObject({ engine: "server", beeperURL: fb.url });
+  });
+  test("running setup again (an upgrade) keeps the engine, the Beeper token and the pairing, and restarts the service", async () => {
+    const cloud = await fakeCloud();
+    const h = harness({ stdin: fb.token });
+    expect(await h.cli("setup", "--engine", "desktop", "--beeper-url", fb.url, "--beeper-token-stdin", "--cloud-url", cloud.url, "--yes")).toBe(0);
+    expect(h.text()).toContain("Installed ");
+    h.out.length = 0;
+    h.prog.calls.length = 0;
+    h.deps.isTTY = true;
+    h.deps.prompt.secret = async () => {
+      throw new Error("must not ask for a token again");
+    };
+    h.deps.prompt.line = async () => {
+      throw new Error("must not ask anything");
+    };
+    expect(await h.cli("setup")).toBe(0);
+    const t = h.text();
+    expect(t).toContain("Using Beeper Desktop, as set up before");
+    expect(t).toContain("Kept the Beeper token already in the Keychain");
+    expect(t).not.toContain("Beeper token saved");
+    expect(t).toContain("Already paired as");
+    expect(t).toContain(`Restarted the background service with this version (${CONNECTOR_VERSION})`);
+    expect(cloud.pair.starts.length).toBe(1);
+    expect(h.prog.calls.map((c) => c.cmd.slice(0, 2).join(" "))).toEqual(expect.arrayContaining(["/bin/launchctl bootout", "/bin/launchctl bootstrap", "/bin/launchctl kickstart"]));
+    expect(loadConfig(h.paths)).toMatchObject({ engine: "desktop", beeperURL: fb.url });
+  });
+  test("running setup again when Beeper no longer accepts the stored token asks for a new one", async () => {
+    const h = harness({ secretAnswers: [fb.token] });
+    saveConfig(h.paths, { cloudURL: "https://inbox.jackyzhonghq.com", beeperURL: fb.url, engine: "desktop" });
+    await h.secrets.set("beeper-token", "revoked-token-1234");
+    h.deps.isTTY = true;
+    expect(await h.cli("setup", "--skip-pair", "--no-service")).toBe(0);
+    expect(h.text()).toContain("no longer accepts the stored token");
+    expect(await h.secrets.get("beeper-token")).toBe(fb.token);
+  });
+  test("--beeper-token-stdin replaces a stored token that still works", async () => {
+    const h = harness({ stdin: "second-token-5678" });
+    fb.addToken("second-token-5678");
+    cleanup.push(() => fb.revokeToken("second-token-5678"));
+    saveConfig(h.paths, { cloudURL: "https://inbox.jackyzhonghq.com", beeperURL: fb.url, engine: "desktop" });
+    await h.secrets.set("beeper-token", fb.token);
+    expect(await h.cli("setup", "--beeper-token-stdin", "--skip-pair", "--no-service")).toBe(0);
+    expect(await h.secrets.get("beeper-token")).toBe("second-token-5678");
+    expect(h.text()).not.toContain("Kept the Beeper token");
+  });
 });
 
 describe("jev-key", () => {
@@ -452,8 +567,13 @@ describe("uninstall", () => {
     await Bun.write(join(h.paths.launchAgentsDir, `${LAUNCHD_LABEL}.plist`), "<plist/>");
     await Bun.write(h.paths.auditFile, "");
     await Bun.write(h.paths.todoFile, "{}");
+    // The two helper apps install.sh puts in ~/Applications.
+    await Bun.write(join(h.paths.contactsHelperApp, "Contents", "Info.plist"), "<plist/>");
+    await Bun.write(join(h.paths.signinHelperApp, "Contents", "Info.plist"), "<plist/>");
     expect(await h.cli("uninstall", "--yes")).toBe(0);
     expect(existsSync(h.paths.todoFile)).toBe(false);
+    expect(existsSync(h.paths.contactsHelperApp)).toBe(false);
+    expect(existsSync(h.paths.signinHelperApp)).toBe(false);
     expect(existsSync(join(h.paths.launchAgentsDir, `${LAUNCHD_LABEL}.plist`))).toBe(false);
     expect(await new FileSecretStore(h.paths.secretsFile).get("beeper-token")).toBeNull();
     expect(existsSync(h.paths.configFile)).toBe(false);

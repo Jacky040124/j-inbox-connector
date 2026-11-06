@@ -6,8 +6,11 @@ import { makeError, sanitizeLine, type ErrorBody, type ErrorCode } from "@j-inbo
 export type BeeperClientOptions = { baseURL: string; token: string; timeoutMs?: number; maxBodyBytes?: number; fetchImpl?: typeof fetch };
 /** `detail`: on a 4xx, Beeper's own one-line reason (its `message`), for refusals the owner should read (a file a network does not take). */
 export type BeeperCall = { ok: true; status: number; body: any } | { ok: false; error: ErrorBody; detail?: string };
-/** The request's cancel/deadline signal. Already aborted: the call is not made (TIMEOUT). */
-export type CallOptions = { signal?: AbortSignal };
+/**
+ * The request's cancel/deadline signal. Already aborted: the call is not made (TIMEOUT). `timeoutMs`:
+ * this call's own limit instead of the client's (a sign-in step that waits for the phone).
+ */
+export type CallOptions = { signal?: AbortSignal; timeoutMs?: number };
 export type BeeperClient = {
   /** `/v1/chats/{chatID}[/rest...]` with every segment encodeURIComponent'ed. */
   chatPath(chatID: string, ...rest: string[]): string;
@@ -118,7 +121,7 @@ export function createBeeperClient(o: BeeperClientOptions): BeeperClient {
   const maxBody = o.maxBodyBytes ?? 20 * 1024 * 1024;
   const doFetch = o.fetchImpl ?? fetch;
 
-  async function call(method: string, path: string, body: unknown, write: boolean, signal?: AbortSignal): Promise<BeeperCall> {
+  async function call(method: string, path: string, body: unknown, write: boolean, signal?: AbortSignal, callTimeoutMs?: number): Promise<BeeperCall> {
     const url = new URL(path, base);
     if (url.origin !== base.origin) return fail({ network: "other", write });
     if (signal?.aborted) return fail({ network: "not_sent", write });
@@ -128,7 +131,7 @@ export function createBeeperClient(o: BeeperClientOptions): BeeperClient {
     if (body !== undefined && !form) headers["content-type"] = "application/json";
     let res: Response;
     try {
-      res = await doFetch(url, { method, headers, body: body === undefined ? undefined : form ? body : JSON.stringify(body), redirect: "manual", signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs) });
+      res = await doFetch(url, { method, headers, body: body === undefined ? undefined : form ? body : JSON.stringify(body), redirect: "manual", signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(callTimeoutMs ?? timeoutMs)]) : AbortSignal.timeout(callTimeoutMs ?? timeoutMs) });
     } catch (e) {
       return fail({ network: networkKind(e), write });
     }
@@ -178,8 +181,8 @@ export function createBeeperClient(o: BeeperClientOptions): BeeperClient {
   return {
     stream: (p, so) => stream(p, so?.signal, so?.headTimeoutMs),
     chatPath: (chatID, ...rest) => ["/v1/chats", encodeURIComponent(chatID), ...rest.map(encodeURIComponent)].join("/"),
-    get: (p, o) => call("GET", p, undefined, false, o?.signal),
-    write: (method, p, body, o) => call(method, p, body, true, o?.signal),
+    get: (p, o) => call("GET", p, undefined, false, o?.signal, o?.timeoutMs),
+    write: (method, p, body, o) => call(method, p, body, true, o?.signal, o?.timeoutMs),
     upload: (p, form, o) => call("POST", p, form, false, o?.signal),
   };
 }
