@@ -193,7 +193,11 @@ describe("sync in the service", () => {
     await cloud.waitFor(() => fb.wsClientCount() === 1, 3000, "beeper ws");
     // A busy group, as on the owner's Mac: more of its newest 50 are from others than the store keeps ids of (32). Each at its own time, after the start.
     const id = CHAT_IDS.bigGroup;
-    let t = Date.now() - 200;
+    // Past the tracker's start (`since`: what was written before it is not new) and before now (a message from the
+    // future is taken at now): wait, then date them in the last 100 ms. Dated 200 ms back without the wait, they
+    // fell before `since` on a machine that starts a little slower.
+    await Bun.sleep(400);
+    let t = Date.now() - 100;
     fb.state.now = () => (t += 2);
     const got = Array.from({ length: 45 }, (_, i) => fb.state.receive(id, { text: `busy ${i}` }));
     const newest = got.at(-1)!;

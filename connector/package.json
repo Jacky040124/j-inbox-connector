@@ -1,6 +1,6 @@
 {
   "name": "@j-inbox/connector",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "J-Inbox connector: links a local Beeper Client API to your J-Inbox cloud room. Only whitelisted actions run.",
   "license": "MIT",
   "type": "module",

@@ -14,7 +14,7 @@
     "build": "cd connector && bun run build"
   },
   "devDependencies": {
-    "@types/bun": "1.3.13",
+    "@types/bun": "1.4.4",
     "typescript": "5.9.3"
   }
 }

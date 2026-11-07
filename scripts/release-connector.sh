@@ -44,6 +44,8 @@ main() {
 
   [ "$(uname -s)" = Darwin ] || die "Run this on macOS (it needs codesign)."
   for t in git bun file codesign shasum tar swiftc; do command -v "$t" >/dev/null 2>&1 || die "$t is missing."; done
+  # Bun before 1.4 never frees HTMLRewriter's end-tag handlers: the Gmail sanitizer leaked ~0.6 MB a thread.
+  case $(bun --version) in 0.* | 1.[0-3].*) die "bun $(bun --version) is too old: build with 1.4 or later (connector/test/email-html-memory.test.ts)." ;; esac
 
   root=$(cd "$(dirname "$0")/.." && git rev-parse --show-toplevel) || die "Not inside the j-inbox git checkout."
   cd "$root"

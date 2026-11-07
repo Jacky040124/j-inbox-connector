@@ -35,7 +35,7 @@ function licenseOf(name: string, from: string): string | null {
 
 /** Why an import is not allowed, or null when it is. */
 export function violation(file: string, spec: string): string | null {
-  if (spec.startsWith("node:") || spec === "bun" || spec === "bun:test" || spec === "bun:sqlite") return null;
+  if (spec.startsWith("node:") || spec === "bun" || spec === "bun:test" || spec === "bun:sqlite" || spec === "bun:jsc") return null;
   if (spec.startsWith(".")) return relative(DIR, resolve(dirname(file), spec)).startsWith("..") ? "relative import leaves connector/" : null;
   const name = spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0]!;
   const license = licenseOf(name, dirname(file));
