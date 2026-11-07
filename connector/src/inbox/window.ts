@@ -2,8 +2,10 @@
 // which messages of a chat are its newest, and how big a change or a frame may be. inbox.db keeps
 // them when it writes, and a page keeps the same ones when it applies changes, so that applying the
 // changelog from empty gives exactly what inbox.db holds.
-//   - The window: a chat that is not archived (whatever its age), or one active in the last
-//     SYNC_WINDOW_DAYS days. A chat with no known activity counts as old.
+//   - The window: a chat active in the last SYNC_WINDOW_DAYS days, or a Beeper chat that is not
+//     archived (whatever its age). A Gmail thread is in it only by its activity (Jacky, 2026-11-07:
+//     an inbox keeps years of mail nobody archived; older threads are read when asked). A chat with
+//     no known activity counts as old.
 //   - A chat's messages: the newest SYNC_MESSAGES_PER_CHAT by sortKey (Beeper's sortKeys are numeric
 //     strings of any length: by length, then lexically; Gmail's is the message's time in ms), ties
 //     by message id. Older ones are read with read_chat.
@@ -17,9 +19,9 @@ export function activityOf(c: Pick<ChatSummary, "lastActivity">): number {
   return Number.isFinite(t) ? t : -1;
 }
 
-/** In the window: not archived, or active in the last SYNC_WINDOW_DAYS days. */
-export function inWindow(c: Pick<ChatSummary, "isArchived" | "lastActivity">, now: number): boolean {
-  if (!c.isArchived) return true;
+/** In the window: active in the last SYNC_WINDOW_DAYS days, or a Beeper chat that is not archived. */
+export function inWindow(c: Pick<ChatSummary, "id" | "isArchived" | "lastActivity">, now: number): boolean {
+  if (!c.isArchived && !c.id.startsWith("gmail:")) return true;
   const t = activityOf(c);
   return t >= 0 && t >= now - WINDOW_MS;
 }

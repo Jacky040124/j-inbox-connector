@@ -254,6 +254,20 @@ describe("inbox.db: the window", () => {
     now = NOW + DAY + 1;
     expect(db.outOfWindow()).toEqual(["!arch:x"]);
   });
+
+  test("a Gmail thread is in the window only by its activity, archived or not; a Beeper chat by either", () => {
+    let now = NOW;
+    const db = InboxDB.open({ path: ":memory:", now: () => now });
+    const old = iso(NOW - 120 * DAY);
+    // An old Gmail thread still in the inbox is not kept; an old Beeper chat still in the inbox is.
+    expect(db.apply({ op: "chat.upsert", chat: chat("gmail:owner@example.com:aaa111", { isArchived: false, lastActivity: old }) }).map((c) => c.op)).toEqual([]);
+    expect(db.apply({ op: "chat.upsert", chat: chat("!beeper:x", { isArchived: false, lastActivity: old }) }).map((c) => c.op)).toEqual(["chat.upsert"]);
+    db.apply({ op: "chat.upsert", chat: chat("gmail:owner@example.com:bbb222", { isArchived: false, lastActivity: iso(NOW - 89 * DAY) }) });
+    expect(db.outOfWindow()).toEqual([]);
+    // Time takes the recent Gmail thread out although it is in the inbox; the Beeper chat stays.
+    now = NOW + 2 * DAY;
+    expect(db.outOfWindow()).toEqual(["gmail:owner@example.com:bbb222"]);
+  });
 });
 
 describe("sync_pull", () => {
@@ -699,10 +713,10 @@ describe("the file", () => {
     expect(a.snapshotAfter(a.head(), Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, 10).map((r) => r.chatID).sort()).toEqual([A, B, OLD].sort());
     expect([...a.dump().keys()].sort()).toEqual([A, B, OLD].sort());
     a.close();
-    // Time takes OLD out of the window: the sweep names it by its real id, and it is removed.
+    // Time takes OLD (archived) and B (a Gmail thread, archived or not) out of the window: the sweep names them by their real ids.
     const b = InboxDB.open({ path, key, now: () => NOW + (SYNC_WINDOW_DAYS + 10) * DAY });
     expect(b.created).toBe(false);
-    expect(b.outOfWindow()).toEqual([OLD]);
+    expect(b.outOfWindow().sort()).toEqual([OLD, B].sort());
     b.apply({ op: "chat.remove", chatID: OLD });
     b.apply({ op: "chat.remove", chatID: B });
     const changes = b.changesAfter(0, 100, 1e9);

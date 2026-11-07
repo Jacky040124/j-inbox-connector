@@ -1,8 +1,7 @@
 // inbox.db's first build: every chat in the window, of every source, read once in the background.
 // Beeper: GET /v1/chats page by page (every inbox, newest first, to the end: a chat that is not
-// archived is in the window whatever its age); Gmail, per account: the ids of the threads in the
-// inbox or active in the window (`(in:inbox OR after:<window start>) -in:drafts`, a list call per
-// 100 threads, no metadata). Each chat in the window is read through the ingest (InboxIngest, as a
+// archived is in the window whatever its age); Gmail, per account: the ids of the threads active
+// in the window (`after:<window start> -in:drafts`, a list call per 100 threads, no metadata). Each chat in the window is read through the ingest (InboxIngest, as a
 // background job: whatever else wants a read goes first), one at a time, `paceMs` apart, and not
 // while the connector answers requests (`busy`), so it never starves the owner. A chat the build
 // meets outside the window that inbox.db keeps is removed.
@@ -116,7 +115,9 @@ export class FirstBuild {
         key,
         walk: (p) => {
           // The query is fixed when the walk starts: Gmail's page tokens belong to it.
-          const q = p.q ?? `(in:inbox OR after:${Math.floor((this.now() - WINDOW_MS) / 1000)}) -in:drafts`;
+          // A walk started with the older query (the whole inbox, any age) starts again with this one.
+          const q = p.q?.startsWith("after:") ? p.q : `after:${Math.floor((this.now() - WINDOW_MS) / 1000)} -in:drafts`;
+          if (q !== p.q) p = { cursor: null, done: false };
           return this.walk(key, { ...p, q }, async (cursor, ctx) => {
             const page = await g.threadIDs(q, cursor, ctx);
             return { items: page.ids.map((id) => ({ chatID: gmailChatID(g.email, id) })), next: page.next };

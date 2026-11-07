@@ -2,14 +2,15 @@
 // hello says sync.v1 once inbox.db is open and its first build has started; the first build fills
 // the window; sync_pull answers a snapshot then deltas that rebuild what inbox.db holds; Beeper's
 // changes and the owner's own actions go out as `sync` frames, the latter with the request's opId;
-// nothing is kept for a link that is down; a restart keeps the epoch.
+// Done on a busy group stays Done through inbox.db's reads; nothing is kept for a link that is down;
+// a restart keeps the epoch.
 import { afterAll, afterEach, beforeAll, describe, expect, test, setDefaultTimeout } from "bun:test";
 import { existsSync, mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CHAT_IDS, startFakeBeeper, type FakeBeeper } from "@j-inbox/fake-beeper";
 import { FAKE_GOOGLE_CLIENT, OWNER_EMAIL, THREADS, startFakeGoogle, type RunningFakeGoogle } from "@j-inbox/fake-google";
-import { MAX_FRAME_BYTES, parse, syncPullResult, type SyncChange, type SyncPullResult } from "@j-inbox/protocol";
+import { MAX_FRAME_BYTES, parse, syncPullResult, type EventFrame, type SyncChange, type SyncPullResult } from "@j-inbox/protocol";
 import { resolvePaths, saveConfig, type Paths } from "../src/config.ts";
 import { MemorySecretStore } from "../src/secrets.ts";
 import { startService } from "../src/service.ts";
@@ -184,6 +185,51 @@ describe("sync in the service", () => {
     await cloud.req("set_todo", { chatID: CHAT_IDS.imessageWeird, todo: false });
     await cloud.waitFor(() => changesIn(cloud).some((c) => c.op === "chat.upsert" && c.chat.id === CHAT_IDS.imessageWeird && c.chat.todo === false), 3000, "untagged");
     expect(changesIn(cloud).find((c) => c.op === "chat.upsert" && c.chat.id === CHAT_IDS.imessageWeird && c.chat.todo === false)!.opId).toBeUndefined();
+  });
+
+  test("Done on a busy group stays Done: inbox.db's reads of its newest 50 do not bring it back, nor does the owner's; a new message from someone else does", async () => {
+    const { cloud, paths } = await boot();
+    await cloud.waitFor(() => built(paths), 15_000, "first build");
+    await cloud.waitFor(() => fb.wsClientCount() === 1, 3000, "beeper ws");
+    // A busy group, as on the owner's Mac: more of its newest 50 are from others than the store keeps ids of (32). Each at its own time, after the start.
+    const id = CHAT_IDS.bigGroup;
+    let t = Date.now() - 200;
+    fb.state.now = () => (t += 2);
+    const got = Array.from({ length: 45 }, (_, i) => fb.state.receive(id, { text: `busy ${i}` }));
+    const newest = got.at(-1)!;
+    const upserts = (from = 0) => changesIn(cloud).slice(from).filter((c): c is Extract<SyncChange, { op: "chat.upsert" }> => c.op === "chat.upsert" && c.chat.id === id);
+    const flags = () => (cloud.events() as EventFrame[]).flatMap((e) => (e.kind === "chat" && e.chatID === id && e.todo !== undefined ? [e.todo] : []));
+    const reads = () => fb.state.calls.filter((c) => c.route === "GET /v1/chats/{chatID}/messages" && c.params.chatID === id).length;
+    // Until inbox.db has read it for what came, and nothing more moves.
+    const settled = async () => {
+      for (let n = -1, r = -1; n !== changesIn(cloud).length || r !== reads(); await Bun.sleep(400)) (n = changesIn(cloud).length), (r = reads());
+    };
+    await cloud.waitFor(() => upserts().at(-1)?.chat.preview?.id === newest.id && upserts().at(-1)?.chat.todo === true, 10_000, "the group in To do");
+    await settled();
+    const from = changesIn(cloud).length;
+    const flagsFrom = flags().length;
+    const done = await cloud.req("set_todo", { chatID: id, todo: false, upTo: newest.timestamp }, { opId: "op_done00001" });
+    expect(done.res).toMatchObject({ ok: true, data: { chatID: id, todo: false } });
+    expect(await cloud.waitFor(() => upserts(from)[0], 3000, "Done's change")).toMatchObject({ opId: "op_done00001", chat: { todo: false } });
+    // Changes at Beeper that are no message, past the opId's linger: inbox.db reads the chat again (its newest 50) each time.
+    await Bun.sleep(3200);
+    const readsFrom = reads();
+    for (let i = 0; i < 3; i++) {
+      fb.state.emitChat(fb.state.chats.get(id)!);
+      await settled();
+    }
+    expect(reads()).toBeGreaterThanOrEqual(readsFrom + 3);
+    expect(flags().slice(flagsFrom)).toEqual([false]);
+    expect(upserts(from).map((c) => ({ todo: c.chat.todo, opId: c.opId ?? null }))).toEqual([{ todo: false, opId: "op_done00001" }]);
+    // The owner reading it (the newest 50, as the page asks above the replica): still Done.
+    for (let i = 0; i < 3; i++) expect((await cloud.req("read_chat", { chatID: id, limit: 50 })).res.data).toMatchObject({ chat: { todo: false } });
+    expect(((await cloud.req("unread_summary", { limit: 1, todo: true })).res.data as any).items.map((c: any) => c.id)).not.toContain(id);
+    await settled();
+    expect(flags().slice(flagsFrom)).toEqual([false]);
+    // Someone writing after Done brings it back.
+    const m = fb.state.receive(id, { text: "after done" });
+    await cloud.waitFor(() => upserts().at(-1)?.chat.preview?.id === m.id && upserts().at(-1)?.chat.todo === true, 5000, "back in To do");
+    expect(flags().at(-1)).toBe(true);
   });
 
   test("a chat archived and deleted at Beeper leaves the replica", async () => {

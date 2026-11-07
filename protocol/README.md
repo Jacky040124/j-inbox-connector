@@ -648,7 +648,9 @@ empty Beeper page ends the walk even if `hasMore` was true (real iMessage histor
 The owner's computer is the only truth about the inbox; the page keeps a replica of it. The
 connector keeps the window (chats active in the last `SYNC_WINDOW_DAYS` = 90 days, or not
 archived; each with its newest `SYNC_MESSAGES_PER_CHAT` = 50 messages) materialized in inbox.db and
-numbers every change in one changelog (`epoch`, `seq`).
+numbers every change in one changelog (`epoch`, `seq`). A Gmail thread is in the window only by its
+activity (archived or not), since an inbox keeps years of mail nobody archived; older threads are
+read with read_chat and list_chats as before.
 
 - **Changes** (`syncChange`): `chat.upsert {chat: ChatSummary}`, `chat.remove {chatID}`,
   `messages.upsert {chatID, messages}`, `messages.remove {chatID, messageIDs}`; each with `seq`, `at`

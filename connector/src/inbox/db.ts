@@ -14,8 +14,9 @@
 //
 // apply() is the one way in. In one transaction it writes chats/messages and appends to the
 // changelog only what really changed (the stored JSON is compared), then hands the new changes on
-// (onChanges: the next `sync` frame). Nothing else writes those three tables, so replaying the
-// changelog from empty gives exactly what they hold; the test suite checks that over random runs.
+// (onChanges: the next `sync` frame; `background`: the first build's, which may wait longer to go
+// out, push.ts). Nothing else writes those three tables, so replaying the changelog from empty
+// gives exactly what they hold; the test suite checks that over random runs.
 //   - chat.upsert of a chat outside the window is a chat.remove (when the chat was kept).
 //   - messages.upsert keeps a chat's newest SYNC_MESSAGES_PER_CHAT (window.ts), as a page does:
 //     messages that would fall out at once, and messages of a chat not kept, change nothing. The
@@ -48,8 +49,8 @@ export type InboxDBOptions = {
   now?: () => number;
   /** The newest changes always kept (default SYNC_CHANGELOG_KEEP). */
   keep?: number;
-  /** New changes, in seq order, after their transaction committed. */
-  onChanges?: (changes: SyncChange[]) => void;
+  /** New changes, in seq order, after their transaction committed; `background`: the first build's (apply's own flag). */
+  onChanges?: (changes: SyncChange[], background: boolean) => void;
   /** 32 bytes: the JSON is sealed with it. None: kept as it is (memory only, tests). */
   key?: Uint8Array | null;
   log?: (msg: string) => void;
@@ -263,8 +264,8 @@ export class InboxDB {
     return () => this.watchers.delete(fn);
   }
 
-  /** Apply what a source says; the changes it made (none when nothing changed), in seq order. */
-  apply(intent: SyncIntent, opId?: string): SyncChange[] {
+  /** Apply what a source says; the changes it made (none when nothing changed), in seq order. `background`: the first build's read. */
+  apply(intent: SyncIntent, opId?: string, background = false): SyncChange[] {
     if (this.closed) return [];
     const at = new Date(this.now()).toISOString();
     const out: SyncChange[] = [];
@@ -289,7 +290,7 @@ export class InboxDB {
     if (out.length) {
       this.compact();
       try {
-        this.o.onChanges?.(out);
+        this.o.onChanges?.(out, background);
       } catch {}
     }
     return out;
@@ -472,7 +473,9 @@ export class InboxDB {
 
   /** Kept chats that time has taken out of the window (archived, and no activity in SYNC_WINDOW_DAYS days). */
   outOfWindow(): string[] {
-    return (this.db.query("SELECT json FROM chats WHERE archived = 1 AND last_activity < ?").all(this.now() - WINDOW_MS) as { json: Stored }[]).map((r) => (JSON.parse(this.box.open(r.json)) as ChatSummary).id);
+    // Older than the window: archived, or (a Gmail thread) whatever its archive state; inWindow decides.
+    const now = this.now();
+    return (this.db.query("SELECT json FROM chats WHERE last_activity < ?").all(now - WINDOW_MS) as { json: Stored }[]).map((r) => JSON.parse(this.box.open(r.json)) as ChatSummary).filter((c) => !inWindow(c, now)).map((c) => c.id);
   }
 
   /** How many chats are kept. */

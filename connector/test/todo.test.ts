@@ -150,6 +150,87 @@ describe("the rule: a message from someone else later than anything known", () =
   });
 });
 
+describe("a busy chat: more messages from others on a page than the store keeps ids of", () => {
+  // A group of 142 people: the newest 50 a read brings (inbox.db's, the page's) hold more of others' messages than MAX_IDS (32).
+  const busy = (n: number, from = T0 + min) => Array.from({ length: n }, (_, i) => msg(`b${i}`, from + i * 1000));
+  const shown = (items: MessageItem[]) => chat({ type: "group", lastActivity: items.at(-1)!.timestamp, preview: items.at(-1)! });
+
+  test("Done stays Done through any number of reads of the newest 50, after a list saw the newest first; a new message brings it back", () => {
+    const { store } = settled();
+    const items = busy(50);
+    store.see(shown(items));
+    expect(store.isTodo("c1")).toBe(true);
+    store.seeRead(shown(items), items);
+    expect(store.setOwner("c1", false, { upTo: Date.parse(items.at(-1)!.timestamp) })).toBe(false);
+    for (let i = 0; i < 5; i++) {
+      expect(store.seeRead(shown(items), items).changed).toBe(false);
+      expect(store.see(shown(items)).changed).toBe(false);
+      expect(store.isTodo("c1")).toBe(false);
+    }
+    // A shorter read (the tracker's 20, a page's first screen) neither.
+    store.seeRead(shown(items), items.slice(-20));
+    expect(store.isTodo("c1")).toBe(false);
+    const next = [...items, msg("b50", Date.parse(items.at(-1)!.timestamp) + 1000)];
+    expect(store.seeRead(shown(next), next.slice(-50)).changed).toBe(true);
+    expect(store.isTodo("c1")).toBe(true);
+  });
+
+  test("Done without upTo, with messages arriving one by one by events: the same", () => {
+    const { store } = settled();
+    const items = busy(45);
+    for (const m of items) store.noteOthers("c1", Date.parse(m.timestamp), { ids: [m.id] });
+    expect(store.isTodo("c1")).toBe(true);
+    for (let i = 0; i < 3; i++) store.seeRead(shown(items), items);
+    store.setOwner("c1", false);
+    for (let i = 0; i < 5; i++) store.seeRead(shown(items), items);
+    expect(store.isTodo("c1")).toBe(false);
+  });
+
+  test("a message heard while a read was out stays known: the read's older page does not push it out", () => {
+    const { store } = settled();
+    const items = busy(50);
+    store.seeRead(shown(items), items);
+    const late = msg("late", Date.parse(items.at(-1)!.timestamp) + 1000);
+    store.noteOthers("c1", Date.parse(late.timestamp), { ids: [late.id] });
+    // The read that started before it came.
+    store.seeRead(shown(items), items);
+    store.setOwner("c1", false, { upTo: Date.parse(late.timestamp) });
+    const now = [...items.slice(1), late];
+    store.see(shown(now));
+    store.seeRead(shown(now), now);
+    expect(store.isTodo("c1")).toBe(false);
+  });
+
+  test("through the tracker: read_chat results of the newest 50, as the dispatcher hands them over, leave Done alone", () => {
+    const { store } = settled();
+    const told: boolean[] = [];
+    const t = new TodoTracker({ store, onChange: (_, todo) => told.push(todo), now: () => T0 + 60 * min });
+    const items = busy(50);
+    t.seeResult("list_chats", { items: [shown(items)] });
+    t.seeResult("read_chat", { chat: shown(items), items, hasMore: true }, { chatID: "c1", limit: 50 });
+    expect(t.setByOwner("c1", false, { upTo: Date.parse(items.at(-1)!.timestamp) })).toBe(false);
+    for (let i = 0; i < 4; i++) t.seeResult("read_chat", { chat: shown(items), items, hasMore: true }, { chatID: "c1", limit: 50 });
+    expect(store.isTodo("c1")).toBe(false);
+    expect(told).toEqual([true, false]);
+    t.stop();
+  });
+
+  test("the ids kept are the newest, also on disk", () => {
+    const dir = mkdtempSync(join(tmpdir(), "jinbox-todo-busy-"));
+    const path = join(dir, "todo.json");
+    const { store } = settled({ path });
+    const items = busy(50);
+    store.see(shown(items));
+    store.seeRead(shown(items), items);
+    store.setOwner("c1", false);
+    store.flush();
+    const again = new TodoStore({ path, now: () => T0 + 60 * min });
+    again.seeRead(shown(items), items);
+    again.see(shown(items));
+    expect(again.isTodo("c1")).toBe(false);
+  });
+});
+
 describe("the scope is the Unread tab's", () => {
   test("archived, low priority: stored, but not To do while there; back in the inbox with nobody having handled it, it is", () => {
     const { store } = settled();

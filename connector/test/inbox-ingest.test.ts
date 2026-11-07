@@ -8,6 +8,8 @@ import type { Outcome } from "../src/actions.ts";
 import { InboxDB } from "../src/inbox/db.ts";
 import { InboxIngest } from "../src/inbox/ingest.ts";
 import { FirstBuild } from "../src/inbox/build.ts";
+import { openInbox } from "../src/inbox/index.ts";
+import { COALESCE_MS } from "../src/inbox/push.ts";
 
 // Random runs, whole services and first builds: slower than bun's 5 s default on a CI machine.
 setDefaultTimeout(30_000);
@@ -308,8 +310,22 @@ describe("the first build", () => {
     for (let i = 0; i < 200 && !db.meta("build.done"); i++) await Bun.sleep(5);
     expect(db.meta("build.done")).toBeTruthy();
     expect(b.asked).toEqual([null, null]);
-    expect(queries[0]).toBe(`(in:inbox OR after:${Math.floor((NOW - 90 * DAY) / 1000)}) -in:drafts`);
+    expect(queries[0]).toBe(`after:${Math.floor((NOW - 90 * DAY) / 1000)} -in:drafts`);
     expect([...db.dump().keys()].sort()).toEqual(["!1:x", gid]);
+  });
+
+  test("a Gmail walk left from 0.2.0's query (the whole inbox) starts again with the window's", async () => {
+    const { db, src, ingest } = setup();
+    const gid = "gmail:o@example.com:18c2f0a1b2c3d4e5";
+    src.chats.set(gid, { chat: chat(gid, { accountID: "gmail:o@example.com", network: "Gmail" }), items: [] });
+    db.setMeta("build:gmail:o@example.com", JSON.stringify({ cursor: "tok-of-the-old-query", done: false, q: "(in:inbox OR after:1) -in:drafts" }));
+    const asked: [string, string | null][] = [];
+    const gmail = { email: "o@example.com", threadIDs: async (q: string, cursor: string | null) => (asked.push([q, cursor]), { ids: ["18c2f0a1b2c3d4e5"], next: null }) };
+    const build = new FirstBuild({ db, ingest, gmail: () => [gmail], paceMs: 0, now: () => NOW });
+    build.start();
+    for (let i = 0; i < 200 && !db.meta("build.done"); i++) await Bun.sleep(5);
+    expect(asked).toEqual([[`after:${Math.floor((NOW - 90 * DAY) / 1000)} -in:drafts`, null]]);
+    expect([...db.dump().keys()]).toEqual([gid]);
   });
 
   test("it waits while the connector answers requests", async () => {
@@ -323,5 +339,50 @@ describe("the first build", () => {
     busy = false;
     for (let i = 0; i < 100 && !db.meta("build.done"); i++) await Bun.sleep(5);
     expect(src.reads).toEqual(["!1:x"]);
+  });
+
+  // The cloud relays at most DEVICE_SYNC_FRAMES_PER_MINUTE (600) `sync` frames a minute per device
+  // and drops the rest (then sends /live resync). A build reading a chat every paceMs made a frame
+  // per read (or two): on a fast Mac, about the whole budget.
+  test("a build of many chats goes out in few, fuller frames (at most about one a second); a live change during it still goes at once", async () => {
+    const src = source();
+    const list = Array.from({ length: 120 }, (_, i) => chat(`!b${i}:x`, { lastActivity: iso(NOW - DAY - i * 1000) }));
+    for (const c of list) src.chats.set(c.id, { chat: c, items: [msg(c.id, `$${c.id}`, "1")] });
+    src.chats.set("!live:x", { chat: chat("!live:x"), items: [msg("!live:x", "$live", "1")] });
+    const frames: { at: number; seqs: number[]; ops: string[]; chats: string[] }[] = [];
+    const inbox = openInbox({
+      path: ":memory:",
+      read: src.read,
+      beeperPage: async (cursor) => {
+        const from = cursor ? Number(cursor) : 0;
+        return { items: list.slice(from, from + 20), next: from + 20 < list.length ? String(from + 20) : null };
+      },
+      send: (f) => (frames.push({ at: Date.now(), seqs: f.changes.map((c) => c.seq), ops: f.changes.map((c) => c.op), chats: f.changes.map((c) => (c.op === "chat.upsert" ? c.chat.id : c.chatID)) }), true),
+      connected: () => true,
+      paceMs: 15,
+      now: () => NOW,
+    });
+    try {
+      inbox.build.start();
+      // A new message somewhere while the build runs: its change does not wait for the build's.
+      await Bun.sleep(400);
+      const asked = Date.now();
+      await inbox.ingest.refresh("!live:x");
+      for (let i = 0; i < 2000 && !inbox.db.meta("build.done"); i++) await Bun.sleep(5);
+      expect(inbox.db.meta("build.done")).toBeTruthy();
+      await Bun.sleep(1500);
+      const live = frames.find((f) => f.chats.includes("!live:x"))!;
+      expect(live.at - asked).toBeLessThan(COALESCE_MS + 250);
+      // Every change went, in seq order, none twice.
+      expect(frames.flatMap((f) => f.seqs)).toEqual(Array.from({ length: inbox.db.head() }, (_, i) => i + 1));
+      expect(inbox.db.chatCount()).toBe(121);
+      // In any second, at most two frames (the build's and the live change's).
+      const build = frames.filter((f) => f !== live);
+      for (const f of frames) expect(frames.filter((g) => g.at >= f.at && g.at < f.at + 1000).length).toBeLessThanOrEqual(2);
+      // 120 chats read 15 ms apart (~2 s): a handful of frames, not one or two a chat.
+      expect(build.length).toBeLessThanOrEqual(6);
+    } finally {
+      inbox.stop();
+    }
   });
 });

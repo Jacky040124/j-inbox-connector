@@ -8,7 +8,8 @@
 //   - One read per chat at a time, at most `concurrency` chats at once: a chat asked for again while
 //     it is being read is read once more after (the first read may have started before the change).
 //     A read that fails otherwise (Beeper down, a timeout) is tried again a few times, later.
-//   - The first build's reads (background) wait behind everything else.
+//   - The first build's reads (background) wait behind everything else, and what they change is
+//     applied as the build's (push.ts lets it wait longer for the changes behind it).
 //   - The owner's own action on a chat (begin/end, from the dispatcher) holds that chat's reads
 //     while it runs; when it is done the chat is read with the request's opId, so what it caused
 //     carries it, and for LINGER_MS more any change to the chat does too (Beeper may say what a
@@ -224,19 +225,21 @@ export class InboxIngest {
     }
     if (this.stopped || !this.o.db.isOpen || (this.gen.get(j.chatID) ?? 0) !== gen) return;
     const opId = j.opId ?? this.lingering(j.chatID);
+    // The build's read, unless the owner's request waits for what it brings.
+    const bg = j.background && !opId;
     if (r && !r.ok && r.error.code === "NOT_FOUND") return this.removeChat(j.chatID, opId);
     if (!r || !r.ok) return this.retry(j);
     const { chat, items } = r.data;
     // A read answers the chat it was asked for; anything else is not applied.
     if (chat.id !== j.chatID) return;
-    this.apply({ op: "chat.upsert", chat: withPreview(chat, items) }, opId);
+    this.apply({ op: "chat.upsert", chat: withPreview(chat, items) }, opId, bg);
     if (!items.length || !this.o.db.chat(chat.id)) return;
-    this.apply({ op: "messages.upsert", chatID: chat.id, messages: [...items].sort(newestFirst).slice(0, SYNC_MESSAGES_PER_CHAT) }, opId);
+    this.apply({ op: "messages.upsert", chatID: chat.id, messages: [...items].sort(newestFirst).slice(0, SYNC_MESSAGES_PER_CHAT) }, opId, bg);
     // Kept messages in the range this read covered that it did not return: deleted (or hidden) since.
     const oldest = [...items].sort(newestFirst).at(-1)!;
     const present = new Set(items.map((m) => m.id));
     const gone = this.o.db.messageIDsFrom(chat.id, oldest.sortKey).filter((id) => !present.has(id));
-    if (gone.length) this.apply({ op: "messages.remove", chatID: chat.id, messageIDs: gone }, opId);
+    if (gone.length) this.apply({ op: "messages.remove", chatID: chat.id, messageIDs: gone }, opId, bg);
   }
 
   private retry(j: Job) {

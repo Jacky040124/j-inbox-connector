@@ -16,13 +16,14 @@
 //   A page whose epoch differs from the connector's throws its replica away and takes a snapshot.
 // - A change caused by the owner's own request carries that request's opId (reqFrame.opId): the
 //   page's optimistic copy of that request is done when it sees it.
-// - Only chats in the window are kept: active in the last SYNC_WINDOW_DAYS days, or not archived.
+// - Only chats in the window are kept: active in the last SYNC_WINDOW_DAYS days, or (Beeper chats)
+//   not archived. A Gmail thread is kept only by its activity (2026-11-07: an inbox keeps years of mail).
 //   A chat that leaves the window (archived and older) is removed with `chat.remove`; an older one
 //   is still read with read_chat / list_chats as before.
 import { array, boolean, discriminated, integer, isoDateTime, literal, nullable, object, optional, string, type Infer } from "./schema.ts";
 import { chatID, chatSummary, messageID, messageItem } from "./model.ts";
 
-/** A chat in the window was active this recently, or is not archived. */
+/** A chat in the window was active this recently, or (a Beeper chat) is not archived. */
 export const SYNC_WINDOW_DAYS = 90;
 /** The newest messages kept per chat (and sent per chat in a snapshot). Older ones: read_chat. */
 export const SYNC_MESSAGES_PER_CHAT = 50;

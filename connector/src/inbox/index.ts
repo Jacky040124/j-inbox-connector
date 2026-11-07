@@ -50,6 +50,7 @@ export type InboxOptions = {
   keep?: number;
   paceMs?: number;
   coalesceMs?: number;
+  buildCoalesceMs?: number;
   sweepMs?: number;
   log?: (msg: string) => void;
 };
@@ -69,9 +70,9 @@ export type Inbox = SyncHooks & {
 /** Open inbox.db and put the parts together. Throws when inbox.db cannot be opened (the service then goes without sync). */
 export function openInbox(o: InboxOptions): Inbox {
   let pusher: SyncPusher | null = null;
-  const db = InboxDB.open({ path: o.path, key: o.key, now: o.now, keep: o.keep, log: o.log, onChanges: (c: SyncChange[]) => pusher?.push(c) });
+  const db = InboxDB.open({ path: o.path, key: o.key, now: o.now, keep: o.keep, log: o.log, onChanges: (c: SyncChange[], background: boolean) => pusher?.push(c, background) });
   if (db.created) o.log?.("inbox: a new inbox.db (a new epoch)");
-  pusher = new SyncPusher({ epoch: db.epoch, send: o.send, connected: o.connected, coalesceMs: o.coalesceMs });
+  pusher = new SyncPusher({ epoch: db.epoch, send: o.send, connected: o.connected, coalesceMs: o.coalesceMs, buildCoalesceMs: o.buildCoalesceMs });
   const ingest = new InboxIngest({ db, read: o.read, now: o.now, log: o.log });
   const build = new FirstBuild({ db, ingest, beeperPage: o.beeperPage, gmail: o.gmail, paceMs: o.paceMs, busy: o.busy, now: o.now, log: o.log });
   const sweep = () => {

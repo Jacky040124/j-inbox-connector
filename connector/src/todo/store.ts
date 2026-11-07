@@ -25,7 +25,7 @@ const MAX_SOURCES = 64;
 const MAX_FORGOT = MAX_TODO_ENTRIES;
 /** What observations wait before they go to disk: a burst is one write, and what a crash loses is seen again on the next start. */
 const WRITE_DELAY_MS = 1_000;
-/** Messages per chat whose ids are remembered, as short hashes: the same one seen again is not new, whatever its clock says. */
+/** Messages per chat whose ids are remembered (the newest), as short hashes: the same one seen again is not new, whatever its clock says. */
 const MAX_IDS = 32;
 /** The owner's Done on a chat the store has never heard of, with nothing said of what was on screen: this far back from this computer's clock (it may be fast). */
 const CLOCK_MARGIN_MS = 5 * 60_000;
@@ -129,17 +129,25 @@ const isUnread = (c: ChatSummary) => c.unreadCount > 0 || c.isMarkedUnread === t
 const beforeCut = (s: SourceState, at: number) => s.cut !== undefined && at !== 0 && at < s.cut;
 const idHash = (id: string) => createHash("sha256").update(id).digest("base64url").slice(0, 12);
 const knows = (e: TodoEntry | undefined, id: string | undefined) => id !== undefined && !!e?.ids?.includes(idHash(id));
+/**
+ * These messages are known here: `ids` oldest first, as a read's page or a thread has them, so the newest is last. What is kept is the newest
+ * MAX_IDS, oldest first. A busy chat's page has more than that, and what goes must be its oldest, never the one `others` stands for: else the
+ * next look at that one takes it for another message at the same time, and a Done chat is To do again (task #57: inbox.db reads 50). So the
+ * page goes in its own order, the ids already kept included; what was kept after the last of those (heard while the read was out) stays after it.
+ */
 function remember(e: TodoEntry, ids: readonly (string | undefined)[]): boolean {
-  let changed = false;
-  for (const id of ids) {
-    if (id === undefined) continue;
-    const h = idHash(id);
-    if (e.ids?.includes(h)) continue;
-    (e.ids ??= []).push(h);
-    changed = true;
-  }
-  if (e.ids && e.ids.length > MAX_IDS) e.ids = e.ids.slice(-MAX_IDS);
-  return changed;
+  const page = [...new Set(ids.filter((id): id is string => id !== undefined).map(idHash))];
+  if (!page.length) return false;
+  const kept = e.ids ?? [];
+  const onPage = new Set(page);
+  let last = -1;
+  kept.forEach((h, i) => {
+    if (onPage.has(h)) last = i;
+  });
+  const next = [...kept.slice(0, last === -1 ? kept.length : last).filter((h) => !onPage.has(h)), ...page, ...(last === -1 ? [] : kept.slice(last + 1))].slice(-MAX_IDS);
+  if (next.length === kept.length && next.every((h, i) => h === kept[i])) return false;
+  e.ids = next;
+  return true;
 }
 
 export type SeeResult = { changed: boolean; /** Someone may have written before the owner's latest: read the chat. */ needsRead: boolean };
