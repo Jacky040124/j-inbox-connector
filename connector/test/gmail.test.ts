@@ -41,7 +41,7 @@ beforeEach(() => {
 async function make(o: { accounts?: string[]; scan?: { maxPages?: number; budgetMs?: number } } = {}) {
   const secrets = new MemorySecretStore();
   const life: string[] = [];
-  const gmail = createGmailService({ secrets, refresh: cloudTokenRefresher({ cloudURL: cloud.url, deviceToken: DEVICE_TOKEN }), gmailURL: fg.url, oauthURL: fg.url, scan: o.scan, onLifecycle: (e) => life.push(e) });
+  const gmail = createGmailService({ secrets, refresh: cloudTokenRefresher({ cloudURL: cloud.url, deviceToken: DEVICE_TOKEN }), gmailURL: fg.url, oauthURL: fg.url, scan: o.scan, onLifecycle: (e) => life.push(e), pacing: { maxRequestsPerSecond: 10_000, retryDelaysMs: [5, 10] } });
   const tokens: Record<string, string> = {};
   for (const e of o.accounts ?? [OWNER_EMAIL]) await gmail.accounts.add(e, (tokens[e] = fg.google.issueRefreshToken(e)));
   const client = createBeeperClient({ baseURL: fb.url, token: fb.token, timeoutMs: 5000 });

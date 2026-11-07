@@ -185,8 +185,10 @@ export async function startFakeCloud(o: FakeCloudOptions = {}) {
     waitFor,
     hello: (n?: number) => frames.find((f) => f.frame.type === "hello" && (n === undefined || f.n === n))?.frame,
     events: () => frames.filter((f) => f.frame.type === "event").map((f) => f.frame),
-    /** Send a req on the newest socket and resolve with its res (+ chunks for media). */
-    req(action: string, params: unknown = {}, opts: { id?: string; timeoutMs?: number } = {}): Promise<Reply> {
+    /** `sync` frames the connector sent ("sync.v1"). */
+    syncs: () => frames.filter((f) => f.frame.type === "sync").map((f) => f.frame as Extract<ConnectorFrame, { type: "sync" }>),
+    /** Send a req on the newest socket and resolve with its res (+ chunks for media). opId: the page's, as the cloud puts it on the req ("sync.v1"). */
+    req(action: string, params: unknown = {}, opts: { id?: string; timeoutMs?: number; opId?: string } = {}): Promise<Reply> {
       const id = opts.id ?? `r${++reqSeq}`;
       const p = new Promise<Reply>((resolve, reject) => {
         waiting.set(id, { resolve, chunks: [] });
@@ -194,7 +196,7 @@ export async function startFakeCloud(o: FakeCloudOptions = {}) {
           if (waiting.delete(id)) reject(new Error(`no answer for ${id} (${action})`));
         }, opts.timeoutMs ?? 5000);
       });
-      current()!.send(JSON.stringify({ type: "req", id, action, params }));
+      current()!.send(JSON.stringify({ type: "req", id, action, params, ...(opts.opId ? { opId: opts.opId } : {}) }));
       return p;
     },
     sendRaw(text: string | Uint8Array) {

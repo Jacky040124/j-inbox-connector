@@ -1,10 +1,12 @@
 // The background service (`j-inbox run`, started by launchd): Beeper client + whitelist dispatcher
 // + cloud link + Beeper events + health checks + re-sync + the noise judge (every conversation with
 // new activity, Beeper's or Gmail's, is asked about) + To do, with the local audit log and a small
-// metadata-only state file that `j-inbox status` reads.
+// metadata-only state file that `j-inbox status` reads. And the inbox kept for sync (inbox/, "sync.v1"):
+// inbox.db hears of every chat and message event the connector sends (or would send, while the cloud
+// link is down), reads those chats again, and its changes go to the cloud as `sync` frames.
 import { watchContacts } from "./contacts.ts";
 import { readFileSync } from "node:fs";
-import type { EventFrame } from "@j-inbox/protocol";
+import { SYNC_MESSAGES_PER_CHAT, type EventFrame } from "@j-inbox/protocol";
 import { createActions, createWriteDedupe } from "./actions.ts";
 import { AssetAllowlist } from "./assets.ts";
 import { AuditLog } from "./audit.ts";
@@ -33,6 +35,7 @@ import { ThreadMetaCache } from "./gmail/meta-cache.ts";
 import { isStorableSecret } from "./secrets.ts";
 import { randomBytes } from "node:crypto";
 import { UPDATE_COMMAND } from "./version.ts";
+import { openInbox, readThrough, type Inbox } from "./inbox/index.ts";
 
 export type ServiceOptions = {
   paths: Paths;
@@ -50,6 +53,8 @@ export type ServiceOptions = {
   gmailActivePollIntervalMs?: number;
   /** The noise judge's collection window (tests). */
   noiseDebounceMs?: number;
+  /** The inbox's first build: between two reads (tests; default 100 ms). */
+  inboxPaceMs?: number;
 };
 
 export type ExitReason = "not_paired" | "no_beeper_token" | "config_error" | "shutdown" | "revoked" | "unauthenticated" | "replaced" | "version";
@@ -115,6 +120,25 @@ async function gmailCacheKey(secrets: SecretStore, paths: Paths, create: boolean
       if (!create && !new GmailAccounts({ path: paths.gmailFile, secrets }).list().length) return null;
       k = randomBytes(32).toString("base64url");
       await secrets.set("gmail-cache-key", k);
+    }
+    const b = isStorableSecret(k) ? Buffer.from(k, "base64url") : null;
+    return b && b.length === 32 ? b : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The key that seals inbox.db (the inbox kept for sync): from the Keychain, made there (32 random
+ * bytes) the first time. null when the Keychain cannot be used: inbox.db then stays in memory (a new
+ * epoch every start, so pages take a snapshot), never on disk in the clear.
+ */
+async function inboxKey(secrets: SecretStore): Promise<Uint8Array | null> {
+  try {
+    let k = await secrets.get("inbox-key");
+    if (!k) {
+      k = randomBytes(32).toString("base64url");
+      await secrets.set("inbox-key", k);
     }
     const b = isStorableSecret(k) ? Buffer.from(k, "base64url") : null;
     return b && b.length === 32 ? b : null;
@@ -207,6 +231,7 @@ export async function startService(o: ServiceOptions): Promise<Service> {
       // The first Gmail account: from now on its list metadata is kept on disk too (sealed).
       if (e === "gmail.connected" && !metaCache.persistent) void gmailCacheKey(o.secrets, o.paths, true).then((k) => k && metaCache.persistTo(o.paths.gmailCacheFile, k));
       if (e === "gmail.connected") void todo.sync();
+      if (e === "gmail.connected") inbox?.build.kick();
     },
     onNewAccount: (email) => todo.meetAccount(email),
     onChat: (c) => senders.seeChat(c),
@@ -229,14 +254,40 @@ export async function startService(o: ServiceOptions): Promise<Service> {
   });
   // Connecting chat apps from the page: Beeper's own sign-in, and for a website sign-in a window on this Mac.
   const chatLogin = createChatLogin({ client, windows: createSigninWindows({ executable: signinExe }) });
-  const dispatcher = createDispatcher({ actions, client, assets, gmail, idempotency, drafts, uploads, noise, judge, todo, senders, chatLogin });
+  // The inbox kept for sync. inbox.db that cannot be opened: the service runs without sync (no "sync.v1" in the hello).
+  let inbox: Inbox | null = null;
+  const key = await inboxKey(o.secrets);
+  if (!key) log("inbox: no key in the Keychain, so inbox.db is kept in memory only");
+  try {
+    inbox = openInbox({
+      path: key ? o.paths.inboxFile : ":memory:",
+      key,
+      // Late-bound: the dispatcher is made with the inbox's hooks.
+      read: (chatID, ctx) => readThrough((a, p, c) => dispatcher.dispatch(a, p, c), SYNC_MESSAGES_PER_CHAT)(chatID, ctx),
+      beeperPage: (cursor, ctx) => actions.internals.chatsPage(cursor, ctx),
+      gmail: sourcesNow,
+      send: (f) => link.sendSync(f),
+      connected: () => connected(),
+      allow: (u) => assets.add(u),
+      busy: () => {
+        const s = link?.stats();
+        return !!s && s.running + s.queued > 0;
+      },
+      paceMs: o.inboxPaceMs,
+      log: (m) => log(m),
+    });
+  } catch (e) {
+    log(`inbox: inbox.db could not be opened, so sync is off (${(e as Error).name})`);
+  }
+  const dispatcher = createDispatcher({ actions, client, assets, gmail, idempotency, drafts, uploads, noise, judge, todo, senders, chatLogin, inbox });
   readChat = dispatcher.readChat;
 
   let link: CloudLink;
   // Chat and message events while the cloud link is down wait here (bounded) for the next welcome.
   const pending = new EventBuffer();
   const connected = () => link?.state.status === "connected";
-  const emit = (f: EventFrame) => link.sendEvent(f) || (!connected() && pending.add(f));
+  // inbox.db hears of every change, whether the cloud link is up or not.
+  const emit = (f: EventFrame) => (inbox?.onEvent(f), link.sendEvent(f) || (!connected() && pending.add(f)));
   // New activity (a message in, or the owner's own out) is judged again, and To do hears who wrote; the event goes on as before.
   const touch = (f: EventFrame) => {
     if (f.kind === "message" && f.op === "upserted") judge.touch(f.chatID, f.messageIDs);
@@ -244,7 +295,7 @@ export async function startService(o: ServiceOptions): Promise<Service> {
   };
   const send = (f: EventFrame) => (touch(f), emit(f));
   // Gmail keeps its own place in history instead: true only when the event really went out.
-  const sendNow = (f: EventFrame) => (touch(f), link.sendEvent(f));
+  const sendNow = (f: EventFrame) => (touch(f), inbox?.onEvent(f), link.sendEvent(f));
   let lastBeeper = "";
   const health = new HealthMonitor({
     client,
@@ -279,6 +330,8 @@ export async function startService(o: ServiceOptions): Promise<Service> {
     onOpen: () => {
       void reconciler.run();
       void todo.sync();
+      // Beeper may have been down when the first build tried.
+      inbox?.build.kick();
     },
     log: (m) => log(m),
   });
@@ -305,6 +358,7 @@ export async function startService(o: ServiceOptions): Promise<Service> {
     deviceID: config.deviceID,
     connectorVersion: o.version,
     dispatcher,
+    syncReady: () => inbox?.ready() ?? false,
     socketFactory: o.socketFactory,
     backoff: o.backoff,
     hello: async () => {
@@ -356,6 +410,7 @@ export async function startService(o: ServiceOptions): Promise<Service> {
       // Sign-ins in progress are cancelled on Beeper, and a sign-in window closes.
       await chatLogin.stop().catch(() => {});
       await link.stop(graceMs);
+      inbox?.stop();
       try {
         assets.flush();
       } catch {}
@@ -367,6 +422,9 @@ export async function startService(o: ServiceOptions): Promise<Service> {
   log(`j-inbox ${o.version}: starting (device ${config.deviceID})`);
   todo.start();
   senders.start();
+  // Before the link: the hello says "sync.v1" once the first build has started.
+  inbox?.build.start();
+  inbox?.sweep();
   health.start();
   events.start();
   gmail.startPolling(sendNow, connected);

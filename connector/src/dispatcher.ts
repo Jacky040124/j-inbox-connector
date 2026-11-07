@@ -10,6 +10,11 @@
 // add_noise_sender_of_chat and remove_noise_sender keep the noise list of senders (noise/senders.ts). Chats in every result carry their noise mark (noise/store.ts decorate) and To do flag.
 // chat_apps and chat_login_* connect the owner's chat apps through Beeper's own sign-in (chat-login.ts): owner only, and what
 // the owner types passes through to Beeper without being kept or logged.
+// sync_pull answers from inbox.db ("sync.v1", inbox/): a delta or a snapshot of the window. The owner's actions on a chat hold
+// that chat's reads in inbox.db while they run, then read it with the request's opId (ctx.opId, from reqFrame.opId), so the
+// changes they caused carry it. With an opId (a page that syncs) the answer goes once those changes are in inbox.db (or after
+// SYNC_WAIT_MS, and never past the request's deadline), so the page's optimistic copy never outlives the answer by much; without one
+// nothing waits.
 import {
   ACTIONS,
   encodeFrame,
@@ -43,6 +48,7 @@ import { conversationOf, exampleOf } from "./noise/jev.ts";
 import { TodoStore } from "./todo/store.ts";
 import { TodoTracker } from "./todo/tracker.ts";
 import { createChatLogin, type ChatLogin } from "./chat-login.ts";
+import type { SyncHooks } from "./inbox/index.ts";
 
 export type DispatchResult =
   | { kind: "res"; ok: true; data: unknown; error?: undefined }
@@ -52,6 +58,27 @@ export type DispatchResult =
 type Handler = (p: any, ctx: RequestContext) => Promise<DispatchResult>;
 
 const fail = (code: ErrorBody["code"], message: string): DispatchResult => ({ kind: "res", ok: false, error: makeError(code, message) });
+
+/**
+ * The owner's actions that change one chat (its row, its messages, its To do or noise mark): inbox.db reads it again after, with the opId.
+ * Others that change chats do it through the noise and To do stores' own events, with no opId (README "Which owner's actions put
+ * their opId"): set_noise_definition, add_noise_sender, remove_noise_sender, add_older_unread, gmail_connect, and the other chats of
+ * the sender add_noise_sender_of_chat names. A page ends its copy of those on the answer.
+ */
+const CHAT_ACTIONS: ReadonlySet<string> = new Set(["send_message", "react", "mark_read", "archive", "draft_reply", "set_todo", "set_noise", "add_noise_sender_of_chat"]);
+/** The longest an answer waits for inbox.db to take in what its action changed. */
+export const SYNC_WAIT_MS = 3_000;
+/**
+ * And never closer than this to the request's deadline (ctx.deadline): the cloud link's watchdog
+ * answers a started write UNKNOWN_OUTCOME ("Check before trying again") soon after it, and a write
+ * that did what it was asked must not be told so because inbox.db was slow to read it back (a slow
+ * Beeper, or the read queued behind the Reconciler's). The page's copy then ends with the answer.
+ */
+export const SYNC_WAIT_MARGIN_MS = 100;
+const atMost = (p: Promise<unknown>, ms: number) => {
+  let t: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([p.catch(() => {}), new Promise((r) => (t = setTimeout(r, ms)))]).finally(() => clearTimeout(t));
+};
 
 /** The upload store's refusals (UploadError) as answers. */
 function upload(fn: () => DispatchResult): DispatchResult {
@@ -136,6 +163,8 @@ export function createDispatcher(o: {
   senders?: SenderRules;
   /** Connecting chat apps (chat-login.ts). Without one (tests): over this dispatcher's client, with no sign-in window on the Mac. */
   chatLogin?: ChatLogin;
+  /** The inbox kept for sync (inbox/). Without one: sync_pull is NOT_SUPPORTED (and the hello does not say "sync.v1"). */
+  inbox?: SyncHooks | null;
 }) {
   // Without a file (tests): in memory.
   const drafts = o.drafts ?? new DraftStore();
@@ -157,7 +186,7 @@ export function createDispatcher(o: {
     return r.ok ? { kind: "res", ok: true, data: r.value } : fail("INTERNAL", "The connector produced an invalid result.");
   };
   const via =
-    (name: Exclude<ConnectorActionName, "get_media" | "get_email_html" | "discard_upload" | `draft_store_${string}` | `upload_store_${string}` | "get_noise_settings" | "set_noise_definition" | "set_noise" | "get_noise_senders" | "add_noise_sender" | "add_noise_sender_of_chat" | "remove_noise_sender" | "set_todo" | "get_older_unread" | "add_older_unread" | "chat_apps" | `chat_login_${string}`>): Handler =>
+    (name: Exclude<ConnectorActionName, "get_media" | "get_email_html" | "discard_upload" | `draft_store_${string}` | `upload_store_${string}` | "get_noise_settings" | "set_noise_definition" | "set_noise" | "get_noise_senders" | "add_noise_sender" | "add_noise_sender_of_chat" | "remove_noise_sender" | "set_todo" | "sync_pull" | "get_older_unread" | "add_older_unread" | "chat_apps" | `chat_login_${string}`>): Handler =>
     async (p, ctx) => {
       const r = await (router[name] as (p: unknown, ctx: RequestContext) => Promise<{ ok: boolean; data?: unknown; error?: ErrorBody }>)(p, ctx);
       if (!r.ok) return { kind: "res", ok: false, error: r.error! };
@@ -262,6 +291,12 @@ export function createDispatcher(o: {
       return r.ok ? checked("add_noise_sender_of_chat", r.data) : { kind: "res", ok: false, error: r.error };
     },
     remove_noise_sender: async (p: { entry: string; undo?: boolean }) => checked("remove_noise_sender", { entry: p.entry, removed: senders.remove(p.entry, { undo: p.undo }) }),
+    // sync.v1 (task #57): inbox.db answers it. Without an inbox (it could not be opened) the hello does not say sync.v1, so the cloud does not ask.
+    sync_pull: async (p: { epoch?: string | null; cursor?: number | null; page?: string }) => {
+      if (!o.inbox) return fail("NOT_SUPPORTED", "This computer does not keep the inbox for sync.");
+      const r = o.inbox.pull(p);
+      return r.ok ? checked("sync_pull", r.data) : { kind: "res", ok: false, error: r.error };
+    },
     set_todo: async (p: { chatID: string; todo: boolean; upTo?: string }) => {
       // Done with something newer than the owner's screen stays To do, and says so.
       const now = todo.setByOwner(p.chatID, p.todo, p.upTo !== undefined ? { upTo: Date.parse(p.upTo) } : {});
@@ -292,11 +327,23 @@ export function createDispatcher(o: {
         const where = [...new Set(p.issues.map((i) => i.path.join(".") || "params"))].slice(0, 5).join(", ");
         return fail("BAD_PARAMS", `Invalid params for ${action} (${where}).`);
       }
+      // The owner's action on a chat: inbox.db holds that chat's reads until it is done, then reads it with the opId.
+      const chatID = o.inbox && CHAT_ACTIONS.has(action) ? (p.value as { chatID?: string }).chatID : undefined;
+      const end = chatID ? o.inbox!.begin(chatID, ctx.opId) : null;
+      let r: DispatchResult;
       try {
-        return await (handlers[action] as Handler)(p.value, ctx);
+        r = await (handlers[action] as Handler)(p.value, ctx);
       } catch {
-        return fail("INTERNAL", "The connector failed while handling this request.");
+        r = fail("INTERNAL", "The connector failed while handling this request.");
       }
+      const ok = r.kind === "res" && r.ok;
+      const after: Promise<unknown>[] = [];
+      if (end) after.push(end(ok));
+      if (o.inbox && r.kind === "res" && r.ok && ACTIONS[action].write) after.push(o.inbox.caused(action, p.value as Record<string, unknown>, r.data, ctx.opId));
+      const wait = ctx.deadline !== undefined ? Math.min(SYNC_WAIT_MS, ctx.deadline - Date.now() - SYNC_WAIT_MARGIN_MS) : SYNC_WAIT_MS;
+      if (ctx.opId && after.length && wait > 0) await atMost(Promise.all(after), wait);
+      else for (const x of after) x.catch(() => {});
+      return r;
     },
   };
 }

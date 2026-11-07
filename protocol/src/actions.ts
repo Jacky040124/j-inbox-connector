@@ -69,6 +69,7 @@ import {
 import { MAX_RECENT_CHANNELS, MAX_SHOWN_DELEGATIONS, delegationInstruction, delegationRequestID, delegationView, raftChannel } from "./delegations.ts";
 import { MAX_STORED_UPLOADS, MAX_UPLOAD_BYTES, MAX_UPLOAD_CHUNKS, fileName, uploadChunkData, uploadID, uploadInfo, uploadOwner } from "./uploads.ts";
 import { noiseDefinition, noiseSenderAdded, noiseSenderValue, noiseSenders, noiseSettings } from "./noise.ts";
+import { syncPullParams, syncPullResult } from "./sync.ts";
 import { CHAT_APP_KEYS, chatApp, chatLoginFields, chatLoginSessionID, chatLoginState, connectableChatApp, loginFlowID, loginStepID } from "./chat-login.ts";
 
 
@@ -961,6 +962,22 @@ export const ACTIONS = {
     timeoutMs: REQUEST_TIMEOUT_MS,
     rateLimitPerMinute: 60,
     beeper: "none (the connector's To do store)",
+  }),
+
+  sync_pull: define({
+    description:
+      "The owner's page's replica of the inbox (sync.ts): the changes after its cursor, or (no replica, another epoch, a cursor older than the computer kept) a snapshot of the window, a page at a time. Owner only; agents read with list_chats and read_chat.",
+    params: syncPullParams,
+    paramDocs: { epoch: "The replica's epoch (null: none)", cursor: "The last seq the replica applied", page: "A snapshot's next page (next of the page before)" },
+    defaults: {},
+    result: syncPullResult,
+    write: false,
+    needsApprovalForAgents: false,
+    humanOnly: true,
+    streamed: false,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    rateLimitPerMinute: 120,
+    beeper: "none (the connector's inbox.db)",
   }),
 
   get_older_unread: define({

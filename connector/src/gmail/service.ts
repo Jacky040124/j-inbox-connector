@@ -24,6 +24,8 @@ export type GmailServiceOptions = {
   /** While a J-Inbox page is open (default GMAIL_POLL_ACTIVE_INTERVAL_MS). */
   activePollIntervalMs?: number;
   now?: () => number;
+  /** Each account's request pacing (GmailClientOptions): tests that do not test the pacing go faster than Gmail allows. */
+  pacing?: { maxRequestsPerSecond?: number; retryDelaysMs?: number[] };
   log?: (msg: string, fields?: Record<string, string | number | boolean | null>) => void;
   /** Thread metadata for the lists, shared by every account (the service's is kept on disk, sealed). Default: memory only. */
   metaCache?: ThreadMetaCache;
@@ -64,6 +66,7 @@ export function createGmailService(o: GmailServiceOptions) {
       baseURL: o.gmailURL,
       fetchImpl: o.fetchImpl,
       now: o.now,
+      ...o.pacing,
       onReauth: () => {
         if (accounts.get(email)?.status !== "reconnect_required") {
           accounts.setStatus(email, "reconnect_required");

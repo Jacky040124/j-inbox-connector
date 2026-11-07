@@ -77,14 +77,17 @@ async function guard<T>(fn: () => Promise<Outcome<T>>): Promise<Outcome<T>> {
  */
 const NOT_DONE = new Set<ErrorCode>(["BEEPER_DOWN", "BEEPER_UNAUTHORIZED", "RATE_LIMITED", "TIMEOUT"]);
 
-/** Per-request context: one cancel/deadline signal shared by every Beeper call of the request. */
-export type RequestContext = { signal?: AbortSignal; deadline?: number };
+/**
+ * Per-request context: one cancel/deadline signal shared by every Beeper call of the request, and
+ * ("sync.v1") the page's opId for it (reqFrame.opId): the changes the request causes in inbox.db carry it.
+ */
+export type RequestContext = { signal?: AbortSignal; deadline?: number; opId?: string };
 
 /**
  * Context for one `req`: aborted on the cloud's `cancel` (pass its signal) and `marginMs` before
  * `timeoutMs` (use welcome.requestTimeoutMs), so the connector stops before the cloud gives up.
  */
-export function requestContext(o: { timeoutMs: number; marginMs?: number; cancel?: AbortSignal; now?: () => number }): Required<RequestContext> {
+export function requestContext(o: { timeoutMs: number; marginMs?: number; cancel?: AbortSignal; now?: () => number }): { signal: AbortSignal; deadline: number } {
   const margin = o.marginMs ?? Math.min(1000, Math.floor(o.timeoutMs / 10));
   const budget = Math.max(0, o.timeoutMs - margin);
   const timer = AbortSignal.timeout(Math.max(1, budget));

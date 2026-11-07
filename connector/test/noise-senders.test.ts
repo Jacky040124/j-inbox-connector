@@ -27,7 +27,7 @@ import { TodoTracker } from "../src/todo/tracker.ts";
 import { startFakeCloud, type FakeCloud } from "./helpers/fake-cloud.ts";
 import { TEST_JEV_KEY, TEST_JEV_URL, fakeJev, pickLine, type Decide } from "./helpers/fake-jev.ts";
 
-// A cold list reads its threads at Gmail's pace, as in production.
+// Long waits remain possible (walks, retries) though the rig no longer paces Gmail as production does.
 setDefaultTimeout(120_000);
 
 const WARM = "warm@warmup.example.com";
@@ -76,6 +76,8 @@ async function rig(o: RigOptions = {}) {
     gmailURL: fg.url,
     oauthURL: fg.url,
     pollIntervalMs: 3_600_000,
+    // Nothing here tests Gmail's pacing (gmail-quota.test.ts does): 500 reads need not take 42 s.
+    pacing: { maxRequestsPerSecond: 10_000 },
     onChat: (c) => rules.seeChat(c),
     beforeAnnounce: (s, ids) => rules.lookAt(s, ids),
     log: (m) => logs.push(m),

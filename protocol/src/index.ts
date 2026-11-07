@@ -10,6 +10,7 @@ export * from "./noise.ts";
 export * from "./drafts.ts";
 export * from "./delegations.ts";
 export * from "./chat-login.ts";
+export * from "./sync.ts";
 export * from "./actions.ts";
 export * from "./frames.ts";
 export * from "./agent.ts";

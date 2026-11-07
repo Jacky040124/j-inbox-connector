@@ -17,7 +17,7 @@ import { MAX_PAGE_LIMIT, MAX_SEND_TEXT_LENGTH } from "../src/limits.ts";
 import { account, chat, chatID, message } from "./fixtures/examples.ts";
 import { parse } from "../src/schema.ts";
 
-const EXPECTED = ["get_noise_senders", "add_noise_sender", "add_noise_sender_of_chat", "remove_noise_sender", "status", "list_chats", "unread_summary", "read_chat", "search_messages", "draft_reply", "send_message", "react", "mark_read", "archive", "remove_account", "compose_email", "gmail_connect", "snooze_chat", "unsnooze_chat", "list_snoozed", "request_draft", "cancel_draft", "discard_draft", "mark_draft_sent", "list_drafts", "list_raft_agents", "set_draft_agents", "request_delegation", "cancel_delegation", "dismiss_delegation", "list_delegations", "draft_store_put", "draft_store_get", "draft_store_set_text", "draft_store_delete", "upload_store_begin", "upload_store_chunk", "upload_store_commit", "upload_store_delete", "upload_store_read", "get_email_html", "discard_upload", "get_noise_settings", "set_noise_definition", "set_noise", "set_todo", "get_older_unread", "add_older_unread", "chat_apps", "chat_login_start", "chat_login_poll", "chat_login_submit", "chat_login_cancel", "get_media"];
+const EXPECTED = ["get_noise_senders", "add_noise_sender", "add_noise_sender_of_chat", "remove_noise_sender", "status", "list_chats", "unread_summary", "read_chat", "search_messages", "draft_reply", "send_message", "react", "mark_read", "archive", "remove_account", "compose_email", "gmail_connect", "snooze_chat", "unsnooze_chat", "list_snoozed", "request_draft", "cancel_draft", "discard_draft", "mark_draft_sent", "list_drafts", "list_raft_agents", "set_draft_agents", "request_delegation", "cancel_delegation", "dismiss_delegation", "list_delegations", "draft_store_put", "draft_store_get", "draft_store_set_text", "draft_store_delete", "upload_store_begin", "upload_store_chunk", "upload_store_commit", "upload_store_delete", "upload_store_read", "get_email_html", "discard_upload", "get_noise_settings", "set_noise_definition", "set_noise", "set_todo", "sync_pull", "get_older_unread", "add_older_unread", "chat_apps", "chat_login_start", "chat_login_poll", "chat_login_submit", "chat_login_cancel", "get_media"];
 const CHAT_LOGIN: string[] = ["chat_apps", "chat_login_start", "chat_login_poll", "chat_login_submit", "chat_login_cancel"];
 const NOISE_OWNER: string[] = ["get_noise_settings", "set_noise_definition", "set_noise", "get_noise_senders", "add_noise_sender", "add_noise_sender_of_chat", "remove_noise_sender"];
 const DRAFT_OWNER: string[] = ["request_draft", "cancel_draft", "discard_draft", "mark_draft_sent", "list_drafts", "list_raft_agents", "set_draft_agents"];
@@ -34,7 +34,7 @@ describe("catalogue", () => {
     expect(writes).toEqual(["add_noise_sender", "add_noise_sender_of_chat", "remove_noise_sender", "archive", "cancel_delegation", "cancel_draft", "compose_email", "discard_draft", "discard_upload", "dismiss_delegation", "draft_reply", "draft_store_delete", "draft_store_put", "draft_store_set_text", "add_older_unread", "gmail_connect", "mark_draft_sent", "mark_read", "react", "remove_account", "request_delegation", "request_draft", "send_message", "set_draft_agents", "set_noise", "set_noise_definition", "set_todo", "snooze_chat", "unsnooze_chat", "upload_store_begin", "upload_store_chunk", "upload_store_commit", "upload_store_delete", "chat_login_start", "chat_login_submit", "chat_login_cancel"].sort());
   });
   test("human-only actions: remove_account, the draft and delegation actions and the cloud-only gmail_connect and draft store, and never one that agents could get approved", () => {
-    expect(ACTION_NAMES.filter((n) => ACTIONS[n].humanOnly === true) as string[]).toEqual(["remove_account", "gmail_connect", ...DRAFT_OWNER, ...DELEGATION_OWNER, ...DRAFT_STORE, ...UPLOAD_STORE, "get_email_html", "discard_upload", ...NOISE_OWNER, "set_todo", "get_older_unread", "add_older_unread", ...CHAT_LOGIN]);
+    expect(ACTION_NAMES.filter((n) => ACTIONS[n].humanOnly === true) as string[]).toEqual(["remove_account", "gmail_connect", ...DRAFT_OWNER, ...DELEGATION_OWNER, ...DRAFT_STORE, ...UPLOAD_STORE, "get_email_html", "discard_upload", ...NOISE_OWNER, "set_todo", "sync_pull", "get_older_unread", "add_older_unread", ...CHAT_LOGIN]);
     expect(ACTION_NAMES.filter((n) => (ACTIONS[n] as { cloudOnly?: boolean }).cloudOnly === true) as string[]).toEqual(["gmail_connect", ...DRAFT_STORE, ...UPLOAD_STORE, "get_email_html"]);
     for (const n of ACTION_NAMES) if (ACTIONS[n].humanOnly) expect(ACTIONS[n].needsApprovalForAgents).toBe(false);
     for (const n of ACTION_NAMES) if ((ACTIONS[n] as { cloudOnly?: boolean }).cloudOnly) expect(ACTIONS[n].humanOnly).toBe(true);
@@ -146,6 +146,7 @@ const VALID: Record<ActionName, unknown[]> = {
   add_noise_sender_of_chat: [{ chatID: "gmail:owner@example.com:18c2f0a1b2c3d4e5" }],
   remove_noise_sender: [{ entry: "warm@example.com" }, { entry: "example.com", undo: true }],
   set_todo: [{ chatID, todo: true }, { chatID: "gmail:owner@example.com:18c2f0a1b2c3d4e5", todo: false }],
+  sync_pull: [{}, { epoch: null, cursor: null }, { epoch: "ep_0123456789", cursor: 41 }, { epoch: "ep_0123456789", cursor: 0, page: "p.2-abc" }],
   get_older_unread: [{ source: "beeper" }, { source: "gmail" }],
   add_older_unread: [{ source: "beeper" }, { source: "gmail:owner@example.com" }],
   chat_apps: [{}],
@@ -239,6 +240,7 @@ const INVALID: Record<ActionName, unknown[]> = {
   add_noise_sender_of_chat: [{}, { chatID: "" }, { chatID, entry: "warm@example.com" }],
   remove_noise_sender: [{}, { entry: "x" }, { entry: "warm@example.com", undo: "yes" }],
   set_todo: [{ chatID }, { chatID, todo: "true" }, { chatID, todo: 1 }, { todo: true }, { chatID, todo: true, at: "x" }, { chatID: "a b", todo: true }],
+  sync_pull: [{ epoch: "short" }, { cursor: -1 }, { cursor: "3" }, { page: "a b" }, { epoch: "ep_0123456789", since: 3 }],
   get_older_unread: [{}, { source: "other" }, { source: "gmail", extra: 1 }],
   add_older_unread: [{}, { source: "" }, { source: 1 }, { source: "a b" }, { source: "beeper", extra: 1 }],
   chat_apps: [{ app: "x" }],
@@ -352,6 +354,7 @@ const RESULTS: Record<ActionName, unknown> = {
   add_noise_sender_of_chat: { entry: { value: "warm@example.com", kind: "address", origin: "owner", addedAt: "2026-11-05T09:00:00.000Z" }, added: false, chatNoise: true },
   remove_noise_sender: { entry: "warm@example.com", removed: true },
   set_todo: { chatID, todo: false },
+  sync_pull: { kind: "delta", epoch: "ep_0123456789", head: 0, changes: [], more: false },
   get_older_unread: { items: [{ source: "gmail:owner@example.com", count: 2400, adding: false, counting: false }, { source: "beeper", count: null, adding: true, counting: false }, { source: "gmail:other@example.com", count: null, adding: false, counting: true }] },
   add_older_unread: { source: "beeper", adding: true },
   chat_apps: { items: [{ app: "whatsapp", state: "available", onDevice: true, flows: [{ id: "qr", name: "QR code" }], accounts: [{ accountID: "local-whatsapp_ba_x", name: "+1 555 0100", status: "connected", needsReconnect: false, removable: true }] }, { app: "imessage", state: "unavailable", onDevice: true, flows: [], accounts: [] }] },

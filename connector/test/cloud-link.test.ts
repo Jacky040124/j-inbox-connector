@@ -129,10 +129,56 @@ describe("requests", () => {
     await cloud.waitFor(() => d.calls.length === 2, 3000, "draft store call");
     expect(d.calls).toEqual(["chat_apps", "draft_store_get"]);
   });
-  test("hello announces the protocol's capabilities", async () => {
+  test("hello announces the protocol's capabilities; sync.v1 only while there is an inbox to sync from (syncReady)", async () => {
     const { cloud } = await setup();
     const { CAPABILITIES } = await import("@j-inbox/protocol");
-    expect((cloud.hello() as any).capabilities).toEqual(Object.values(CAPABILITIES));
+    expect((cloud.hello() as any).capabilities).toEqual(Object.values(CAPABILITIES).filter((c) => c !== CAPABILITIES.sync));
+    let ready = false;
+    const b = await setup({ link: { syncReady: () => ready } });
+    expect((b.cloud.hello() as any).capabilities).not.toContain(CAPABILITIES.sync);
+    // Every hello asks again: ready after a reconnect.
+    ready = true;
+    b.cloud.close(1012);
+    await b.cloud.waitFor(() => b.cloud.frames.filter((f) => f.frame.type === "hello").length === 2, 3000, "second hello");
+    expect((b.cloud.frames.filter((f) => f.frame.type === "hello")[1]!.frame as any).capabilities).toEqual(Object.values(CAPABILITIES));
+    // A syncReady that throws counts as not ready.
+    const c = await setup({ link: { syncReady: () => { throw new Error("x"); } } });
+    expect((c.cloud.hello() as any).capabilities).not.toContain(CAPABILITIES.sync);
+  });
+  test("a req's opId reaches the dispatcher's context; a req without one has none", async () => {
+    const seen: (string | undefined)[] = [];
+    const { cloud } = await setup({ impl: async (a, _p, ctx) => (seen.push((ctx as { opId?: string }).opId), okRes({ echo: a })) });
+    cloud.send({ type: "req", id: "rop1", action: "mark_read", params: { chatID: "!a:b" }, opId: "op_abcdef12" });
+    await cloud.waitFor(() => seen.length === 1, 3000, "first");
+    await cloud.req("mark_read", { chatID: "!a:b" });
+    expect(seen).toEqual(["op_abcdef12", undefined]);
+  });
+  test("sync frames: sent as they are while connected; refused (false) and never kept while not", async () => {
+    const { cloud, link } = await setup();
+    const frame = { type: "sync" as const, epoch: "ep_test0001", changes: [{ seq: 1, at: new Date().toISOString(), op: "chat.remove" as const, chatID: "!a:b" }] };
+    expect(link.sendSync(frame)).toBe(true);
+    await cloud.waitFor(() => cloud.frames.some((f) => f.frame.type === "sync"), 3000, "sync frame");
+    expect(cloud.frames.find((f) => f.frame.type === "sync")!.frame).toEqual(frame);
+    // An invalid one never leaves.
+    expect(link.sendSync({ ...frame, changes: [] })).toBe(false);
+    cloud.state.autoWelcome = false;
+    cloud.close(1012);
+    await cloud.waitFor(() => link.state.status !== "connected", 3000, "down");
+    expect(link.sendSync({ ...frame, changes: [{ ...frame.changes[0]!, seq: 2 }] })).toBe(false);
+    cloud.state.autoWelcome = true;
+    await cloud.waitFor(() => cloud.frames.filter((f) => f.frame.type === "hello").length >= 2, 3000, "hello again");
+    cloud.welcomeNow();
+    await cloud.waitFor(() => link.state.status === "connected", 3000, "up");
+    await Bun.sleep(30);
+    expect(cloud.frames.filter((f) => f.frame.type === "sync").length).toBe(1);
+  });
+  test("sync_pull is never run for an agent, whoever relays it", async () => {
+    const { cloud, d } = await setup();
+    cloud.send({ type: "req", id: "rsp1", action: "sync_pull", params: {}, caller: { type: "agent", name: "Agent" } });
+    await Bun.sleep(30);
+    expect(d.calls).toEqual([]);
+    await cloud.req("sync_pull", {});
+    expect(d.calls).toEqual(["sync_pull"]);
   });
   test("unknown actions are NOT_ALLOWED; non-object params BAD_PARAMS; garbage ignored; link stays up", async () => {
     const { cloud, d, link } = await setup();

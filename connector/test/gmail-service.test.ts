@@ -83,6 +83,8 @@ describe("Gmail in the service", () => {
     // Nothing the connector wrote to disk holds mail content or a Google token (secrets file aside).
     const audit = readFileSync(paths.auditFile, "utf8");
     expect(audit).toContain("gmail.connected");
+    // inbox.db (the inbox kept for sync, "sync.v1") holds the mail too, sealed: it is among the files looked at.
+    expect(filesUnder(dir)).toContain(paths.inboxFile);
     for (const f of filesUnder(dir)) {
       if (f === paths.secretsFile) continue;
       const text = readFileSync(f, "utf8");

@@ -124,6 +124,7 @@ camelCase (like Beeper). Agent writes marked "approval" go through the approval 
 | `add_noise_sender_of_chat` | `chatID` | `noiseSenderAdded {entry, added, chatNoise}` | yes (`humanOnly`) | n/a | Gmail `threads.get` metadata (From, Subject) |
 | `remove_noise_sender` | `entry undo?` | `{entry, removed}` | yes (`humanOnly`) | n/a | the connector's noise store |
 | `set_todo` | `chatID todo upTo?(iso time: for Done, the newest message on the owner's screen)` | `{chatID, todo}`: the flag as it now stands (idempotent) | yes (`humanOnly`) | n/a | the connector's To do store (see "To do"); never Beeper or Gmail |
+| `sync_pull` | `epoch?(null: no replica) cursor?(last seq applied) page?(a snapshot's next)` | `{kind: "delta", epoch, head, changes, more}` or `{kind: "snapshot", epoch, head, chats: {chat, messages}[], next}` (see "Sync") | yes (`humanOnly`) | 120/min | the connector's inbox.db (`"sync.v1"`); never Beeper or Gmail |
 | `get_older_unread` | `source`(`beeper` or `gmail`: which sources) | `{items: {source, count (null: not known), adding, counting}[]}`: what To do's first run left out, a source with nothing to say not listed | (`humanOnly`) | n/a | none: the connector's To do store, where the first run left its count (see "To do") |
 | `add_older_unread` | `source`(`beeper`, or `gmail:<address>`) | `{source, adding}` (idempotent; false: nothing to bring in) | yes (`humanOnly`) | n/a | none as an answer; in the background, the same reads as a first run, never a write |
 | `get_media` | `url` (an attachment `url` or chat `avatarURL` from another result) | `res` = `{mimeType, size (null if unknown), fileName?}` then `chunk` frames | | | `GET /v1/assets/serve?url=`; `gmail://` URLs: Gmail `messages.attachments.get` |
@@ -641,6 +642,31 @@ empty Beeper page ends the walk even if `hasMore` was true (real iMessage histor
   the item is gone for good (deleted, or out of the scan budget) the answer is `BAD_PARAMS`
   ("cursor expired, reload"). On an older page the page itself is stable; if the item vanished
   that page is restarted (may repeat, never skips).
+
+## Sync (`sync.ts`, `"sync.v1"`, task #57)
+
+The owner's computer is the only truth about the inbox; the page keeps a replica of it. The
+connector keeps the window (chats active in the last `SYNC_WINDOW_DAYS` = 90 days, or not
+archived; each with its newest `SYNC_MESSAGES_PER_CHAT` = 50 messages) materialized in inbox.db and
+numbers every change in one changelog (`epoch`, `seq`).
+
+- **Changes** (`syncChange`): `chat.upsert {chat: ChatSummary}`, `chat.remove {chatID}`,
+  `messages.upsert {chatID, messages}`, `messages.remove {chatID, messageIDs}`; each with `seq`, `at`
+  and the `opId` of the owner's request that caused it, if any. A change carries the whole new
+  state of what it names, never a patch: applying it twice changes nothing.
+- **Pull** (`sync_pull`, an action like any other, relayed by the cloud): no replica, another epoch
+  or a cursor older than the connector kept (at least `SYNC_CHANGELOG_KEEP` changes) answer a
+  `snapshot`, newest activity first, page by page (`next`); otherwise a `delta` from `cursor + 1`
+  (`more`: pull again from its last seq). After the snapshot's last page the page sets cursor =
+  `head` and pulls a delta.
+- **Push** (`syncFrame`, a connector frame `{type: "sync", epoch, changes}`): sent as changes
+  happen, in seq order. The cloud relays it as-is to every open page as a /live `sync` message and
+  keeps nothing of it. A page that sees a seq other than cursor + 1 (or another epoch) stops
+  applying and pulls.
+- **opId** (`reqFrame.opId`): the page's id for one of its own requests; the changes the request
+  causes carry it, so the page's optimistic copy of the request ends when it sees them.
+- The cloud parses a change only as far as the frame's schema and stores none of it; privacy is
+  as for read_chat's answers, which already pass through.
 
 ## Connector <-> cloud WebSocket (`wss://<app>/connect`)
 

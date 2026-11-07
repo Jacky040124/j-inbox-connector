@@ -54,7 +54,7 @@ beforeEach(async () => {
   clock.now = T0;
   fb.reset();
   fg.google.reset();
-  gmail = createGmailService({ secrets: new MemorySecretStore(), refresh: cloudTokenRefresher({ cloudURL: cloud.url, deviceToken: DEVICE_TOKEN }), gmailURL: fg.url, oauthURL: fg.url });
+  gmail = createGmailService({ secrets: new MemorySecretStore(), refresh: cloudTokenRefresher({ cloudURL: cloud.url, deviceToken: DEVICE_TOKEN }), gmailURL: fg.url, oauthURL: fg.url, pacing: { maxRequestsPerSecond: 10_000 } });
   await gmail.accounts.add(OWNER_EMAIL, fg.google.issueRefreshToken(OWNER_EMAIL));
   fg.google.mailbox().messages.clear();
 });

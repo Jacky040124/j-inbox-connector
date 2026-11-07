@@ -28,6 +28,7 @@ import {
   type Schema,
 } from "./schema.ts";
 import { errorBody, errorCode } from "./errors.ts";
+import { syncFrame } from "./sync.ts";
 import { beeperHealth, chatID, messageID, ownId, versionString } from "./model.ts";
 import { SNOOZE_REASONS } from "./snooze.ts";
 import { draftMeta, MAX_ACTIVE_DRAFTS, raftAgentID } from "./drafts.ts";
@@ -417,6 +418,8 @@ export const liveServerMessage = discriminated("type", {
    * list_delegations {chatID}.
    */
   delegation: object({ type: literal("delegation"), request: delegationMeta }),
+  /** Changes to the inbox ("sync.v1", added 2026-11-06): the connector's `sync` frame relayed as-is (sync.ts). */
+  sync: syncFrame,
 });
 
 export const liveClientMessage = discriminated("type", {

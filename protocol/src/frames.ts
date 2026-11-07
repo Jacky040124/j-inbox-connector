@@ -26,6 +26,7 @@ import {
 import { CONNECTOR_ACTION_NAMES } from "./actions.ts";
 import { errorBody, type ErrorCode } from "./errors.ts";
 import { beeperHealth, chatID, messageID, networkName, ownId, versionString } from "./model.ts";
+import { syncFrame, syncOpId } from "./sync.ts";
 import {
   MAX_CHUNKS,
   MAX_CHUNK_BASE64_LENGTH,
@@ -68,8 +69,10 @@ const JSON_LIMITS = { maxDepth: 32, maxKeys: 50_000 };
  * "chat-login.v1" (added 2026-11-05): it lists J-Inbox's chat apps and connects, reconnects them through Beeper's own sign-in
  * (chat_apps, chat_login_start, chat_login_poll, chat_login_submit, chat_login_cancel), and status leaves out Beeper's own
  * account and its network.
+ * "sync.v1" (added 2026-11-06, task #57): it keeps the inbox materialized and numbered (sync.ts): it answers sync_pull,
+ * sends `sync` frames, and puts a request's opId on the changes it causes.
  */
-export const CAPABILITIES = { media: "media.v1", gmail: "gmail.v1", drafts: "drafts.v1", delegations: "delegations.v1", attachments: "attachments.v1", noise: "noise.v1", viewers: "viewers.v1", listSource: "list-source.v1", uploadRead: "upload-read.v1", emailHtml: "email-html.v1", todo: "todo.v1", olderUnread: "older-unread.v1", noiseSenders: "noise-senders.v1", chatLogin: "chat-login.v1" } as const;
+export const CAPABILITIES = { media: "media.v1", gmail: "gmail.v1", drafts: "drafts.v1", delegations: "delegations.v1", attachments: "attachments.v1", noise: "noise.v1", viewers: "viewers.v1", listSource: "list-source.v1", uploadRead: "upload-read.v1", emailHtml: "email-html.v1", todo: "todo.v1", olderUnread: "older-unread.v1", noiseSenders: "noise-senders.v1", chatLogin: "chat-login.v1", sync: "sync.v1" } as const;
 
 export const helloFrame = object({
   type: literal("hello"),
@@ -158,6 +161,7 @@ export const connectorFrame = discriminated("type", {
   res: resFrame,
   chunk: chunkFrame,
   event: eventFrame,
+  sync: syncFrame,
 });
 
 // ---- cloud -> connector ----
@@ -185,6 +189,8 @@ export const reqFrame = object({
    * the Raft display name (sanitizeLine'd by the cloud), never a chat or message value.
    */
   caller: optional(object({ type: enumOf(["human", "agent"] as const), name: optional(string({ min: 1, max: 200 })) })),
+  /** Optional ("sync.v1", added 2026-11-06): the page's id for this request; the changes it causes carry it (sync.ts). */
+  opId: optional(syncOpId),
 });
 
 /** The cloud no longer needs the answer (caller gone or timed out). */

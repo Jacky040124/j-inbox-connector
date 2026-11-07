@@ -4,7 +4,10 @@
 // ChunkWindow flow control; heartbeat; a connect timeout from socket creation to welcome;
 // reconnect with backoffDelay (reset only after a stable connection), and after a long delay on
 // 4410 SUPERSEDED; stop for good on 4403/4409/4426, and on 4401 only after it repeats (a token
-// the cloud really rejects); graceful shutdown.
+// the cloud really rejects); graceful shutdown. "sync.v1": a req's opId goes on its context (the
+// changes the action causes in inbox.db carry it), `sync` frames go out with sendSync (dropped, never
+// kept, while the link is down: pages catch up by cursor), and the hello says "sync.v1" only while
+// syncReady() (inbox.db open and its first build started).
 import {
   ACTIONS,
   CAPABILITIES,
@@ -33,6 +36,7 @@ import {
   type ErrorCode,
   type EventFrame,
   type ReqFrame,
+  type SyncFrame,
   type WelcomeFrame,
 } from "@j-inbox/protocol";
 import { requestContext } from "./actions.ts";
@@ -43,8 +47,8 @@ export type LinkStatus = "idle" | "connecting" | "connected" | "disconnected" | 
 export type StopReason = "shutdown" | "revoked" | "unauthenticated" | "replaced" | "version";
 export type LinkState = { status: LinkStatus; since: number; closeCode?: number; reason?: StopReason };
 
-/** Actions this computer never runs for an agent, whoever relays them (remove_account, chat_apps, chat_login_*). */
-export const NEVER_FOR_AGENTS: ReadonlySet<string> = new Set(["remove_account", "chat_apps", "chat_login_start", "chat_login_poll", "chat_login_submit", "chat_login_cancel"]);
+/** Actions this computer never runs for an agent, whoever relays them (remove_account, chat_apps, chat_login_*, sync_pull: the replica is the owner's page's). */
+export const NEVER_FOR_AGENTS: ReadonlySet<string> = new Set(["remove_account", "chat_apps", "chat_login_start", "chat_login_poll", "chat_login_submit", "chat_login_cancel", "sync_pull"]);
 
 export type RequestLog = { action: string; ok: boolean; code?: ErrorCode; ms: number; caller?: { type: "human" | "agent"; name?: string } };
 
@@ -70,7 +74,9 @@ export type CloudLinkOptions = {
   connectorVersion: string;
   /** Called before every hello. Failures and invalid values fall back to null / []. */
   hello: () => Promise<{ beeperVersion: string | null; networks: string[] }>;
-  dispatcher: { dispatch(action: string, params: unknown, ctx?: { signal?: AbortSignal; deadline?: number }): Promise<DispatchResult>; isWrite(action: string): boolean };
+  dispatcher: { dispatch(action: string, params: unknown, ctx?: { signal?: AbortSignal; deadline?: number; opId?: string }): Promise<DispatchResult>; isWrite(action: string): boolean };
+  /** "sync.v1" goes in the hello only while this says so (inbox.db open, its first build started). Without it: never. */
+  syncReady?: () => boolean;
   /** After every welcome (first connect and reconnects): re-sync, Beeper events are at-most-once. */
   onWelcome?: () => void;
   /** The cloud's `viewers` frame ("viewers.v1"): how many browser pages are open; 0 again when the link drops. */
@@ -115,8 +121,11 @@ type Entry = {
   caller?: RequestLog["caller"];
   timer?: ReturnType<typeof setTimeout>;
   /** Until dispatched: the params and the request's deadline context. */
-  args?: { p: unknown; ctx: ReturnType<typeof requestContext>; minStartMs: number };
+  args?: { p: unknown; ctx: RunContext; minStartMs: number };
 };
+
+/** A request's context: its deadline and cancel signal, and the page's opId when it sent one ("sync.v1"). */
+type RunContext = ReturnType<typeof requestContext> & { opId?: string };
 
 const OPEN = 1;
 const SHUTDOWN_CODE = 1001;
@@ -261,7 +270,8 @@ export class CloudLink {
       beeperVersion,
       platform: this.o.platform ?? { os: process.platform.slice(0, 32) || "unknown", arch: process.arch.slice(0, 32) || "unknown" },
       networks,
-      capabilities: Object.values(CAPABILITIES),
+      // sync.v1 only with an inbox to answer sync_pull from (the cloud and the pages rely on it).
+      capabilities: Object.values(CAPABILITIES).filter((c) => c !== CAPABILITIES.sync || this.syncReady()),
     });
   }
 
@@ -285,6 +295,14 @@ export class CloudLink {
         return this.pending.get(f.id)?.window?.ack(f.seq);
       case "viewers":
         return this.viewers(f.count);
+    }
+  }
+
+  private syncReady(): boolean {
+    try {
+      return this.o.syncReady?.() === true;
+    } catch {
+      return false;
     }
   }
 
@@ -429,7 +447,7 @@ export class CloudLink {
     const withFile = (f.action === "send_message" || f.action === "compose_email") && typeof f.params.attachmentId === "string";
     const timeoutMs = media ? MEDIA_TIMEOUT_MS : withFile ? SEND_WITH_FILE_TIMEOUT_MS : (this.welcome?.requestTimeoutMs ?? 15_000);
     const margin = this.o.marginMs ?? Math.min(1000, Math.floor(timeoutMs / 10));
-    const ctx = requestContext({ timeoutMs, marginMs: margin, cancel: e.ctl.signal });
+    const ctx: RunContext = { ...requestContext({ timeoutMs, marginMs: margin, cancel: e.ctl.signal }), ...(f.opId ? { opId: f.opId } : {}) };
     // Watchdog: answer before the cloud gives up, whatever the action is doing.
     e.timer = setTimeout(() => {
       if (e.answered) return;
@@ -482,7 +500,7 @@ export class CloudLink {
     }
   }
 
-  private async run(e: Entry, params: unknown, ctx: ReturnType<typeof requestContext>) {
+  private async run(e: Entry, params: unknown, ctx: RunContext) {
     let r: DispatchResult;
     try {
       r = await this.o.dispatcher.dispatch(e.action, params, ctx);
@@ -563,6 +581,17 @@ export class CloudLink {
   sendEvent(f: EventFrame): boolean {
     if (this.state.status !== "connected" || !this.ws) return false;
     if (f.kind !== "status" && (this.ws.bufferedAmount ?? 0) > this.o.maxBufferedEventBytes) return false;
+    return this.sendFrame(f);
+  }
+
+  /**
+   * inbox.db's changes ("sync.v1"): the cloud relays the frame to every open page. Dropped (false)
+   * unless connected, and under the same backpressure as chat events: a page that misses one sees a
+   * seq gap and pulls. Never kept for later.
+   */
+  sendSync(f: SyncFrame): boolean {
+    if (this.state.status !== "connected" || !this.ws) return false;
+    if ((this.ws.bufferedAmount ?? 0) > this.o.maxBufferedEventBytes) return false;
     return this.sendFrame(f);
   }
 

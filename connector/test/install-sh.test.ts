@@ -70,9 +70,14 @@ function shims(files: Record<string, string>): string {
   return d;
 }
 
+// The script is for an Apple-silicon Mac: unless a test says otherwise (its own uname shim, first on
+// PATH), it runs as if on one, so the tests mean the same on a Mac and on a Linux CI machine.
+let mac: string | undefined;
+const appleSilicon = () => (mac ??= shims({ uname: 'case "$1" in -s) echo Darwin;; -m) echo arm64;; esac', sysctl: "echo 0" }));
+
 // Async spawn: the release server runs in this process, so a blocking spawn would starve it.
 async function install(home: string, o: { env?: Record<string, string>; pathPrefix?: string; args?: string[] } = {}) {
-  const env: Record<string, string> = { PATH: (o.pathPrefix ? o.pathPrefix + ":" : "") + SYSTEM_PATH, HOME: home, TMPDIR: scratch, SHELL: "/bin/zsh", J_INBOX_DOWNLOAD_URL: base, J_INBOX_NO_SETUP: "1", ...o.env };
+  const env: Record<string, string> = { PATH: (o.pathPrefix ? o.pathPrefix + ":" : "") + appleSilicon() + ":" + SYSTEM_PATH, HOME: home, TMPDIR: scratch, SHELL: "/bin/zsh", J_INBOX_DOWNLOAD_URL: base, J_INBOX_NO_SETUP: "1", ...o.env };
   const p = Bun.spawn(["/bin/sh", SCRIPT, ...(o.args ?? [])], { env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
   return { code, out, err, text: out + err };

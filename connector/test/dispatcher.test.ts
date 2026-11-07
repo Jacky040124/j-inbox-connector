@@ -6,7 +6,7 @@ import { CLOUD_ACTION_NAMES, CONNECTOR_ACTION_NAMES, parseActionResult, type Act
 import { createBeeperClient } from "../src/beeper-client.ts";
 import { createActions } from "../src/actions.ts";
 import { AssetAllowlist } from "../src/assets.ts";
-import { createDispatcher } from "../src/dispatcher.ts";
+import { SYNC_WAIT_MARGIN_MS, SYNC_WAIT_MS, createDispatcher } from "../src/dispatcher.ts";
 
 let fb: FakeBeeper;
 beforeAll(async () => {
@@ -58,6 +58,7 @@ const CASES: Record<ConnectorActionName, { params: () => Record<string, unknown>
   set_noise_definition: { params: () => ({ definition: "Newsletters" }), routes: [] },
   // The To do store is local: nothing goes to Beeper for it.
   set_todo: { params: () => ({ chatID: CHAT_IDS.imessageAlice, todo: true }), routes: [] },
+  sync_pull: { params: () => ({}), routes: [], error: "NOT_SUPPORTED" },
   get_older_unread: { params: () => ({ source: "beeper" }), routes: [] },
   add_older_unread: { params: () => ({ source: "beeper" }), routes: [] },
   set_noise: { params: () => ({ chatID: CHAT_IDS.imessageAlice, noise: true }), routes: ["GET /v1/chats/{chatID}", "GET /v1/chats/{chatID}/messages"] },
@@ -189,5 +190,70 @@ describe("dispatcher whitelist", () => {
     const d = createDispatcher({ actions, client, assets: new AssetAllowlist() });
     const r = await d.dispatch("archive", { chatID: CHAT_IDS.imessageAlice });
     expect(r.kind === "res" && !r.ok && r.error.code).toBe("INTERNAL");
+  });
+});
+
+describe("dispatcher and the inbox kept for sync", () => {
+  function withInbox(o: { pull?: (p: unknown) => any; slowMs?: number } = {}) {
+    const client = createBeeperClient({ baseURL: fb.url, token: fb.token, timeoutMs: 3000 });
+    const assets = new AssetAllowlist();
+    const log: string[] = [];
+    const inbox = {
+      pull: o.pull ?? (() => ({ ok: true, data: { kind: "delta", epoch: "ep_dispatch1", head: 3, changes: [], more: false } })),
+      begin: (chatID: string, opId?: string) => {
+        log.push(`begin ${chatID} ${opId ?? "-"}`);
+        return async (ok: boolean) => {
+          log.push(`end ${ok}`);
+          await Bun.sleep(o.slowMs ?? 0);
+          log.push("read");
+        };
+      },
+      caused: async (action: string, _p: unknown, _d: unknown, opId?: string) => void log.push(`caused ${action} ${opId ?? "-"}`),
+    };
+    return { d: createDispatcher({ actions: createActions(client, { assets, connectorVersion: "0.1.0" }), client, assets, inbox: inbox as never }), log };
+  }
+
+  test("sync_pull answers from the inbox, checked against the contract; without an inbox NOT_SUPPORTED", async () => {
+    const { d } = withInbox();
+    expect(await d.dispatch("sync_pull", { epoch: null })).toEqual({ kind: "res", ok: true, data: { kind: "delta", epoch: "ep_dispatch1", head: 3, changes: [], more: false } });
+    const bad = withInbox({ pull: () => ({ ok: true, data: { kind: "delta", epoch: "x", head: -1, changes: [], more: false } }) });
+    expect(((await bad.d.dispatch("sync_pull", {})) as any).error?.code).toBe("INTERNAL");
+    const refused = withInbox({ pull: () => ({ ok: false, error: { code: "BAD_PARAMS", message: "page" } }) });
+    expect(((await refused.d.dispatch("sync_pull", { page: "s1.x" })) as any).error?.code).toBe("BAD_PARAMS");
+    expect(((await make().d.dispatch("sync_pull", {})) as any).error?.code).toBe("NOT_SUPPORTED");
+  });
+
+  test("an action on a chat is held around it in the inbox; with an opId the answer waits for the read, without one it does not", async () => {
+    const a = withInbox({ slowMs: 60 });
+    const r = (await a.d.dispatch("mark_read", { chatID: CHAT_IDS.imessageAlice }, { opId: "op_disp0001" })) as any;
+    expect(r.ok).toBe(true);
+    expect(a.log.sort()).toEqual([`begin ${CHAT_IDS.imessageAlice} op_disp0001`, "caused mark_read op_disp0001", "end true", "read"]);
+    const b = withInbox({ slowMs: 60 });
+    await b.d.dispatch("mark_read", { chatID: CHAT_IDS.imessageAlice });
+    expect(b.log).toEqual([`begin ${CHAT_IDS.imessageAlice} -`, "end true", "caused mark_read -"]);
+    // A failed action ends the hold as failed; a read is never held.
+    const c = withInbox();
+    fb.failNext({ route: "/v1/chats/{chatID}/archive", status: 401 });
+    await c.d.dispatch("archive", { chatID: CHAT_IDS.imessageAlice }, { opId: "op_disp0002" });
+    await c.d.dispatch("read_chat", { chatID: CHAT_IDS.imessageAlice }, { opId: "op_disp0003" });
+    expect(c.log.slice(0, 2)).toEqual([`begin ${CHAT_IDS.imessageAlice} op_disp0002`, "end false"]);
+    expect(c.log.join("\n")).not.toContain("op_disp0003");
+  });
+
+  test("the wait for the read never outlasts the request's deadline: a write that took long still answers what it did, before the cloud link's watchdog", async () => {
+    // The read is slower than SYNC_WAIT_MS: only the deadline (less SYNC_WAIT_MARGIN_MS) bounds the wait.
+    const a = withInbox({ slowMs: SYNC_WAIT_MS * 3 });
+    const t0 = Date.now();
+    const r = (await a.d.dispatch("mark_read", { chatID: CHAT_IDS.imessageAlice }, { opId: "op_disp0004", deadline: Date.now() + SYNC_WAIT_MARGIN_MS + 300 })) as any;
+    const took = Date.now() - t0;
+    expect(r.ok).toBe(true);
+    expect(took).toBeGreaterThanOrEqual(250);
+    expect(took).toBeLessThan(SYNC_WAIT_MS / 2);
+    expect(a.log).not.toContain("read");
+    // A deadline already (nearly) here: the answer goes at once.
+    const b = withInbox({ slowMs: SYNC_WAIT_MS * 3 });
+    const t1 = Date.now();
+    expect(((await b.d.dispatch("mark_read", { chatID: CHAT_IDS.imessageAlice }, { opId: "op_disp0005", deadline: Date.now() + SYNC_WAIT_MARGIN_MS / 2 })) as any).ok).toBe(true);
+    expect(Date.now() - t1).toBeLessThan(SYNC_WAIT_MS / 2);
   });
 });
